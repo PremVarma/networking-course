@@ -1,0 +1,1926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 12: Docker &amp; Kubernetes Networking — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html" class="active"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 12 of 15</p>
+<h1>Docker &amp; Kubernetes Networking</h1>
+<p class="lede">You have packaged your Spring Boot app into a container and it "works on your machine." Then you ran
+two of them and they fought over port 8080. Then you tried to make them talk and discovered that
+<code>localhost</code> inside a container is not the <code>localhost</code> you expected. This chapter is the bridge
+between everything you have learned — IP, ports, NAT, DNS, load balancers, reverse proxies, VPC subnets — and the
+world where applications no longer run on machines but inside ephemeral boxes that get created and destroyed by
+the thousand. By the end you will be able to trace a packet from a browser, through a Kubernetes Ingress, into a
+pod, and out to PostgreSQL, naming every hop.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why-container-net">Why container networking exists</a></li>
+    <li><a href="#namespaces">Network namespaces</a></li>
+    <li><a href="#bridge">Docker bridge network</a></li>
+    <li><a href="#host-none">Host, none, macvlan</a></li>
+    <li><a href="#overlay">Overlay networks &amp; VXLAN</a></li>
+    <li><a href="#kafka">The Kafka advertised-listeners fix</a></li>
+    <li><a href="#compose">docker-compose worked example</a></li>
+    <li><a href="#k8s-model">The Kubernetes network model</a></li>
+    <li><a href="#pod">The Pod</a></li>
+    <li><a href="#cni">CNI — Container Network Interface</a></li>
+    <li><a href="#service">The Service</a></li>
+    <li><a href="#service-types">Service types</a></li>
+    <li><a href="#k8s-dns">Kubernetes DNS</a></li>
+    <li><a href="#ingress">Ingress</a></li>
+    <li><a href="#networkpolicy">NetworkPolicy</a></li>
+    <li><a href="#journey">Browser → Ingress → Service → Pod</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-container-net">1. Why container networking exists</h2>
+
+<p>Before we draw a single bridge or write a line of YAML (Yet Another Markup Language — the config format
+Kubernetes uses), we need to answer the question this entire chapter exists to answer: <em>why did containers
+need their own networking at all?</em> A regular process on your laptop already has access to the network — your
+Spring Boot app binds port 8080 and serves requests just fine. So what changed?</p>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>In the old world you shipped a <strong>WAR file</strong> or a JAR and ran it on a server somebody had
+  carefully prepared: the right Java version, the right OS libraries, the right environment variables. Two
+  problems plagued this model. First, <strong>"it works on my machine"</strong> — the app ran on the developer's
+  laptop but died in production because some library version differed. Second, <strong>port conflicts</strong>
+  (your old friend from Part 5): if you wanted to run two copies of the same app on one server, the second one
+  failed with <code>Address already in use</code> because both tried to bind 8080. Operators worked around this
+  by hand-assigning different ports (8080, 8081, 8082…) and keeping spreadsheets of which app owned which port —
+  a fragile, manual ritual. <strong>Containers</strong> (popularized by Docker in 2013) attacked both problems at
+  once: they package the app <em>with</em> its entire userspace — libraries, runtime, files — so it runs
+  identically everywhere; and they give each container its own isolated view of the system, including its own
+  network, so two containers can both bind "port 8080" without ever knowing the other exists.</p>
+</div>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why container networking exists</div>
+  <p>A container is, at heart, just a normal Linux process — but a process that the kernel has been told to
+  <em>lie to</em> about what it can see. One of the lies is about the network. Each container gets its own
+  <strong>network namespace</strong>: its own private set of network interfaces, its own IP address, its own
+  routing table, its own port space. Container networking exists so that:</p>
+  <ol>
+    <li><strong>Isolation</strong> — a container cannot see or interfere with other containers' network traffic by default, the way two tenants in an apartment building cannot rummage through each other's mail.</li>
+    <li><strong>No port collisions</strong> — because each container owns a <em>separate</em> port space, ten containers can each bind 8080 (Part 5's port-conflict problem dissolves — they are ten different 8080s).</li>
+    <li><strong>Portability</strong> — the app's networking behaves the same on your laptop, in CI, and in production, because the container always sees the same private network setup regardless of the host's real network.</li>
+  </ol>
+  <p>The cost — and the source of every confusing bug in this chapter — is that an address now <em>means
+  different things depending on which network you are on</em>. The container's <code>localhost</code> is not the
+  host's <code>localhost</code>. Its <code>172.17.0.3</code> is invisible from the outside world. Most of Part A
+  is learning to keep these viewpoints straight.</p>
+</div>
+
+<h3 id="namespaces">1.1 What a network namespace actually is</h3>
+
+<p>A <strong>namespace</strong> is a Linux kernel feature that partitions a global system resource so that
+processes inside the namespace see their own isolated instance of it. There are several kinds (PID namespaces
+isolate process IDs, mount namespaces isolate the filesystem view), but the one we care about is the
+<strong>network namespace</strong>. A fresh network namespace comes with:</p>
+
+<ul>
+  <li>Its own set of network <strong>interfaces</strong> (a brand-new namespace has only a <code>lo</code> loopback interface, initially down).</li>
+  <li>Its own <strong>routing table</strong> (Part 3 callback — the table that decides "to reach this IP, send out that interface").</li>
+  <li>Its own <strong>IP addresses</strong>, <strong>ARP table</strong>, <strong>firewall (iptables) rules</strong>, and crucially its own <strong>port space</strong>.</li>
+</ul>
+
+<p>The host kernel is shared — there is exactly one Linux kernel on the machine — but it presents a separate
+network <em>stack</em> to each namespace. Think of it as one kernel running many independent, walled-off copies
+of "the networking subsystem."</p>
+
+<div class="figure-title">Fig 12.1 — One host kernel presenting several isolated network stacks</div>
+<pre class="diagram">
+   ONE PHYSICAL HOST (your laptop or an EC2 instance)
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                       ONE shared Linux kernel                     │
+  │                                                                  │
+  │   netns: container A        netns: container B     host netns    │
+  │  ┌───────────────────┐    ┌───────────────────┐  ┌────────────┐  │
+  │  │ eth0  172.17.0.2  │    │ eth0  172.17.0.3  │  │ eth0       │  │
+  │  │ lo    127.0.0.1   │    │ lo    127.0.0.1   │  │ 10.0.10.20 │  │
+  │  │ routing table  A  │    │ routing table  B  │  │ docker0    │  │
+  │  │ ports: own 0-65535│    │ ports: own 0-65535│  │ real ports │  │
+  │  │   :8080 bound ✔   │    │   :8080 bound ✔   │  │            │  │
+  │  └───────────────────┘    └───────────────────┘  └────────────┘  │
+  │                                                                  │
+  │   each box is a private network stack. BOTH bind :8080 with no   │
+  │   collision — they are different port spaces in different netns. │
+  └──────────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>Notice both containers bound <code>:8080</code> and both have a <code>127.0.0.1</code>. That is not a typo —
+each namespace has its own loopback, so "localhost" inside container A reaches only container A. This single fact
+is the root of half the "why can't my containers talk?" confusion you will ever hit, and we will return to it
+when we tackle Kafka.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a network namespace is a private apartment in one building</div>
+  <p>Picture a large apartment building (the host). The building has one foundation, one roof, one electrical
+  main coming in from the street (the shared kernel and the host's real network card). But inside, it is divided
+  into separate apartments (network namespaces), and <em>each apartment has its own mailbox with its own
+  apartment number</em> (its own IP) and its own set of internal phone extensions (its own ports). Apartment 2
+  and Apartment 3 can both have an extension "8080" ringing inside their own walls without any conflict, because
+  those extensions are private to each apartment. A visitor at the street door cannot reach an apartment's
+  internal extension directly — someone has to publish a mapping at the front desk first (that is port
+  publishing, section 2). This apartment image runs through the whole chapter: a <em>pod</em>, later, will turn
+  out to be a few roommates sharing <em>one</em> apartment.</p>
+</div>
+
+<div class="osi-badge">📍 OSI layers 2–3 — namespaces give each container its own L2 interface and L3 address</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A container is a program that the operating system has placed in its own little bubble. Part of that bubble
+    is a private network: its own address, its own ports. That is why two containers can both use "port 8080" —
+    each has a separate, private set of ports that nobody else can see.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The Linux kernel's network namespaces partition the networking stack. Each container runs in its own
+    namespace with a private set of interfaces, a private routing table, private iptables rules, and a private
+    port space. The kernel is shared but presents an isolated network view per namespace. Loopback
+    (<code>127.0.0.1</code>) is per-namespace, so a container's localhost reaches only itself.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Containers are not virtual machines — there is no second kernel, no virtual NIC emulated in software at the
+    hardware level. A container is a process (or process tree) with a set of namespaces and cgroups applied. You
+    can manipulate network namespaces directly with <code>ip netns</code>. The whole edifice of Docker and
+    Kubernetes networking is plumbing built on this primitive: connecting otherwise-isolated namespaces together
+    with virtual cables (veth pairs, next section) and steering packets between them with bridges, routes, and
+    iptables/IPVS rules. When networking misbehaves, the expert's instinct is to ask "which namespace am I in, and
+    what does <em>its</em> routing table and iptables look like?"</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bridge">2. The Docker bridge network — the default</h2>
+
+<p>When you install Docker and run a container with no special networking flags, it lands on the
+<strong>default bridge network</strong>. This is the single most important Docker networking mode to understand,
+because it is what every <code>docker run</code> and (in a smarter form) every <code>docker-compose</code> uses.
+Let's build it up piece by piece.</p>
+
+<h3>2.1 The docker0 bridge is a virtual switch</h3>
+
+<p>When the Docker daemon starts, it creates a virtual network device on the host called <code>docker0</code>.
+This is a <strong>bridge</strong> — and a bridge, in Linux, is a <em>software implementation of a network
+switch</em> (Part 2 callback: a switch is the box whose only job is to relay frames between the things plugged
+into it). So <code>docker0</code> is a switch that exists purely in the host's kernel, with no physical ports —
+its "ports" are virtual.</p>
+
+<div class="figure-title">Fig 12.2 — docker0: a virtual switch living inside the host</div>
+<pre class="diagram">
+   HOST KERNEL
+  ┌────────────────────────────────────────────────────────────┐
+  │                                                            │
+  │      ┌──────────────── docker0 bridge ────────────────┐    │
+  │      │   a virtual L2 switch, gateway 172.17.0.1       │    │
+  │      └───┬───────────────┬───────────────┬────────────┘    │
+  │          │               │               │                 │
+  │      (veth)           (veth)          (veth)               │
+  │          │               │               │                 │
+  │  ┌───────┴──────┐ ┌──────┴───────┐ ┌─────┴────────┐        │
+  │  │ container A  │ │ container B  │ │ container C  │        │
+  │  │ 172.17.0.2   │ │ 172.17.0.3   │ │ 172.17.0.4   │        │
+  │  └──────────────┘ └──────────────┘ └──────────────┘        │
+  │                                                            │
+  │   eth0 (real NIC) 10.0.10.20  ◄── to the rest of the host │
+  └────────────────────────────────────────────────────────────┘
+</pre>
+
+<h3>2.2 veth pairs are the virtual cables</h3>
+
+<p>How does a container's private namespace plug into <code>docker0</code> if they are isolated from each other?
+With a <strong>veth pair</strong> (virtual ethernet pair). A veth pair is like a <em>virtual patch cable with two
+ends</em>: whatever goes in one end comes out the other. Docker creates one veth pair per container. One end is
+placed <em>inside</em> the container's network namespace and named <code>eth0</code> (so the container thinks it
+has a normal network card called eth0); the other end stays in the host namespace and is attached to the
+<code>docker0</code> bridge.</p>
+
+<div class="figure-title">Fig 12.3 — A veth pair stitching a container namespace to the bridge</div>
+<pre class="diagram">
+        container A namespace                 host namespace
+       ┌──────────────────────┐            ┌──────────────────────┐
+       │                      │            │                      │
+       │   eth0  172.17.0.2 ──╫─ veth pair ╫── vethXXXX           │
+       │   (one end of cable) │  (a virtual│   (other end)        │
+       │                      │   cable)   │      │               │
+       └──────────────────────┘            │      ▼               │
+                                           │   docker0 bridge     │
+                                           └──────────────────────┘
+
+      packets the container sends out eth0 pop out of vethXXXX on the
+      host side, land on docker0, and the bridge forwards them onward
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — veth is the network cable from the apartment to the building's switch closet</div>
+  <p>Back to the apartment building. Each apartment (container namespace) has a single Ethernet jack in the wall.
+  Behind the wall, a cable (the veth pair) runs from that jack down to the building's wiring closet and plugs into
+  the building switch (docker0). The apartment side of the cable is the jack the tenant sees ("eth0"); the closet
+  side is a labeled patch (vethXXXX) plugged into the switch. The tenant never sees the closet — they just plug
+  into their wall jack and trust that data goes somewhere.</p>
+</div>
+
+<h3>2.3 Containers get private RFC 1918 addresses</h3>
+
+<p>Docker hands each container an IP from <strong>172.17.0.0/16</strong> by default — a private range from
+RFC 1918 (Part 3 callback: the private address blocks <code>10.0.0.0/8</code>, <code>172.16.0.0/12</code>, and
+<code>192.168.0.0/16</code> that are not routable on the public Internet). The bridge itself takes
+<code>172.17.0.1</code> and acts as the <strong>default gateway</strong> for the containers — when a container
+wants to reach anything outside its own subnet, it sends the packet to <code>172.17.0.1</code>, exactly as your
+laptop sends Internet-bound traffic to your home router.</p>
+
+<p>Containers on the same bridge can reach each other directly by IP, because they are all "plugged into" the
+same virtual switch — it is one L2 segment. <code>172.17.0.2</code> can <code>curl http://172.17.0.3:8080</code>
+and it just works, the same way two laptops on the same office switch can ping each other.</p>
+
+<h3>2.4 Outbound traffic is NATed; inbound needs explicit publishing</h3>
+
+<p>Now the two asymmetric halves that trip everyone up.</p>
+
+<p><strong>Outbound</strong> (container → Internet) just works, via NAT. When <code>172.17.0.2</code> calls an
+external API, the packet goes to gateway <code>172.17.0.1</code>, and the host performs <strong>NAT</strong>
+(Network Address Translation — Parts 3 and 11 callback) — it rewrites the packet's source address from the
+private <code>172.17.0.2</code> to the host's own routable IP (<code>10.0.10.20</code>), sends it out, and
+reverses the translation on the reply. This is exactly the masquerading your home router does for every device
+behind it. The container never needs a publicly reachable address to <em>make</em> outbound calls.</p>
+
+<p><strong>Inbound</strong> (Internet → container) does <em>not</em> just work, and this is by design. Because the
+container's IP is private and invisible from outside the host, nothing on the outside can address it. To let
+outside traffic in, you must explicitly <strong>publish a port</strong> with <code>-p</code>. Publishing creates
+a port-forwarding rule: "traffic arriving at <em>this</em> port on the host should be forwarded (DNAT) to
+<em>that</em> port inside <em>this</em> container."</p>
+
+<div class="figure-title">Fig 12.4 — Outbound NAT vs inbound port publishing</div>
+<pre class="diagram">
+   OUTBOUND (always works, via NAT/masquerade)
+   container 172.17.0.2  ──►  docker0 (gw .1)  ──►  host eth0 10.0.10.20  ──►  Internet
+                              source IP rewritten 172.17.0.2 ──► 10.0.10.20
+
+   INBOUND (only for ports you publish with -p, via DNAT)
+   Internet ──► host 10.0.10.20:8080  ──[ -p 8080:8080 DNAT ]──►  container 172.17.0.2:8080
+                                       no -p rule  =  packet dropped, port closed
+</pre>
+
+<h3>2.5 Walking <code>docker run -p 8080:8080</code></h3>
+
+<p>Here is the command you have typed a hundred times, finally fully explained:</p>
+
+<pre class="code">$ docker run -d --name spring-app -p 8080:8080 my-spring-app
+
+# -d            run detached (in the background)
+# --name        give the container a name
+# -p 8080:8080  PUBLISH host port 8080  ──►  container port 8080
+#               format is  HOST_PORT:CONTAINER_PORT</pre>
+
+<p>The <code>-p 8080:8080</code> does two things working together. Inside the container, your Spring Boot process
+binds <code>0.0.0.0:8080</code> (Part 5 callback: <code>0.0.0.0</code> means "all interfaces in my namespace,"
+which is what you want so the container's eth0 is reachable — binding <code>127.0.0.1</code> here would be the
+classic mistake that makes the app reachable only from <em>inside</em> the container). On the host, Docker installs
+an iptables DNAT (Destination NAT) rule that says: any packet arriving at host <code>0.0.0.0:8080</code> gets its
+destination rewritten to <code>172.17.0.2:8080</code> and forwarded across the veth into the container.</p>
+
+<div class="figure-title">Fig 12.5 — What -p 8080:8080 wires up</div>
+<pre class="diagram">
+   your browser              HOST (10.0.10.20)                    container
+   ┌─────────┐    GET /     ┌──────────────────────────┐        ┌──────────────┐
+   │ laptop  │ ───────────► │ 0.0.0.0:8080             │        │ Spring Boot  │
+   │ :random │              │   iptables DNAT rule:    │        │ bound        │
+   │         │              │   dst 10.0.10.20:8080    │        │ 0.0.0.0:8080 │
+   │         │              │   ──► 172.17.0.2:8080    │ ─veth─►│ 172.17.0.2   │
+   └─────────┘              └──────────────────────────┘        └──────────────┘
+
+   "host 8080 forwards to container 8080" — that is the whole meaning of -p
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Publishing a port (<code>-p</code>) is <strong>port forwarding</strong> (Part 3 callback), implemented as an
+  iptables DNAT rule on the host. Without <code>-p</code>, a container is reachable from other containers on its
+  bridge (by IP) but is invisible from the host and the outside world. The left number is the host's port; the
+  right number is the container's port; they need not match (<code>-p 9090:8080</code> publishes host 9090 to
+  container 8080).</p>
+</div>
+
+<h3>2.6 Default bridge vs user-defined bridge: the naming difference</h3>
+
+<p>There is a crucial split between the <strong>default</strong> bridge (the one containers land on automatically)
+and a <strong>user-defined</strong> bridge (one you create with <code>docker network create</code>). They share
+the veth/NAT/publishing machinery, but they differ in one feature that changes everything for multi-container
+apps: <strong>embedded DNS</strong>.</p>
+
+<table>
+  <tr><th></th><th>Default bridge (docker0)</th><th>User-defined bridge</th></tr>
+  <tr><td><strong>How you get it</strong></td><td>Automatic, no flags</td><td><code>docker network create mynet</code></td></tr>
+  <tr><td><strong>Reach peers by IP</strong></td><td>Yes</td><td>Yes</td></tr>
+  <tr><td><strong>Reach peers by NAME</strong></td><td>❌ No (only by raw IP)</td><td>✅ Yes — embedded DNS resolves container names</td></tr>
+  <tr><td><strong>Isolation</strong></td><td>All default-bridge containers share one network</td><td>Each user-defined network is its own isolated segment</td></tr>
+  <tr><td><strong>Used by</strong></td><td>Quick one-off <code>docker run</code></td><td>docker-compose (every compose project makes one)</td></tr>
+</table>
+
+<p>On a user-defined bridge, Docker runs a tiny embedded DNS server at <code>127.0.0.11</code> inside each
+container's namespace. It resolves <em>container names</em> (and compose service names) to their current container
+IPs. So if you create a network and run two containers named <code>app</code> and <code>postgres</code> on it, the
+<code>app</code> container can open a connection to <code>postgres:5432</code> by name — Docker's embedded DNS
+answers with <code>postgres</code>'s current IP. (Part 6 callback: this is DNS solving the "names persist, IPs
+change" problem at container scale — the container could restart with a new IP, but the name still resolves.)</p>
+
+<div class="figure-title">Fig 12.6 — Embedded DNS on a user-defined bridge lets containers find each other by name</div>
+<pre class="diagram">
+   user-defined network "appnet"   (embedded DNS at 127.0.0.11 in each container)
+
+   ┌───────────────────┐                         ┌───────────────────┐
+   │ container "app"   │   "connect to           │ container         │
+   │ 172.18.0.2        │    postgres:5432"        │ "postgres"        │
+   │                   │                          │ 172.18.0.3        │
+   │  resolve postgres │ ──ask 127.0.0.11──►      │                   │
+   │  ◄── 172.18.0.3 ──│                          │                   │
+   │  connect ─────────┼──────────────────────────┤ :5432             │
+   └───────────────────┘                          └───────────────────┘
+
+   this is exactly why a docker-compose app reaches "postgres" and "redis"
+   by service name without ever knowing their IP addresses
+</pre>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — inspecting a bridge network</div>
+  <pre class="code">$ docker network create appnet
+$ docker run -d --name postgres --network appnet postgres:16
+$ docker run -d --name app     --network appnet -p 8080:8080 my-spring-app
+
+$ docker network inspect appnet        # (sketch of the output)
+[
+  {
+    "Name": "appnet",
+    "Driver": "bridge",
+    "IPAM": { "Config": [ { "Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1" } ] },
+    "Containers": {
+      "a1b2..": { "Name": "postgres", "IPv4Address": "172.18.0.3/16" },
+      "c3d4..": { "Name": "app",      "IPv4Address": "172.18.0.2/16" }
+    }
+  }
+]
+
+# from inside the app container, name resolution works:
+$ docker exec -it app sh
+/ # getent hosts postgres
+172.18.0.3   postgres
+/ # curl http://postgres:5432    # reaches the postgres container by name</pre>
+</div>
+
+<div class="osi-badge">📍 OSI layer 3 — bridge networking is IP routing between namespaces; embedded DNS (L7) adds name resolution on top</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Docker creates a virtual switch (<code>docker0</code>) on your computer and plugs each container into it
+    with a virtual cable. Containers get private addresses like <code>172.17.0.2</code> and can talk to each other.
+    To let the outside world reach a container, you "publish" a port with <code>-p</code>. If you put containers on
+    your own network, they can find each other by name instead of by number.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The default bridge is an L2 software switch with containers attached via veth pairs, addressed from
+    <code>172.17.0.0/16</code>. Outbound traffic is source-NATed behind the host IP; inbound requires explicit
+    <code>-p host:container</code> DNAT port publishing. User-defined bridges add an embedded DNS server
+    (<code>127.0.0.11</code>) that resolves container/service names to current IPs — which is why compose services
+    reach <code>postgres</code> and <code>redis</code> by name and the default bridge cannot.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Everything here is Linux primitives Docker orchestrates: a bridge device, veth pairs, the
+    <code>nat</code> table's <code>POSTROUTING</code> (MASQUERADE for outbound) and <code>PREROUTING</code> (DNAT
+    for published ports) chains, plus a userspace <code>docker-proxy</code> helper for some cases. IP forwarding
+    must be enabled in the kernel. The default bridge's lack of name resolution is a legacy wart — production
+    setups always use user-defined networks. Understanding that <code>-p</code> is just DNAT explains why a process
+    bound to <code>127.0.0.1</code> inside the container is unreachable even when published: the DNAT rewrites the
+    destination to the container's eth0 IP, which a loopback-only listener never accepts.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="host-none">3. Host, none, and macvlan networks</h2>
+
+<h3>3.1 Host network — no isolation, no NAT</h3>
+
+<p>The <strong>host network</strong> mode (<code>--network host</code>) does the opposite of the bridge: instead
+of giving the container its own network namespace, it puts the container <em>directly into the host's network
+namespace</em>. The container shares the host's interfaces, the host's IP, and — critically — the host's port
+space. There is no veth pair, no NAT, no <code>-p</code> needed (it is ignored): the container's port 8080
+<em>is</em> the host's port 8080.</p>
+
+<div class="figure-title">Fig 12.7 — Host networking: the container lives in the host's namespace</div>
+<pre class="diagram">
+   --network host
+   ┌──────────────────────────────────────────────────────┐
+   │ HOST namespace (10.0.10.20)                          │
+   │                                                      │
+   │   eth0 10.0.10.20      ┌──────────────────────────┐  │
+   │   :8080  ◄─────────────┤ container process         │  │
+   │   (the container binds  │ binds 8080 directly on    │  │
+   │    the REAL host :8080) │ the host's interfaces     │  │
+   │                         └──────────────────────────┘  │
+   └──────────────────────────────────────────────────────┘
+
+   no veth, no bridge, no NAT — container :8080 IS host :8080
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — when to use host, and what it costs</div>
+  <p><strong>Use host networking</strong> when you need maximum network performance (no bridge/NAT hop, which
+  matters for very high packet rates) or when the app must see the real host network directly (some monitoring
+  agents, or apps that need to discover the host's real IP). <strong>The cost:</strong> you lose isolation, and
+  <em>port collisions come straight back</em> (Part 5) — two host-mode containers cannot both bind 8080, and they
+  can collide with host processes too. You also lose the tidy "only publish what you mean to expose" boundary.
+  Host mode is a Linux-only feature in the classic sense; on Docker Desktop for Mac/Windows it behaves
+  differently because Docker runs inside a Linux VM there.</p>
+</div>
+
+<h3>3.2 None network — fully isolated</h3>
+
+<p>The <strong>none</strong> network (<code>--network none</code>) gives the container a network namespace with
+<em>only</em> a loopback interface and nothing else — no eth0, no connectivity. The container can talk to itself
+and nothing more. This is for workloads that must be network-isolated for security (a batch job that crunches
+data from a mounted volume and should never touch the network) or for cases where you wire up networking yourself
+afterward.</p>
+
+<h3>3.3 macvlan / ipvlan — a real L2 identity on the physical network</h3>
+
+<p>One line of awareness for completeness: <strong>macvlan</strong> (and its cousin <strong>ipvlan</strong>) give
+a container its <em>own MAC address and IP directly on the physical LAN</em>, so the container appears as a
+first-class device on the real network — no NAT, the router sees it as just another host. This is used when
+legacy systems or network appliances need to address containers as if they were physical machines. You will rarely
+reach for it, but the idea — "a container can be a real citizen of the physical L2 network" — foreshadows what the
+AWS VPC CNI does for Kubernetes pods later in this chapter.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Bridge is the normal, isolated mode. Host mode removes the bubble — the container uses your computer's
+    network directly (fast, but ports can clash again). None mode gives the container no network at all.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Host mode shares the host network namespace (no veth/NAT, <code>-p</code> ignored, port collisions return,
+    best raw throughput). None mode is loopback-only isolation. macvlan/ipvlan attach a container to the physical
+    L2 with its own MAC/IP, bypassing NAT so it is directly routable on the LAN.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Host mode trades the security boundary and per-container port space for eliminating the bridge and NAT
+    datapath — measurable for latency-sensitive or very high-PPS workloads, but it couples the container to host
+    port management. macvlan needs the upstream switch to allow multiple MACs per port (promiscuous mode) and does
+    not let the container talk to the host IP by default (a known gotcha). These modes exist because "one size
+    fits all" networking does not — the right mode is a function of isolation, performance, and how the
+    surrounding network expects to address the workload.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="overlay">4. Overlay networks — connecting containers across hosts</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why overlay networks exist</div>
+  <p>Everything so far lives on <em>one</em> host. The bridge connects containers on the same machine. But the
+  whole point of orchestration is to spread containers across <em>many</em> machines for scale and resilience. Now
+  you have a hard problem: a container on host 1 (with private IP <code>172.17.0.5</code>, meaningful only on host
+  1) needs to talk to a container on host 2 (<code>172.18.0.7</code>, meaningful only on host 2). Those private
+  IPs are invisible across hosts — host 2 has no idea what <code>172.17.0.5</code> is. We need to make containers
+  on different physical machines behave as if they were all plugged into one big virtual switch. That is an
+  <strong>overlay network</strong>.</p>
+</div>
+
+<p>An overlay network creates a virtual L2/L3 network that spans multiple hosts by <strong>encapsulating</strong>
+container packets inside host packets — literally putting a packet inside a packet (Part 2 callback: encapsulation
+is wrapping data from one layer inside another). The most common technique is <strong>VXLAN</strong> (Virtual
+Extensible LAN). Here is the idea: when container A on host 1 sends a packet to container B on host 2, the host's
+overlay driver takes that entire container packet (with its container source/destination IPs), wraps it inside a
+new UDP packet addressed from host 1's real IP to host 2's real IP, and ships it across the regular host network.
+Host 2 receives the UDP packet, unwraps it, and delivers the original container packet to container B — which
+never knew it crossed a host boundary.</p>
+
+<div class="figure-title">Fig 12.8 — VXLAN: a container packet tunneled inside a host packet</div>
+<pre class="diagram">
+   HOST 1  (real IP 10.0.10.20)              HOST 2  (real IP 10.0.10.21)
+  ┌──────────────────────────┐             ┌──────────────────────────┐
+  │ container A 172.17.0.5    │             │ container B 172.18.0.7    │
+  │      │                    │             │      ▲                    │
+  │      ▼  inner packet      │             │      │  inner packet      │
+  │  ┌────────────────────┐   │             │  ┌────────────────────┐   │
+  │  │ src 172.17.0.5     │   │             │  │ src 172.17.0.5     │   │
+  │  │ dst 172.18.0.7     │   │  the physical│  │ dst 172.18.0.7     │   │
+  │  └─────────┬──────────┘   │  network only│  └─────────▲──────────┘   │
+  │            │ WRAP (VXLAN) │  ever sees   │            │ UNWRAP       │
+  │  ┌─────────▼──────────┐   │  the OUTER   │  ┌─────────┴──────────┐   │
+  │  │ outer: src 10.0.10.20  │ packet      │  │ outer: src 10.0.10.20  │ │
+  │  │ dst 10.0.10.21 UDP │   │             │  │ dst 10.0.10.21 UDP │   │
+  │  └─────────┬──────────┘   │             │  └─────────▲──────────┘   │
+  └────────────┼─────────────┘             └────────────┼─────────────┘
+               │        physical host network (10.0.10.0/24)        │
+               └──────────────────────────────────────────────────►─┘
+                       a packet inside a packet — a tunnel
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — overlay is a letter sealed inside another envelope</div>
+  <p>You want to send a letter to "Apartment 7, Building B," but the postal system only knows how to deliver to
+  street addresses of buildings, not to apartments inside them. So you write your inner letter ("To Apartment 7"),
+  seal it inside a bigger envelope addressed to "Building B, 21 Main Street" (the host's real address), and mail
+  that. Building B's front desk receives the outer envelope, opens it, and hands the inner letter to Apartment 7.
+  The public postal network only ever saw building-to-building addresses; the apartment-to-apartment addressing
+  was hidden inside. VXLAN is exactly this: container addresses ride hidden inside host-addressed envelopes.</p>
+</div>
+
+<p>Overlay networks are what <strong>Docker Swarm</strong> (Docker's built-in clustering) uses to let services on
+different nodes communicate, and the same encapsulation idea underpins one whole family of Kubernetes networking
+plugins (Flannel's VXLAN mode, which we will name in section 10). The key mental model to carry forward:
+<strong>across hosts, container traffic is tunneled inside host traffic.</strong> This is the conceptual seed of
+the Kubernetes pod network.</p>
+
+<div class="osi-badge">📍 OSI layers 2–3 over 4 — an overlay builds a virtual L2/L3 network by tunneling inside L4 (UDP) host packets</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Containers on the same computer can talk easily. To let containers on <em>different</em> computers talk as
+    if they were on one network, the system wraps each container's message inside a normal message between the two
+    computers — a package inside a package — and unwraps it at the other end.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>An overlay spans hosts by encapsulating container packets in VXLAN/UDP packets addressed host-to-host. The
+    physical underlay network only routes the outer host-addressed packets; the inner container IPs are opaque to
+    it. Each host runs a tunnel endpoint (VTEP) that wraps on egress and unwraps on ingress. Docker Swarm and
+    several Kubernetes CNIs work this way.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Encapsulation costs: every packet carries ~50 bytes of VXLAN/UDP/IP overhead, which lowers the effective
+    MTU (Maximum Transmission Unit) and can cause fragmentation or path-MTU headaches if not tuned. The control
+    plane must distribute "which container IP lives behind which host" mappings (Swarm uses a gossip protocol;
+    Flannel uses etcd/the API server). Overlays trade a little performance and complexity for the enormous win of
+    a flat container network independent of the underlay's topology — which is exactly the property Kubernetes
+    will demand as a hard rule.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="kafka">5. The Kafka advertised-listeners problem (promise from Part 5, delivered)</h2>
+
+<p>Back in Part 5 we teased that Kafka has a notorious habit of breaking inside containers in a way that teaches a
+deep lesson about addresses. Now we have the vocabulary to resolve it completely.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why Kafka (and similar systems) break in containers</div>
+  <p>Most services are passive: a client connects, sends a request, gets a reply. Kafka is different — it
+  <em>tells the client where to connect</em>. When a Kafka client first connects to a broker (the "bootstrap"
+  connection), the broker responds with metadata: a list of all brokers and the addresses to use for the real
+  work. This list comes from the broker's <code>advertised.listeners</code> setting. The client then
+  <em>disconnects from the bootstrap address and reconnects to whatever address the broker advertised.</em> So if
+  the broker advertises an address that is wrong from the client's point of view, the bootstrap succeeds and then
+  everything mysteriously fails.</p>
+</div>
+
+<p>Here is the trap, built directly on section 1. Suppose Kafka runs in a container and advertises
+<code>localhost:9092</code> (a common default). Two different clients hit two different "localhosts":</p>
+
+<div class="figure-title">Fig 12.9 — Why advertising "localhost" breaks an external Kafka client</div>
+<pre class="diagram">
+   CLIENT INSIDE the same container/network        CLIENT OUTSIDE (on the host)
+   ┌──────────────────────────────┐               ┌──────────────────────────────┐
+   │ "localhost" = this namespace │               │ "localhost" = the HOST        │
+   │  localhost:9092 ──► Kafka ✔  │               │  localhost:9092 ──► nothing,  │
+   │                              │               │  or the wrong process �’✗      │
+   └──────────────────────────────┘               └──────────────────────────────┘
+
+   1. client connects to bootstrap (works)
+   2. broker says "reconnect to me at localhost:9092"
+   3. external client dutifully connects to ITS OWN localhost:9092 — wrong host!
+</pre>
+
+<p>The bootstrap works because the client reached the broker via a published port. But then the broker says "talk
+to me at <code>localhost:9092</code>," and the external client interprets <code>localhost</code> as <em>its
+own</em> machine — not the broker's container. The connection fails or goes to the wrong place. The lesson is the
+chapter's thesis stated bluntly:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — an address means different things depending on which network you are on</div>
+  <p>Containers change <em>what an address means</em>. <code>localhost</code>, <code>127.0.0.1</code>, and a
+  private <code>172.x</code> address all resolve relative to the namespace you are standing in. Kafka breaks
+  because it ships an address from <em>its</em> point of view to a client standing in a <em>different</em> point of
+  view. The fix is to advertise an address that is correct <em>from the client's</em> perspective — and since
+  different clients (inside the network vs on the host vs on other hosts) have different perspectives, Kafka lets
+  you advertise multiple listeners.</p>
+</div>
+
+<p>The conceptual fix: configure the broker to advertise a name or IP that the client can actually reach. For a
+client on the same user-defined bridge, advertise the broker's <em>service name</em> (e.g. <code>kafka:9092</code>),
+which the embedded DNS resolves (section 2.6). For a client on the host, advertise the host's reachable address and
+the published port. Modern Kafka supports defining several named listeners for exactly this reason — one for
+in-network clients, one for external clients.</p>
+
+<pre class="code"># conceptual docker-compose snippet for a single broker
+# (two listeners: one for containers on appnet, one for host clients)
+kafka:
+  image: bitnami/kafka:3.7
+  networks: [ appnet ]
+  ports:
+    - "9094:9094"                     # publish the EXTERNAL listener to the host
+  environment:
+    # listener name : bind address inside the container
+    KAFKA_CFG_LISTENERS: "INTERNAL://:9092,EXTERNAL://:9094"
+    # what each listener ADVERTISES to clients — the address THEY must use
+    KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:9094"
+    KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+    KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+
+# a service on appnet uses  kafka:9092      (resolved by embedded DNS, section 2.6)
+# a tool on your laptop uses localhost:9094 (the published EXTERNAL listener)</pre>
+
+<p>Read that <code>ADVERTISED_LISTENERS</code> line as: "if you reached me on the INTERNAL listener, come back to
+<code>kafka:9092</code>; if you reached me on the EXTERNAL listener, come back to <code>localhost:9094</code>."
+Each client gets an address that is correct <em>for it</em>. This ties together everything in Part A — bridge
+naming, port publishing, and the namespace-relative meaning of addresses — and the same lesson reappears in
+Kubernetes, where a Service name is the address that is always correct from inside the cluster.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the symptom in the wild</div>
+  <p>You will recognize this bug by its signature: your producer connects (you see it reach the broker), then logs
+  something like <code>Connection to node -1 (localhost/127.0.0.1:9092) could not be established</code> in a loop,
+  even though the broker is clearly up. That <code>node -1</code> with <code>localhost</code> is the smoking gun —
+  the broker advertised an address the client cannot reach. The fix is never "open more ports"; it is "advertise an
+  address that means the broker <em>from the client's standpoint</em>."</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="compose">6. docker-compose worked example: app + postgres + redis + kafka</h2>
+
+<p>Let's assemble everything from Part A into the setup you actually run on your laptop: a Spring Boot app talking
+to PostgreSQL, Redis, and Kafka, all wired with docker-compose. The point is to see how the bridge, embedded DNS,
+and selective port publishing combine — and how this mirrors the AWS private-subnet pattern from Part 11 at laptop
+scale.</p>
+
+<pre class="code"># docker-compose.yml
+services:
+
+  app:                                  # your Spring Boot service
+    build: .
+    ports:
+      - "8080:8080"                     # ONLY the app is published to the host
+    environment:
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/orders"
+      SPRING_DATA_REDIS_HOST: "redis"
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+    depends_on: [ postgres, redis, kafka ]
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_PASSWORD: secret
+    # NOTE: no "ports:" — 5432 is reachable only inside the compose network
+
+  redis:
+    image: redis:7
+    # no published port either — internal only
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"   # advertise the SERVICE NAME
+    # no published port — only the app (inside the network) talks to it
+
+# compose automatically creates ONE user-defined bridge network for this project
+# and attaches all four services to it, so embedded DNS resolves the service names.</pre>
+
+<p>Here is everything that is happening, decoded against Part A:</p>
+
+<ul>
+  <li><strong>One user-defined bridge.</strong> Compose creates a network (named something like
+  <code>myproject_default</code>) and attaches all four services. Because it is user-defined, embedded DNS is on,
+  so <code>app</code> can reach <code>postgres</code>, <code>redis</code>, and <code>kafka</code> by name
+  (section 2.6).</li>
+  <li><strong>Service names are hostnames.</strong> <code>jdbc:postgresql://postgres:5432/orders</code> works
+  because <code>postgres</code> resolves, via embedded DNS, to the Postgres container's current IP. No IP is ever
+  hardcoded — if the Postgres container restarts with a new <code>172.x</code> address, the name still resolves
+  (Part 6 callback: names persist, IPs change).</li>
+  <li><strong>Only the app is published.</strong> Only <code>app</code> has a <code>ports:</code> entry, so only
+  port 8080 is forwarded (DNAT) to the host. Postgres, Redis, and Kafka have <em>no</em> published ports — they are
+  reachable only from inside the compose network. From your laptop you cannot <code>psql</code> straight into the
+  database; from the <code>app</code> container you can. That is intentional isolation.</li>
+  <li><strong>Kafka advertises its service name</strong> (section 5), so the in-network <code>app</code> client
+  reconnects to <code>kafka:9092</code> correctly.</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — this is the Part 11 private-subnet pattern, shrunk to your laptop</div>
+  <p>In Part 11 you put a load balancer in a <em>public</em> subnet (reachable from the Internet) and your
+  database in a <em>private</em> subnet (reachable only from inside the VPC). This compose file is the same shape:
+  the app's published port 8080 is the "public" door; Postgres, Redis, and Kafka with no published ports are the
+  "private subnet" — addressable only from within the network, never from outside. The compose bridge plays the
+  role of the VPC's internal fabric; embedded DNS plays the role of the VPC's internal DNS. You have been building
+  a tiny AWS this whole time.</p>
+</div>
+
+<div class="figure-title">Fig 12.10 — The compose project: one bridge, one published door</div>
+<pre class="diagram">
+   your laptop (host)
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  :8080 published ◄── the only door to the outside                  │
+  │     │                                                             │
+  │  ┌──┴──────────────── compose bridge "myproject_default" ───────┐ │
+  │  │                    (embedded DNS resolves service names)      │ │
+  │  │   ┌─────────┐   ┌──────────┐   ┌────────┐   ┌────────┐        │ │
+  │  │   │  app    │──►│ postgres │   │ redis  │   │ kafka  │        │ │
+  │  │   │ :8080   │──►│  :5432   │   │ :6379  │   │ :9092  │        │ │
+  │  │   │         │──►│ (private)│   │(private)│   │(private)│       │ │
+  │  │   └─────────┘   └──────────┘   └────────┘   └────────┘        │ │
+  │  │      app reaches all three BY NAME; none of them are published │ │
+  │  └───────────────────────────────────────────────────────────────┘ │
+  └───────────────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>docker-compose is the bridge-plus-embedded-DNS pattern made declarative. Services find each other by
+  <em>name</em> (never by IP); you publish only the ports that genuinely need outside access; everything else stays
+  private to the project's network. Hold onto this exact mental picture — Kubernetes is going to take it,
+  generalize it across many machines, and add a permanent "department phone number" (the Service) in front of each
+  group of containers so that even the containers themselves can come and go.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Compose starts all your containers on one shared private network and lets them find each other by name
+    (<code>postgres</code>, <code>redis</code>, <code>kafka</code>). You only expose the one port the outside world
+    needs (8080 for the app); the database and friends stay hidden inside.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Compose provisions a user-defined bridge per project and attaches every service, enabling embedded DNS so
+    service names resolve to current container IPs. Connection strings use service names as hostnames. Only
+    services with a <code>ports:</code> mapping are DNAT-published to the host; the rest are network-internal —
+    mirroring public-vs-private subnet placement from Part 11.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The compose network is a single L2/L3 segment with NAT egress; service discovery is DNS-based and dynamic,
+    so containers are free to be recreated with new IPs without breaking references. This is the same dependency
+    inversion Kubernetes formalizes: never bind to an address, bind to a <em>name</em> that an out-of-band system
+    keeps pointed at the right place. The remaining gap compose does <em>not</em> solve — multiple replicas of one
+    service behind a single stable virtual IP with load balancing and health-aware routing — is precisely the gap
+    the Kubernetes Service fills.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="k8s-model">7. Why Kubernetes needed a network MODEL</h2>
+
+<p>We now cross from Docker (Part A) into Kubernetes (Part B). Everything you learned about namespaces, bridges,
+NAT, port publishing, and overlays still applies underneath — but Kubernetes adds a layer of <em>rules</em> that
+changes how you think about all of it.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why Kubernetes needed a network model</div>
+  <p>Imagine running thousands of containers across hundreds of machines, with containers constantly being
+  created, destroyed, and moved between machines as the orchestrator balances load and replaces failures. If you
+  tried to hand-wire that with bridges, NAT rules, and <code>-p</code> port mappings — the Part A toolkit — you
+  would drown. Which host port maps to which container on which machine? What happens to all those mappings when a
+  container moves? How does an app on machine 7 find a container that just got rescheduled onto machine 12 with a
+  new IP? Manual port mapping does not survive at this scale. So the designers of <strong>Kubernetes</strong>
+  (often abbreviated <strong>K8s</strong> — "K", then 8 letters, then "s") made a bold decision: instead of
+  prescribing <em>how</em> to wire the network, they defined a <em>model</em> — a small set of rules that any
+  networking implementation must satisfy — and let many implementations compete to satisfy it. Apps are written
+  against the model, not against any particular plumbing.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the Kubernetes network model: three rules</div>
+  <p>Every conforming Kubernetes network implementation MUST guarantee these three rules:</p>
+  <ol>
+    <li><strong>Every pod gets its own unique IP address.</strong> Not a shared host IP with port mapping — a real,
+    routable-within-the-cluster IP that belongs to that pod alone.</li>
+    <li><strong>Every pod can reach every other pod directly by that IP, with NO NAT</strong> — even across
+    different nodes (machines). A pod on node 1 talks to a pod on node 12 using the target's pod IP, and neither
+    address is translated along the way.</li>
+    <li><strong>Agents on a node (kubelet, system daemons) can reach all pods on that node.</strong> The node can
+    always talk to the pods it hosts (needed for health checks and management).</li>
+  </ol>
+  <p>The genius is rule 2's "no NAT." It means a pod's IP is the <em>same</em> whether you view it from the pod
+  itself, from another pod, or from anywhere in the cluster. There is no inside-vs-outside address confusion like
+  the Kafka problem — within the cluster, a pod IP means one thing, everywhere.</p>
+</div>
+
+<p>Why does this matter so much? Because it makes pods behave like ordinary hosts on a flat network — like VMs on
+a LAN (Part 1 callback). Applications do not have to know anything about NAT, port mapping, or which machine they
+landed on. A pod just opens a connection to another pod's IP and it works, exactly as if both were physical
+servers on the same office switch. All the messy Part A machinery (bridges, routes, tunnels) still runs
+underneath, but it is hidden behind these three rules. The app developer is freed from networking plumbing
+entirely.</p>
+
+<div class="figure-title">Fig 12.11 — The K8s model: a flat network where any pod reaches any pod by IP, no NAT</div>
+<pre class="diagram">
+   NODE 1 (10.0.10.20)                       NODE 2 (10.0.10.21)
+  ┌──────────────────────────┐              ┌──────────────────────────┐
+  │ pod A 10.244.1.5         │              │ pod C 10.244.2.8         │
+  │ pod B 10.244.1.6         │              │ pod D 10.244.2.9         │
+  └──────────────────────────┘              └──────────────────────────┘
+         │                                            ▲
+         │   pod A ──► pod D using dst 10.244.2.9     │
+         │   (NO source/destination NAT — rule 2)     │
+         └────────────────────────────────────────────┘
+
+   every pod has a unique IP from the pod CIDR (10.244.0.0/16);
+   the CNI plugin (section 10) makes cross-node delivery happen.
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the model says "give every roommate group a real street address, and let any address dial any other directly"</div>
+  <p>In a city without rules, every apartment building might number its apartments however it liked, and you would
+  need a building-specific concierge to forward mail — chaos at scale. Kubernetes' network model is a city ordinance:
+  <em>every dwelling gets a globally unique address, and any address can send mail directly to any other address
+  with no forwarding tricks.</em> Once that ordinance exists, residents (apps) stop worrying about which building's
+  concierge to call — they just write the destination address and mail flows. The model is the city planning that
+  makes everything above it simple.</p>
+</div>
+
+<div class="osi-badge">📍 OSI layer 3 — the entire K8s network model is a statement about L3 (IP) reachability between pods</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>At huge scale, hand-wiring container networking is impossible. Kubernetes instead lays down three simple
+    rules: every pod gets its own address, any pod can reach any other pod by that address directly, and the
+    machine can reach its own pods. Apps just use pod addresses like normal — Kubernetes handles the rest.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The Kubernetes network model mandates: (1) unique IP per pod, (2) pod-to-pod connectivity without NAT across
+    nodes, (3) node-to-pod reachability. This makes pods behave like first-class hosts on a flat L3 network, so
+    applications never deal with NAT or port mapping. The model is implementation-agnostic; a CNI plugin satisfies
+    it however it likes (overlay, routing, or cloud-native).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The "no NAT between pods" rule is the load-bearing constraint: it eliminates the address-translation
+    ambiguity that plagues Docker (the Kafka problem) and makes service discovery, network policy, and observability
+    tractable, because a pod IP is a stable identity within the cluster regardless of vantage point. The model
+    deliberately separates <em>policy</em> (what must be true) from <em>mechanism</em> (how a CNI achieves it),
+    which is why the CNI ecosystem can innovate (eBPF dataplanes, BGP routing, cloud-native IPs) without breaking
+    application assumptions. Pods reaching the <em>outside</em> world are still typically SNAT'd behind the node —
+    the no-NAT rule is about <em>intra-cluster</em> pod-to-pod traffic specifically.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="pod">8. The Pod — the smallest deployable unit</h2>
+
+<div class="osi-badge">📍 OSI layer 3 — a pod is identified by a single L3 (IP) address shared by all its containers</div>
+
+<p>A <strong>pod</strong> is the smallest thing Kubernetes schedules and runs. The surprise for newcomers: a pod
+is <em>not</em> the same as a container. A pod is <em>one or more containers that share a single network
+namespace</em> — which means they share one IP address and one loopback. Most pods have exactly one app container,
+but the "one or more" is the whole point of the design.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a pod is a few roommates sharing ONE apartment</div>
+  <p>Recall that a container's network namespace is a private apartment (section 1). A <strong>pod</strong> is what
+  happens when a few containers move into the <em>same</em> apartment as roommates. They share one front door, one
+  apartment number (one pod IP), and one internal intercom (<code>localhost</code>). Roommate A can shout to
+  roommate B down the hall — they reach each other over <code>127.0.0.1</code> because they are in the same
+  apartment. But to the outside world, the apartment has a single address; mail comes to the apartment, not to an
+  individual roommate. This is exactly how a multi-container pod works: containers inside it talk over localhost,
+  and the pod presents one IP to the rest of the cluster.</p>
+</div>
+
+<div class="figure-title">Fig 12.12 — A two-container pod: shared namespace, one IP, talk over localhost</div>
+<pre class="diagram">
+   POD  (one shared network namespace)
+  ┌──────────────────────────────────────────────────────┐
+  │  pod IP 10.244.1.5    lo 127.0.0.1  (shared by both)  │
+  │                                                      │
+  │  ┌────────────────────┐      ┌────────────────────┐  │
+  │  │ container: app     │      │ container: sidecar │  │
+  │  │ Spring Boot :8080  │◄────►│ e.g. log shipper / │  │
+  │  │                    │ talk │ proxy on :15001    │  │
+  │  │                    │ over │                    │  │
+  │  └────────────────────┘ lo   └────────────────────┘  │
+  │      both see each other as 127.0.0.1                 │
+  └──────────────────────────────────────────────────────┘
+        to the cluster, the whole pod is just 10.244.1.5
+</pre>
+
+<p>Containers in the same pod communicate over <code>localhost</code> (different ports, since they share one port
+space — so the app on 8080 and a sidecar on 15001 coexist but cannot both take 8080). This is the
+<strong>sidecar pattern</strong>: a helper container (a log shipper, a metrics agent, or — most importantly for
+this course — a proxy) runs alongside the main app in the same pod, sharing its network. Part 13 builds an entire
+architecture (the <em>service mesh</em>) on exactly this idea: a proxy sidecar in every pod that intercepts all the
+app's traffic. For now, just hold the picture: <strong>containers in a pod share one IP and reach each other over
+127.0.0.1.</strong></p>
+
+<p>Pod IPs come from the <strong>pod CIDR</strong> (Classless Inter-Domain Routing block — Part 3 callback),
+typically <code>10.244.0.0/16</code>. Each node gets a slice of that range to hand out to the pods it runs.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this design — and the problem it creates</div>
+  <p>Why bundle containers into a pod instead of running each alone? Because some helpers are so tightly coupled to
+  an app that they must share its network and lifecycle — a proxy that must intercept the app's localhost traffic,
+  or a sidecar that must die when the app dies. The pod is the unit of co-scheduling and shared fate.</p>
+  <p>But the pod design creates the single most important problem in Kubernetes networking: <strong>pods are
+  ephemeral.</strong> A pod can be killed and rescheduled at any moment — because a node failed, because you
+  deployed a new version, because the autoscaler is rebalancing. When a pod is recreated, it gets a
+  <em>brand-new IP</em> from the pod CIDR. The old IP is gone forever. So <strong>you can never hardcode a pod
+  IP</strong> — by the time you use it, the pod may be dead and a replacement may have a different address (Part 6
+  callback: this is the "IPs change, names persist" problem, now at its most extreme — pods change IPs constantly).
+  Everything in the next sections (Services, DNS) exists to solve this one problem.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — watching a pod get a new IP on restart</div>
+  <pre class="code">$ kubectl get pods -o wide
+NAME                       READY   STATUS    IP            NODE
+order-app-7c9f8b6d-abcde   1/1     Running   10.244.1.5    node-1
+
+$ kubectl delete pod order-app-7c9f8b6d-abcde      # the Deployment recreates it
+$ kubectl get pods -o wide
+NAME                       READY   STATUS    IP            NODE
+order-app-7c9f8b6d-fghij   1/1     Running   10.244.2.11   node-2     # NEW name, NEW IP, NEW node!
+
+# the IP changed from 10.244.1.5 to 10.244.2.11. Anything that hardcoded
+# the old IP is now broken. This is why Services exist.</pre>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A pod is a small wrapper around one (sometimes a few) containers. All containers in a pod share one address
+    and talk to each other via <code>localhost</code>. The catch: pods are temporary — they get replaced often, and
+    each new pod gets a new address. So you must never rely on a pod's address staying the same.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A pod is a set of containers sharing one network namespace (one IP from the pod CIDR <code>10.244.0.0/16</code>,
+    one loopback, one port space). Intra-pod containers communicate over <code>127.0.0.1</code> on distinct ports
+    (the sidecar pattern). Pods are ephemeral: rescheduling assigns a new IP every time, so pod IPs must never be
+    hardcoded — clients reference Services instead.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Kubernetes implements the shared namespace via an infra/"pause" container that holds the network namespace
+    for the pod's lifetime; app containers join it. This is why sidecars can intercept the app's traffic on
+    localhost — they are literally in the same namespace. The ephemerality is not a flaw but a principle:
+    cattle-not-pets means identity lives in higher-level objects (Services, DNS names), never in a pod's
+    instance-specific IP. Stateful workloads complicate this (stable network identity via StatefulSets and headless
+    Services, section 13), but the default assumption is that any pod IP is disposable.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cni">9. CNI — the Container Network Interface</h2>
+
+<p>The three rules (section 7) say <em>what</em> must be true, but something has to actually <em>make</em> it
+true — assign each pod an IP, wire the pod's namespace to the node, and ensure cross-node pod-to-pod delivery
+works. That something is a <strong>CNI plugin</strong>.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — what CNI is</div>
+  <p><strong>CNI</strong> (Container Network Interface) is a standard — a simple contract — that defines how
+  Kubernetes (or any container runtime) asks a networking plugin to "set up networking for this pod" and "tear it
+  down." Kubernetes itself does <em>not</em> implement pod networking; it delegates to whichever CNI plugin you
+  install. The CNI plugin is the layer that turns the three abstract rules into real veth pairs, routes, and (when
+  needed) tunnels. When a pod is created, the kubelet calls the CNI plugin, which creates the pod's veth pair,
+  assigns an IP from the pod CIDR, and programs whatever routing/encapsulation is needed so the new IP is reachable
+  cluster-wide.</p>
+</div>
+
+<p>Plugins differ mainly in <em>how</em> they achieve cross-node pod reachability. Three families, each a callback
+to earlier parts:</p>
+
+<table>
+  <tr><th>CNI family</th><th>How it connects pods across nodes</th><th>Callback</th></tr>
+  <tr><td><strong>Overlay</strong> — e.g. Flannel (VXLAN mode)</td><td>Encapsulates pod packets in VXLAN/UDP between nodes — a packet inside a packet</td><td>Part A overlay / section 4</td></tr>
+  <tr><td><strong>Routed</strong> — e.g. Calico (BGP mode)</td><td>No encapsulation; advertises pod routes with BGP (Border Gateway Protocol) so the underlay routes pod IPs natively</td><td>Part 1 BGP</td></tr>
+  <tr><td><strong>Cloud-native</strong> — e.g. AWS VPC CNI</td><td>Gives each pod a <em>real VPC IP</em> via ENI secondary addresses — pods are first-class VPC citizens</td><td>Part 11 ENI / VPC</td></tr>
+</table>
+
+<p>The cloud-native case deserves a beat because it connects directly to Part 11. The <strong>AWS VPC CNI</strong>
+does not build an overlay at all. Instead it assigns each pod a real IP <em>from your VPC subnet</em>, attached via
+secondary IP addresses on the node's <strong>ENI</strong>s (Elastic Network Interfaces — Part 11 callback). The
+consequence is profound: a pod's IP is a genuine VPC address (e.g. <code>10.0.10.37</code>, right out of the
+<code>10.0.10.0/24</code> subnet from Part 11), so pods sit directly inside your VPC subnets, AWS routing reaches
+them natively with no tunneling, and — importantly — <strong>Security Groups (Part 11) can apply to pods.</strong>
+Your pods become first-class members of the VPC you designed in Part 11.</p>
+
+<div class="figure-title">Fig 12.13 — Three ways a CNI satisfies "pods reach pods across nodes"</div>
+<pre class="diagram">
+   OVERLAY (Flannel/VXLAN)      ROUTED (Calico/BGP)        CLOUD-NATIVE (AWS VPC CNI)
+   pod pkt wrapped in UDP       pod routes advertised      pod gets a REAL VPC IP via
+   host-to-host tunnel          via BGP to the underlay    ENI secondary addresses
+   ┌────────┐    ┌────────┐     ┌────────┐  BGP ┌────────┐ ┌────────┐      ┌────────┐
+   │ node 1 │═══►│ node 2 │     │ node 1 │─────►│ node 2 │ │ node 1 │      │ node 2 │
+   │ tunnel │    │ tunnel │     │ router │      │ router │ │ VPC IP │      │ VPC IP │
+   └────────┘    └────────┘     └────────┘      └────────┘ └────────┘      └────────┘
+   simple, +overhead           fast, no encap            native VPC, SGs apply to pods
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>You do not need to know how to write a CNI plugin. You need to know that <strong>CNI is the layer that
+  implements the three rules</strong>, that plugins trade off encapsulation vs native routing vs cloud integration,
+  and that the AWS VPC CNI makes pods real VPC citizens so the Part 11 toolkit (subnets, route tables, Security
+  Groups) applies to them directly.</p>
+</div>
+
+<div class="osi-badge">📍 OSI layers 2–3 — CNI plugins operate at L2/L3, building the pod-to-pod IP fabric (some, like Calico, also enforce L3/L4 policy)</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Kubernetes does not do pod networking itself — it hands that job to a plug-in called a CNI plugin. The
+    plugin gives each pod its address and makes sure pods can reach each other across machines. Different plugins do
+    this different ways; on AWS, one of them even gives pods real addresses from your cloud network.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>CNI is the plugin contract Kubernetes calls to set up/tear down pod networking. Plugins implement the three
+    rules via overlay (Flannel/VXLAN), routed (Calico/BGP), or cloud-native (AWS VPC CNI assigning real VPC IPs from
+    ENI secondaries). The CNI assigns the pod IP from the pod CIDR and programs the datapath for cross-node
+    reachability.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>CNI's minimalism (ADD/DEL/CHECK on a netns) is why the ecosystem is so rich: dataplanes range from iptables
+    to IPVS to eBPF (Cilium), and policy enforcement can be folded in. Overlay vs routed is an MTU/performance vs
+    underlay-coupling trade; cloud-native eliminates encapsulation entirely but ties pod IP density to ENI/secondary
+    IP limits per instance type (a real capacity-planning constraint on EKS). Choosing a CNI is choosing your
+    performance profile, your policy engine, and how tightly pods integrate with the underlying network.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="service">10. The Service — the heart of the chapter</h2>
+
+<div class="osi-badge">📍 OSI layers 3/4 — a Service is a virtual L3 IP load-balancing L4 connections across pods (via kube-proxy)</div>
+
+<p>We have arrived at the concept that solves the ephemeral-pod problem and that you will use every single day:
+the <strong>Service</strong>. If you understand nothing else in Part B, understand this.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a Service is a permanent department phone number</div>
+  <p>Pods are employees: they get hired, fired, and reassigned constantly (ephemeral, new IP each time). You can
+  never put an individual employee's personal cell number on your business cards — they might leave tomorrow. So the
+  company publishes a <strong>permanent department number</strong>: "Sales: extension 4000." Whoever is staffing the
+  Sales desk right now answers when you dial 4000. Hire three new salespeople, fire two, move the desk to another
+  floor — the number 4000 still reaches whoever currently does Sales. A <strong>Kubernetes Service is exactly that
+  permanent department number.</strong> It is a stable identity (a fixed virtual IP and a fixed DNS name) that
+  always routes to whichever pods currently make up the service, no matter how often those pods come and go.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — what a Service is, precisely</div>
+  <p>A <strong>Service</strong> is a stable virtual identity in front of a dynamic <em>set</em> of pods. Concretely
+  it is two things: (1) a <strong>ClusterIP</strong> — a stable virtual IP allocated from the service CIDR
+  <code>10.96.0.0/12</code> — and (2) a stable <strong>DNS name</strong> (section 13). The Service selects its pods
+  by <strong>labels</strong> (not by IP): "all pods labeled <code>app=order</code>." As pods with that label appear
+  and disappear, the Service automatically tracks the current healthy set and load-balances traffic across them. It
+  is, in effect, an <em>in-cluster L4 load balancer</em> (Part 9 callback) with a permanent address.</p>
+</div>
+
+<p>Three things make the Service work, and the third is the one that surprises people:</p>
+
+<p><strong>(1) Label selectors.</strong> A Service does not list pod IPs; it specifies a label selector. The pods
+matching that selector are its <em>endpoints</em>. This indirection is what lets pods churn freely.</p>
+
+<p><strong>(2) EndpointSlices track the ready pods.</strong> Kubernetes continuously maintains
+<strong>EndpointSlices</strong> — the current list of pod IPs that match the Service's selector <em>and are
+ready</em>. "Ready" comes from <strong>readiness probes</strong> (Part 9 health-check callback): a pod that fails
+its readiness probe is removed from the Service's endpoints, so traffic stops going to it. This is health-aware
+load balancing, exactly like a Part 9 load balancer pulling an unhealthy backend out of rotation.</p>
+
+<p><strong>(3) kube-proxy makes the ClusterIP work — and there is no process behind it.</strong> Here is the
+twist. The ClusterIP is <em>virtual</em>. <strong>Nothing listens on it.</strong> There is no proxy server process
+sitting at <code>10.96.0.1</code> accepting connections. Instead, a component called <strong>kube-proxy</strong>
+runs on every node and programs the kernel's packet-handling rules — <strong>iptables</strong> rules or
+<strong>IPVS</strong> (IP Virtual Server) rules — so that when any pod sends a packet to the ClusterIP, the
+<em>kernel itself</em> rewrites the destination to one of the real pod IPs (chosen round-robin) before the packet
+leaves. That rewrite is <strong>DNAT</strong> (Destination NAT — Part 11 callback). The "load balancer" is not a
+server; it is a set of kernel rules transparently redirecting ClusterIP traffic to real pods.</p>
+
+<div class="figure-title">Fig 12.14 — A Service: ClusterIP, kube-proxy DNAT, three backing pods</div>
+<pre class="diagram">
+   a client pod calls the Service by name → resolves to ClusterIP 10.96.55.10
+            │
+            ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │ ClusterIP 10.96.55.10:80   ← VIRTUAL. no process listens here │
+   │                                                              │
+   │   kube-proxy has programmed iptables/IPVS on this node:       │
+   │   "dst 10.96.55.10:80  ──DNAT──►  one of the ready pod IPs"   │
+   └───────────────┬───────────────┬───────────────┬──────────────┘
+                   ▼               ▼               ▼   (round-robin)
+            ┌────────────┐  ┌────────────┐  ┌────────────┐
+            │ pod        │  │ pod        │  │ pod        │
+            │ 10.244.1.5 │  │ 10.244.2.8 │  │ 10.244.3.4 │
+            │ :8080      │  │ :8080      │  │ :8080      │
+            └────────────┘  └────────────┘  └────────────┘
+        EndpointSlice tracks which of these are READY (readiness probes);
+        unready pods are removed, so traffic only hits healthy pods.
+</pre>
+
+<pre class="code"># A Deployment (3 replicas, all labeled app=order) + a Service in front of them
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: order }
+  template:
+    metadata:
+      labels: { app: order }          # pods carry the label the Service selects
+    spec:
+      containers:
+        - name: app
+          image: my-spring-app:1.0
+          ports:
+            - containerPort: 8080
+          readinessProbe:             # only "ready" pods receive Service traffic
+            httpGet: { path: /actuator/health, port: 8080 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+spec:
+  selector:
+    app: order                        # selects pods by LABEL, not by IP
+  ports:
+    - port: 80                        # the Service's port
+      targetPort: 8080                # the pods' port
+  # type defaults to ClusterIP</pre>
+
+<pre class="code">$ kubectl get service order-service
+NAME            TYPE        CLUSTER-IP     PORT(S)   AGE
+order-service   ClusterIP   10.96.55.10    80/TCP    2m
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=order-service
+NAME                  ADDRESSES                              READY
+order-service-x7k2p   10.244.1.5,10.244.2.8,10.244.3.4       true,true,true
+# ^ the three current ready pod IPs behind the stable ClusterIP 10.96.55.10</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the Service solves the ephemeral-pod problem</div>
+  <p>Pods come and go with new IPs every time (section 8). The Service gives them a <strong>permanent virtual
+  IP + DNS name</strong> (Part 6 callback: a stable name in front of changing addresses). Clients talk to the
+  Service; the Service load-balances across whatever ready pods currently exist. The Service IP never changes even
+  as every pod behind it is replaced ten times. This is the indirection that makes Kubernetes apps possible.</p>
+</div>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ The most important misconception to kill right now</div>
+  <p><strong>❌ "A Service is a proxy server — a running process that receives and forwards requests."</strong><br>
+  ✅ A ClusterIP Service is <em>not a process</em>. Nothing listens on the ClusterIP. It is a virtual IP made real
+  by kube-proxy programming iptables/IPVS rules in every node's kernel; the kernel rewrites (DNATs) ClusterIP
+  traffic to a real pod IP. There is no server to SSH into, no process to restart. The "load balancer" is kernel
+  packet-rewriting rules — which is why a Service has effectively zero latency overhead and cannot "crash" the way
+  a proxy process can.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Pods keep changing addresses, so you talk to a <em>Service</em> instead. A Service is a permanent address and
+    name that always points to whatever pods are currently running, and it spreads requests across them. Think of
+    it as a department phone number that reaches whoever is on duty.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A Service is a stable ClusterIP (from <code>10.96.0.0/12</code>) plus a DNS name fronting pods selected by
+    label. EndpointSlices track the ready endpoints (driven by readiness probes). kube-proxy programs iptables/IPVS
+    so the ClusterIP is virtual: the kernel DNATs traffic to a round-robin-chosen ready pod. It is an in-cluster L4
+    load balancer with health-aware routing.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>kube-proxy in iptables mode installs per-Service DNAT chains with probabilistic round-robin; in IPVS mode it
+    uses an in-kernel L4 load balancer with real scheduling algorithms and better scale (thousands of Services).
+    eBPF-based dataplanes (Cilium) can bypass kube-proxy entirely. Because the ClusterIP is virtual and connection
+    handling is per-node, there is no central chokepoint and no extra hop — the DNAT happens on the source node.
+    Subtleties: default round-robin is per-connection, not per-request (a long-lived HTTP/2 or gRPC connection
+    pins to one pod — a Part 13 concern); <code>sessionAffinity: ClientIP</code> changes this; and the source pod's
+    identity is preserved (no SNAT) for in-cluster traffic, which network policies rely on.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="service-types">11. Service types — ClusterIP, NodePort, LoadBalancer, ExternalName</h2>
+
+<p>So far "Service" meant the default kind, ClusterIP. But a Service has a <code>type</code> field that controls
+<em>from where</em> it is reachable. There are four types, and they build on each other like Russian dolls — each
+one is the previous plus an extra layer of exposure.</p>
+
+<h3>11.1 ClusterIP — internal only (the default)</h3>
+
+<p>A <strong>ClusterIP</strong> Service is reachable <em>only from inside the cluster</em>. It gets a virtual IP
+from <code>10.96.0.0/12</code> and a DNS name; pods call it by name. There is no way to reach it from outside the
+cluster. This is what most of your services should be — an <code>order-service</code> that only other pods call has
+no business being reachable from the Internet. This is how pods call each other:</p>
+
+<pre class="code"># inside a Spring Boot pod, calling another service:
+restTemplate.getForObject("http://order-service/api/orders", ...)
+# "order-service" resolves (via CoreDNS) to the ClusterIP, which kube-proxy
+# DNATs to one of the ready order pods. The caller never sees a pod IP.</pre>
+
+<h3>11.2 NodePort — open the same high port on every node</h3>
+
+<p>A <strong>NodePort</strong> Service does everything ClusterIP does, <em>plus</em> it opens the same high port
+(from the range <strong>30000–32767</strong>) on <em>every node's IP</em> in the cluster. External traffic hitting
+<code>anyNodeIP:nodePort</code> is forwarded (by kube-proxy) to the Service, then DNAT'd to a ready pod — even if
+that pod is on a different node.</p>
+
+<div class="figure-title">Fig 12.15 — NodePort opens the same port on all nodes</div>
+<pre class="diagram">
+   external client
+        │  hit ANY node IP on the node port
+        ▼
+   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+   │ node 1       │   │ node 2       │   │ node 3       │
+   │ 10.0.10.20   │   │ 10.0.10.21   │   │ 10.0.10.22   │
+   │ :31000 ◄─────┼───┼─ :31000 ─────┼───┼─ :31000      │  same port, every node
+   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+          └──────────────────┴──────────────────┘
+                  kube-proxy ──► ClusterIP ──► a ready pod
+                  (may forward to a pod on a DIFFERENT node)
+</pre>
+
+<p>NodePort is clunky: the ports are ugly high numbers, and <em>you</em> are responsible for knowing node IPs and
+putting something in front to spread traffic across them (nodes come and go too). You rarely use NodePort directly
+in production — but it is the essential building block underneath LoadBalancer.</p>
+
+<pre class="code">apiVersion: v1
+kind: Service
+metadata: { name: order-service }
+spec:
+  type: NodePort
+  selector: { app: order }
+  ports:
+    - port: 80
+      targetPort: 8080
+      nodePort: 31000        # reachable at  anyNodeIP:31000  (30000-32767)</pre>
+
+<h3>11.3 LoadBalancer — provision an external cloud load balancer</h3>
+
+<p>A <strong>LoadBalancer</strong> Service does everything NodePort does, <em>plus</em> it asks the cloud provider
+to provision a real external <strong>LB</strong> (load balancer) — an AWS NLB or ALB (Part 9 and Part 11 callback)
+— that sits in your public subnets, gets a public IP/DNS name, and forwards incoming traffic to the NodePort on the
+nodes, which kube-proxy then routes to a pod. This is how you expose a single service to the Internet.</p>
+
+<div class="figure-title">Fig 12.16 — LoadBalancer: cloud LB → NodePort → Service → pod</div>
+<pre class="diagram">
+   Internet
+      │
+      ▼
+   ┌──────────────────────────┐   AWS provisions this when you
+   │ AWS NLB / ALB (public)   │   create a type: LoadBalancer Service
+   │ a1b2.elb.amazonaws.com   │   (lives in Part 11 PUBLIC subnets)
+   └──────────┬───────────────┘
+              ▼  forwards to nodes' NodePort
+   ┌──────────────────────────┐
+   │ node :31000 (NodePort)   │ ──► ClusterIP ──► ready pod :8080
+   └──────────────────────────┘
+</pre>
+
+<p>The catch that motivates the next section: <strong>one LoadBalancer Service = one cloud load balancer</strong>.
+If you have 30 microservices that each need external access, that is 30 cloud load balancers, 30 public IPs, and 30
+monthly bills — with no way to route by URL path and TLS configured separately on each. That does not scale. The
+answer is Ingress (section 14).</p>
+
+<h3>11.4 ExternalName — a DNS alias to something outside</h3>
+
+<p>One-liner for completeness: an <strong>ExternalName</strong> Service has no selector and no ClusterIP. It is
+purely a DNS construct — CoreDNS returns a <strong>CNAME</strong> (Canonical Name record — Part 6 callback)
+pointing the service name at an external DNS name. <code>payment-service</code> inside the cluster can be made an
+alias for <code>api.stripe.com</code>, so your code calls a stable internal name while traffic actually goes to an
+external provider.</p>
+
+<table>
+  <tr><th>Type</th><th>Reachable from</th><th>How it's reached</th><th>Cost / cost-driver</th></tr>
+  <tr><td><strong>ClusterIP</strong></td><td>Inside cluster only</td><td>Virtual ClusterIP + DNS name; kube-proxy DNAT to pod</td><td>Free — just kernel rules</td></tr>
+  <tr><td><strong>NodePort</strong></td><td>Anyone who can reach a node IP</td><td><code>anyNodeIP:30000–32767</code> → ClusterIP → pod</td><td>Free, but you manage node IPs / front-end</td></tr>
+  <tr><td><strong>LoadBalancer</strong></td><td>Internet (or internal LB)</td><td>Cloud NLB/ALB → NodePort → ClusterIP → pod</td><td>One paid cloud LB <em>per Service</em></td></tr>
+  <tr><td><strong>ExternalName</strong></td><td>Inside cluster (as an alias)</td><td>CoreDNS returns a CNAME to an external host</td><td>Free — DNS only, no proxying</td></tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — checking an external IP being provisioned</div>
+  <pre class="code">$ kubectl get svc order-service
+NAME            TYPE           CLUSTER-IP     EXTERNAL-IP                          PORT(S)
+order-service   LoadBalancer   10.96.55.10    a1b2c3.elb.us-east-1.amazonaws.com   80:31000/TCP
+# EXTERNAL-IP is the cloud LB's DNS name; 80:31000 shows the LB port and the
+# underlying NodePort it forwards to. ClusterIP still exists underneath.</pre>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>ClusterIP = reachable only inside the cluster (most services). NodePort = also reachable on a high port on
+    every machine. LoadBalancer = also gets a real cloud load balancer with a public address. ExternalName = just a
+    nickname pointing at some outside address.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The types nest: NodePort = ClusterIP + a per-node high port; LoadBalancer = NodePort + a cloud LB targeting
+    that NodePort. ClusterIP is internal-only; LoadBalancer costs one cloud LB per Service (the scaling pain Ingress
+    solves). ExternalName is a CoreDNS CNAME with no proxying or ClusterIP.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>LoadBalancer provisioning is done by a cloud-controller-manager watching Service objects; <code>externalTrafficPolicy:
+    Local</code> avoids a second hop and preserves client source IP (at the cost of uneven distribution), while
+    <code>Cluster</code> spreads across all nodes but SNATs. The one-LB-per-Service economics, plus the lack of L7
+    routing, are exactly why almost nobody exposes many services via LoadBalancer — they put one LB in front of an
+    Ingress controller instead and route L7 from there.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="k8s-dns">12. Kubernetes DNS (the CoreDNS promise from Part 6, delivered)</h2>
+
+<div class="osi-badge">📍 OSI layer 7 — DNS is an application-layer protocol; CoreDNS resolves Service names to ClusterIPs</div>
+
+<p>Back in Part 6 we promised that <strong>CoreDNS</strong> — the DNS server that runs inside Kubernetes — would
+explain how pods find services by name. Here is the delivery. CoreDNS runs as a Service in the cluster, and every
+pod is automatically configured to use it as its DNS resolver. CoreDNS gives every Service a DNS name, so instead
+of hardcoding a ClusterIP, your code uses a name (which never changes even if the ClusterIP were reallocated).</p>
+
+<h3>12.1 The full FQDN anatomy</h3>
+
+<p>Every Service has a fully-qualified domain name (<strong>FQDN</strong> — Part 6 callback). Dissect it:</p>
+
+<div class="figure-title">Fig 12.17 — Anatomy of a Kubernetes Service FQDN</div>
+<pre class="diagram">
+        order-service  .  payments  .  svc  .  cluster.local
+        ─────────────     ────────     ───     ─────────────
+              │              │          │             │
+         Service name    namespace   "svc" =     cluster's DNS
+         (the Service    the Service  this is a   suffix (the
+          object's name) lives in     Service     cluster's "domain")
+</pre>
+
+<p>So a Service named <code>order-service</code> in the <code>payments</code> namespace has the FQDN
+<code>order-service.payments.svc.cluster.local</code>. Reading right to left (the way DNS works, Part 6): within
+the cluster's domain (<code>cluster.local</code>), among Services (<code>svc</code>), in the <code>payments</code>
+namespace, find <code>order-service</code>.</p>
+
+<h3>12.2 Short names within a namespace</h3>
+
+<p>You almost never type the full FQDN. A pod's DNS is configured with a search list, so that within the same
+namespace you can just use the bare Service name. From a pod in the <code>payments</code> namespace:</p>
+
+<ul>
+  <li><code>order-service</code> — short name, resolves to the Service in the <em>same</em> namespace (payments).</li>
+  <li><code>order-service.payments</code> — name + namespace, works from any namespace.</li>
+  <li><code>order-service.payments.svc.cluster.local</code> — the explicit full FQDN, works from anywhere.</li>
+</ul>
+
+<pre class="code"># a Spring Boot pod in the SAME namespace calls a peer by short name:
+spring.datasource.url=jdbc:postgresql://postgres-service:5432/orders
+# this resolves "postgres-service" → ClusterIP, anywhere in the same namespace.
+
+# calling ACROSS namespaces needs at least name.namespace:
+restTemplate.getForObject("http://order-service.payments/api/orders", ...)
+
+# inside a pod you can verify resolution:
+$ kubectl exec -it some-pod -- nslookup order-service
+Name:   order-service.payments.svc.cluster.local
+Address: 10.96.55.10        # the ClusterIP — exactly what we expected</pre>
+
+<h3>12.3 Headless Services — get the pod IPs directly</h3>
+
+<p>Sometimes you do <em>not</em> want a single virtual ClusterIP load-balancing across pods — you want to address
+the <em>individual</em> pods directly. This matters for stateful systems (Kafka, databases, anything where each
+instance has a distinct role and identity). Setting <code>clusterIP: None</code> makes a <strong>headless
+Service</strong>: it has no virtual IP and no kube-proxy load balancing. Instead, a DNS query for it returns the
+<em>actual pod IPs</em> (one A record per ready pod), and with a StatefulSet each pod gets a stable per-pod DNS
+name. This is the mechanism behind addressing <code>kafka-0</code>, <code>kafka-1</code>, <code>kafka-2</code>
+individually (Part 6 SRV-record / per-instance addressing callback) — which, fittingly, is exactly what Kafka's
+advertised-listeners need: a stable name each broker can advertise.</p>
+
+<pre class="code">apiVersion: v1
+kind: Service
+metadata: { name: kafka-headless }
+spec:
+  clusterIP: None          # HEADLESS — DNS returns pod IPs, not a virtual IP
+  selector: { app: kafka }
+  ports: [ { port: 9092 } ]
+# DNS for kafka-headless returns all ready Kafka pod IPs;
+# with a StatefulSet, kafka-0.kafka-headless... is a stable per-pod name.</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>CoreDNS delivers the Part 6 promise: a permanent <em>name</em> in front of changing infrastructure. A normal
+  Service name resolves to a stable ClusterIP (then kube-proxy load-balances to a pod). A headless Service
+  (<code>clusterIP: None</code>) resolves to the actual pod IPs, for when you must address individual stateful
+  instances. Either way, your code uses names — never pod IPs.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Kubernetes runs its own phone book (CoreDNS). Every Service gets a name. A pod can call
+    <code>postgres-service</code> by name and CoreDNS turns it into the right address. Within the same group
+    (namespace) you can use the short name; across groups you add the namespace.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>CoreDNS resolves <code>service.namespace.svc.cluster.local</code> to the Service's ClusterIP. Pods get a DNS
+    search list so same-namespace short names work. Headless Services (<code>clusterIP: None</code>) return
+    per-pod A records instead of a VIP, enabling direct addressing of StatefulSet members for databases and
+    brokers.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Resolution is governed by the pod's <code>/etc/resolv.conf</code> (injected by kubelet) with an
+    <code>ndots:5</code> default that can cause extra lookups for external names — a real latency footgun fixed with
+    explicit FQDNs or <code>dnsConfig</code> tuning. Headless + StatefulSet yields stable network identity
+    (<code>pod-0.svc...</code>) that survives rescheduling, which is precisely what quorum systems (Kafka,
+    etcd, Cassandra) need and what plain Deployments cannot provide.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ingress">13. Ingress — one L7 entry point for the whole cluster</h2>
+
+<div class="osi-badge">📍 OSI layer 7 — Ingress routes by HTTP host and path; it is application-layer routing (Parts 9 &amp; 10 callback)</div>
+
+<p>This is the climax that connects the entire back third of the course. Everything from Part 9 (L7 load
+balancing) and Part 10 (reverse proxies) comes home here.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why Ingress exists</div>
+  <p>Section 11.3 left us with a problem: exposing N services via LoadBalancer means N cloud load balancers, N
+  public IPs, N bills — and still no way to route by URL path or to share one TLS certificate setup. What you
+  actually want is what you already know from Parts 9 and 10: <em>one</em> public entry point that inspects the
+  HTTP request and routes by hostname and path to the right backend, terminating TLS once. That is exactly a
+  reverse proxy / L7 load balancer. <strong>Ingress is how Kubernetes gives you that</strong> — one L7 front door
+  routing to many Services.</p>
+</div>
+
+<h3>13.1 The crucial distinction: Ingress RESOURCE vs Ingress CONTROLLER</h3>
+
+<p>This is the point everyone gets confused about, so we state it as plainly as possible.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — resource vs controller</div>
+  <p>An <strong>Ingress resource</strong> is just a piece of YAML — a set of routing <em>rules</em>: "host
+  <code>api.shop.com</code> path <code>/orders</code> goes to <code>order-service</code>; path <code>/users</code>
+  goes to <code>user-service</code>." That YAML does nothing by itself. An <strong>Ingress controller</strong> is
+  the actual <em>running software</em> that reads those rules and <em>implements</em> them — and it is a real
+  reverse proxy: <strong>Nginx, Traefik, HAProxy, or Envoy</strong> (Part 10 callback!) running as pods in your
+  cluster. The controller watches Ingress resources and reconfigures itself to route accordingly. So: the resource
+  is the <em>rules</em>; the controller is the <em>reverse proxy that enforces them</em>. Without a controller
+  installed, Ingress resources are inert.</p>
+</div>
+
+<p>And the controller itself is usually fronted by exactly <strong>one</strong> cloud LoadBalancer Service (the
+single LB you provision instead of one-per-service). So the full layering is a four-hop chain that ties together
+Parts 9, 10, and this chapter:</p>
+
+<div class="figure-title">Fig 12.18 — The Ingress chain: cloud LB → Ingress controller → Service → Pod</div>
+<pre class="diagram">
+   Internet
+      │
+      ▼
+   ┌────────────────────────────┐  L4, Part 9/11
+   │ Cloud LoadBalancer (1 only)│  one NLB/ALB in the PUBLIC subnet
+   └────────────┬───────────────┘
+                ▼
+   ┌────────────────────────────┐  L7, Part 10 — a REAL reverse proxy
+   │ Ingress Controller pods    │  (Nginx / Traefik / HAProxy / Envoy)
+   │ terminates TLS, routes by  │  reads the Ingress RESOURCE rules
+   │ host + path                │
+   └────────────┬───────────────┘
+                ▼
+   ┌────────────────────────────┐  L4, Part 9 — kube-proxy
+   │ ClusterIP Service          │  DNAT to a ready pod
+   └────────────┬───────────────┘
+                ▼
+   ┌────────────────────────────┐  the workload
+   │ Pod (Spring Boot :8080)    │
+   └────────────────────────────┘
+</pre>
+
+<h3>13.2 The Ingress resource (the rules)</h3>
+
+<pre class="code">apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt   # TLS handled here, once
+spec:
+  ingressClassName: nginx        # which controller implements this
+  tls:
+    - hosts: [ api.shop.com ]
+      secretName: shop-tls       # the certificate (Part 8 callback)
+  rules:
+    - host: api.shop.com
+      http:
+        paths:
+          - path: /orders
+            pathType: Prefix
+            backend:
+              service:
+                name: order-service     # path /orders ──► order-service
+                port: { number: 80 }
+          - path: /users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-service      # path /users ──► user-service
+                port: { number: 80 }</pre>
+
+<p>Read it as routing rules for the reverse proxy: requests to <code>api.shop.com/orders</code> go to
+<code>order-service</code>; requests to <code>api.shop.com/users</code> go to <code>user-service</code>; TLS is
+terminated at the Ingress using the <code>shop-tls</code> certificate. One front door, one certificate, path-based
+routing — exactly the reverse-proxy job from Part 10, declared in Kubernetes YAML.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — what Ingress actually is</div>
+  <p><strong>Ingress = a Kubernetes-managed reverse proxy + L7 load balancer.</strong> It is Parts 9 and 10
+  wearing Kubernetes clothes. The Ingress resource is the routing config; the Ingress controller is Nginx/Traefik/
+  Envoy doing the proxying; one cloud LB fronts the controller. You went from "N load balancers, no path routing"
+  to "one entry point that routes by host and path and terminates TLS" — the entire reason reverse proxies exist
+  (Part 10), now native to Kubernetes.</p>
+</div>
+
+<p>One forward-looking note: the Ingress API has known limitations (it is HTTP-centric and configuration beyond
+basic routing leaks into vendor-specific annotations). Its designated successor is the <strong>Gateway API</strong>
+— a richer, more expressive, role-oriented replacement that handles more protocols and cleaner delegation. You will
+meet Ingress everywhere today; expect Gateway API to gradually take over.</p>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ The Ingress misconception to kill</div>
+  <p><strong>❌ "Ingress is a type of load balancer (like ClusterIP/NodePort/LoadBalancer)."</strong><br>
+  ✅ Ingress is not a Service type at all. It is a separate object: <em>L7 routing rules</em> (the resource) plus a
+  <em>reverse proxy</em> (the controller, e.g. Nginx) that enforces them. It operates at the application layer
+  (host/path/TLS), whereas a LoadBalancer Service operates at L4 (just forwards a port). Ingress almost always sits
+  <em>in front of</em> ClusterIP Services and is itself fronted by one cloud LoadBalancer.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Instead of giving every service its own expensive cloud load balancer, you set up <em>one</em> smart front
+    door (Ingress). It reads the web address — the hostname and the path like <code>/orders</code> — and sends the
+    request to the right service. The "front door" is really a reverse proxy (like Nginx) running inside the
+    cluster, plus a YAML file of routing rules.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>An Ingress resource declares host/path → Service routing and TLS; an Ingress controller (Nginx/Traefik/
+    HAProxy/Envoy pods) watches those resources and configures itself as the reverse proxy that enforces them. One
+    cloud LB fronts the controller. The chain is: cloud LB (L4) → controller (L7 reverse proxy, terminates TLS,
+    routes by host/path) → ClusterIP Service (L4, kube-proxy DNAT) → pod.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The resource/controller split is policy-vs-mechanism again: the API is portable, the dataplane is pluggable.
+    Controllers differ in capability (Envoy/Traefik expose richer middleware than the Nginx ingress), and advanced
+    features escape into annotations — the gap Gateway API fixes with typed, role-segregated resources
+    (GatewayClass/Gateway/HTTPRoute). Note the two L7 hops can collapse: some controllers route straight to pod IPs
+    (bypassing kube-proxy DNAT) using EndpointSlices for better load balancing and session control — a preview of
+    the service-mesh dataplane in Part 13.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="networkpolicy">14. NetworkPolicy — pod-level firewalls</h2>
+
+<div class="osi-badge">📍 OSI layers 3/4 — NetworkPolicies filter by IP/port and pod labels, enforced by the CNI</div>
+
+<p>One concept before the grand finale. By default, the Kubernetes network model is <strong>allow-all</strong>:
+any pod can talk to any other pod (rule 2 — flat reachability). That is convenient but not safe — a compromised pod
+can reach your database pod directly. A <strong>NetworkPolicy</strong> is a pod-level firewall that restricts which
+pods (and namespaces, and IP ranges) may talk to which, on which ports. It is enforced by the CNI plugin (which is
+why your CNI must support NetworkPolicy — not all do).</p>
+
+<p>The crucial parallel: NetworkPolicies select traffic by <em>pod labels</em>, not by IP — exactly like AWS
+Security Groups select by referencing other Security Groups rather than IP ranges (Part 11 callback). You write
+"pods labeled <code>app=order</code> may receive traffic only from pods labeled <code>app=api-gateway</code> on
+port 8080," and the CNI enforces it as pods come and go. The moment you apply <em>any</em> ingress policy selecting
+a pod, that pod flips from allow-all to default-deny for ingress — you must then explicitly allow what you want.
+This is the foundation of <strong>zero-trust</strong> networking inside the cluster.</p>
+
+<pre class="code">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: order-allow-from-gateway }
+spec:
+  podSelector:
+    matchLabels: { app: order }        # this policy applies to order pods
+  policyTypes: [ Ingress ]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: api-gateway }   # ONLY api-gateway pods may connect
+      ports:
+        - { protocol: TCP, port: 8080 }
+# after this, order pods reject all other ingress (default-deny once selected),
+# allowing only api-gateway pods on 8080 — like an SG referencing another SG.</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Kubernetes pods are open to each other by default. NetworkPolicies are label-selected, CNI-enforced firewalls
+  that lock that down — the in-cluster analogue of AWS Security Groups (Part 11), selecting by pod identity
+  (labels) rather than IP. They turn the flat, allow-all pod network into a zero-trust, least-privilege one.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="journey">15. The complete journey: Browser → Ingress → Service → Pod</h2>
+
+<p>Now we tie the entire chapter — and Parts 6 through 11 — into one continuous trace. A user opens
+<code>https://api.shop.com/orders</code> in their browser, and your Spring Boot pod, deep inside the cluster,
+serves it after talking to PostgreSQL and Redis. Follow every hop.</p>
+
+<div class="figure-title">Fig 12.19 — The full request journey through a Kubernetes cluster</div>
+<pre class="diagram">
+   ┌─────────┐
+   │ browser │  user types  https://api.shop.com/orders
+   └────┬────┘
+        │ 1. DNS: api.shop.com  ──►  the cloud LB's public address (Part 6)
+        ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │ AWS Region — your VPC (Part 11)                              │
+   │                                                              │
+   │   PUBLIC subnet 10.0.0.0/24                                   │
+   │   ┌────────────────────────────┐                             │
+   │   │ 2. Cloud LoadBalancer (L4) │  NLB/ALB, public IP          │
+   │   │    Part 9 / Part 11        │                             │
+   │   └─────────────┬──────────────┘                             │
+   │                 ▼                                            │
+   │   PRIVATE subnet 10.0.10.0/24  (nodes 10.0.10.20-22)         │
+   │   ┌────────────────────────────┐                             │
+   │   │ 3. Ingress Controller pod  │  Nginx/Envoy (L7, Part 10)   │
+   │   │    terminates TLS (Part 8),│  reads Ingress rules:        │
+   │   │    routes /orders by path  │  /orders ──► order-service   │
+   │   └─────────────┬──────────────┘                             │
+   │                 ▼                                            │
+   │   ┌────────────────────────────┐                             │
+   │   │ 4. order-service ClusterIP │  10.96.55.10 (L4, kube-proxy)│
+   │   │    DNAT ──► a ready pod     │  EndpointSlice picks healthy │
+   │   └─────────────┬──────────────┘                             │
+   │                 ▼                                            │
+   │   ┌────────────────────────────┐                             │
+   │   │ 5. Pod: Spring Boot :8080  │  10.244.1.5                  │
+   │   │    runs OrderController     │                             │
+   │   └──────┬───────────────┬─────┘                             │
+   │          │ 6a            │ 6b   (calls peers BY NAME, CoreDNS) │
+   │          ▼               ▼                                    │
+   │   ┌────────────┐  ┌────────────┐                              │
+   │   │ postgres-  │  │ redis-     │   postgres-service:5432       │
+   │   │ service    │  │ service    │   redis-service:6379          │
+   │   │ :5432      │  │ :6379      │   (each its own ClusterIP)    │
+   │   └────────────┘  └────────────┘                              │
+   └──────────────────────────────────────────────────────────────┘
+        ▲
+        └─ 7. JSON response retraces the path back to the browser
+</pre>
+
+<p>The numbered walk-through:</p>
+
+<ol>
+  <li><strong>DNS resolution (Part 6).</strong> The browser resolves <code>api.shop.com</code> to the public
+  address of the cloud load balancer (a record you set in your DNS provider pointing at the LB).</li>
+  <li><strong>Cloud LoadBalancer — L4 (Parts 9, 11).</strong> The request hits the AWS NLB/ALB sitting in a
+  <em>public</em> subnet. It forwards the connection toward the nodes (to the Ingress controller's NodePort or pod
+  targets).</li>
+  <li><strong>Ingress controller — L7 (Part 10).</strong> An Nginx/Envoy pod (the controller) receives it,
+  <em>terminates TLS</em> (Part 8 — the HTTPS handshake ends here), inspects the HTTP request, and applies the
+  Ingress rules: host <code>api.shop.com</code>, path <code>/orders</code> → <code>order-service</code>.</li>
+  <li><strong>ClusterIP Service — L4 (Part 9, kube-proxy).</strong> The controller sends the request to
+  <code>order-service</code>'s ClusterIP <code>10.96.55.10</code>. kube-proxy's iptables/IPVS rules DNAT it to one
+  ready pod IP, chosen from the EndpointSlice (health-aware).</li>
+  <li><strong>Pod — the workload.</strong> The packet arrives at the Spring Boot pod <code>10.244.1.5:8080</code>.
+  <code>OrderController</code> runs.</li>
+  <li><strong>Pod calls its dependencies by name (Part 6 / CoreDNS).</strong> The app opens
+  <code>postgres-service:5432</code> and <code>redis-service:6379</code> — CoreDNS resolves each to its ClusterIP,
+  kube-proxy DNATs each to the right backing pod. The app never knows a single pod IP.</li>
+  <li><strong>The response retraces the path</strong> back through the Service, the Ingress controller (which wraps
+  it back in TLS toward the browser), and the cloud LB to the user.</li>
+</ol>
+
+<p>The per-hop table — memorize this; it is the whole course in one grid:</p>
+
+<table>
+  <tr><th>Hop</th><th>Component</th><th>OSI layer</th><th>Mechanism</th><th>What address is used</th></tr>
+  <tr><td>1</td><td>DNS lookup</td><td>L7</td><td>Resolve name → IP (Part 6)</td><td><code>api.shop.com</code> → LB public IP</td></tr>
+  <tr><td>2</td><td>Cloud LoadBalancer</td><td>L4</td><td>Forward connection (Parts 9, 11)</td><td>LB public IP → node / target</td></tr>
+  <tr><td>3</td><td>Ingress controller</td><td>L7</td><td>Reverse proxy: TLS terminate + host/path route (Parts 8, 10)</td><td>HTTP host + path → Service name</td></tr>
+  <tr><td>4</td><td>ClusterIP Service</td><td>L4</td><td>kube-proxy iptables/IPVS DNAT (Part 9)</td><td>ClusterIP <code>10.96.55.10</code> → pod IP</td></tr>
+  <tr><td>5</td><td>Pod (Spring Boot)</td><td>L7</td><td>App handles the HTTP request</td><td>Pod IP <code>10.244.1.5:8080</code></td></tr>
+  <tr><td>6</td><td>Postgres / Redis Services</td><td>L4 + L7 DNS</td><td>CoreDNS resolve + kube-proxy DNAT</td><td><code>postgres-service:5432</code> → pod IP</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the whole picture in one sentence</div>
+  <p>A request enters at <strong>L4</strong> (cloud LB), gets <strong>L7</strong> routed by a reverse proxy
+  (Ingress controller), is <strong>L4</strong> load-balanced to a healthy pod (Service / kube-proxy), and the pod
+  reaches its dependencies by <strong>name</strong> (CoreDNS) which are themselves L4-balanced Services. Every box
+  in your architecture diagram is one of these, and every one is a concept from Parts 6–12. Part 14 will walk this
+  exact journey end-to-end at the byte level, and Part 13 adds a <em>service mesh</em> on top of these Services —
+  sidecar proxies (the pod pattern from section 8) handling retries, mutual TLS, and traffic shaping between every
+  pod-to-pod hop.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">16. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>State the three rules of the Kubernetes network model. Why does the "no NAT" rule matter?</summary>
+    <p>(1) Every pod gets its own unique IP. (2) Every pod can reach every other pod directly by that IP with no
+    NAT, including across nodes. (3) Agents on a node can reach all pods on that node. The "no NAT between pods"
+    rule is the load-bearing one: it means a pod's IP means the same thing from every vantage point in the cluster,
+    so pods behave like ordinary hosts on a flat L3 network and apps never deal with port mapping or address
+    translation. It eliminates the inside-vs-outside address ambiguity that breaks things like Kafka in plain
+    Docker. (Egress to the outside world is still typically SNAT'd behind the node — the rule is about intra-cluster
+    pod-to-pod traffic.)</p>
+  </details>
+
+  <details><summary>Why does a pod have its own IP, and why is it ephemeral?</summary>
+    <p>A pod gets its own IP because the network model demands it — it lets pods act as first-class network citizens
+    reachable directly, without host-port juggling. It is ephemeral because pods are disposable: they are killed and
+    rescheduled on node failure, deployment, or autoscaling, and each new pod gets a fresh IP from the pod CIDR
+    (<code>10.244.0.0/16</code>). The old IP is gone. That is why you never hardcode a pod IP and why Services exist
+    — to provide a stable identity in front of churning pods (the "names persist, IPs change" principle).</p>
+  </details>
+
+  <details><summary>What problem does a Service solve, and how does it actually work?</summary>
+    <p>It solves the ephemeral-pod problem: pods come and go with new IPs, so clients need a stable target. A
+    Service is a stable ClusterIP (from <code>10.96.0.0/12</code>) plus a DNS name, fronting a set of pods selected
+    by label. Mechanically: EndpointSlices track the currently ready pods (driven by readiness probes), and
+    kube-proxy programs iptables or IPVS rules on every node so that traffic to the (virtual) ClusterIP is DNAT'd to
+    a round-robin-chosen ready pod. Crucially, no process listens on the ClusterIP — it is virtual; the kernel
+    rewrites the destination. So a Service is an in-cluster L4 load balancer implemented as kernel packet rules.</p>
+  </details>
+
+  <details><summary>Is a Service a running proxy process? Where does the traffic actually get redirected?</summary>
+    <p>No — that is the classic misconception. A ClusterIP Service has no backing process; nothing listens on the
+    ClusterIP. kube-proxy watches the API and programs iptables/IPVS rules in each node's kernel. When a pod sends a
+    packet to the ClusterIP, the kernel on the <em>source</em> node DNATs the destination to a real pod IP before
+    the packet leaves. There is no extra hop through a proxy server and nothing to "crash." (IPVS mode uses an
+    in-kernel L4 load balancer; eBPF dataplanes like Cilium can replace kube-proxy entirely.)</p>
+  </details>
+
+  <details><summary>Compare ClusterIP, NodePort, LoadBalancer, and Ingress.</summary>
+    <p>ClusterIP: internal-only stable VIP + DNS name, the default, for pod-to-pod calls. NodePort: ClusterIP plus
+    the same high port (30000–32767) open on every node IP — clunky, mainly a building block. LoadBalancer:
+    NodePort plus a cloud-provisioned external LB (NLB/ALB) with a public address — but one LB per Service, which is
+    expensive and offers no path routing. Ingress is <em>not</em> a Service type: it is L7 routing rules (resource)
+    plus a reverse-proxy controller (Nginx/Envoy) that routes by host/path to many Services and terminates TLS,
+    usually behind a single cloud LB. You expose production HTTP via Ingress, not via many LoadBalancers.</p>
+  </details>
+
+  <details><summary>What is the difference between an Ingress resource and an Ingress controller?</summary>
+    <p>An Ingress <em>resource</em> is declarative YAML — routing rules (host/path → Service) and TLS config. It
+    does nothing on its own. An Ingress <em>controller</em> is the actual running software that watches Ingress
+    resources and implements them; it is a real reverse proxy — Nginx, Traefik, HAProxy, or Envoy — running as pods,
+    typically fronted by one cloud LoadBalancer. The resource is the rules; the controller is the proxy that
+    enforces them. Install no controller and your Ingress resources are inert.</p>
+  </details>
+
+  <details><summary>How does DNS work inside Kubernetes? Walk through a name resolution.</summary>
+    <p>CoreDNS runs as a Service; every pod is configured to use it. Services get the FQDN
+    <code>name.namespace.svc.cluster.local</code>. Pods have a search list so a bare <code>order-service</code>
+    resolves within the same namespace, <code>order-service.payments</code> works cross-namespace, and the full
+    FQDN works anywhere. A query for a normal Service returns its ClusterIP (then kube-proxy DNATs to a pod). A
+    headless Service (<code>clusterIP: None</code>) returns the actual pod IPs, used for stateful sets where you
+    address individual instances like <code>kafka-0</code>.</p>
+  </details>
+
+  <details><summary>How do two containers in the same pod communicate?</summary>
+    <p>Over <code>localhost</code> (<code>127.0.0.1</code>), because all containers in a pod share one network
+    namespace and therefore one IP and one loopback. They must use different ports (shared port space) — e.g. app
+    on 8080, sidecar on 15001. This is the sidecar pattern; a proxy sidecar can intercept the app's localhost
+    traffic, which is the foundation of service meshes (Part 13). To the rest of the cluster the whole pod is a
+    single IP.</p>
+  </details>
+
+  <details><summary>Compare Docker bridge, host, and overlay networking.</summary>
+    <p>Bridge (default): each container gets its own namespace and a private IP (<code>172.17.0.0/16</code>) on a
+    virtual switch (<code>docker0</code>) via a veth pair; outbound is NATed, inbound needs <code>-p</code> port
+    publishing; user-defined bridges add name resolution. Host: the container shares the host's namespace directly
+    — no isolation, no NAT, no <code>-p</code>, container port == host port, best performance but port collisions
+    return. Overlay: spans multiple hosts by encapsulating container packets inside host packets (VXLAN) so
+    containers on different machines share one virtual network — used by Swarm and overlay-based Kubernetes CNIs.</p>
+  </details>
+
+  <details><summary>What is a CNI plugin and what does it do? Name the families.</summary>
+    <p>CNI (Container Network Interface) is the plugin contract Kubernetes calls to set up/tear down pod networking;
+    Kubernetes itself does not implement pod networking. The plugin assigns the pod IP and ensures the three rules
+    hold, especially cross-node pod-to-pod reachability. Families: overlay (Flannel/VXLAN — tunnels packets),
+    routed (Calico/BGP — advertises pod routes, no encapsulation), and cloud-native (AWS VPC CNI — gives each pod a
+    real VPC IP via ENI secondary addresses, so Security Groups apply and pods are first-class VPC citizens).</p>
+  </details>
+
+  <details><summary>Why does Kafka often break in containers, and how do you fix it?</summary>
+    <p>Kafka tells clients where to reconnect via <code>advertised.listeners</code>. If a broker in a container
+    advertises <code>localhost:9092</code>, an external client interprets <code>localhost</code> as its own machine,
+    not the broker's container — the bootstrap connects but the real connection fails. The root cause is that an
+    address means different things in different namespaces. The fix is to advertise an address reachable from the
+    client's perspective: the service name (<code>kafka:9092</code>) for in-network clients, the host's reachable
+    address and published port for external clients — Kafka supports multiple named listeners for exactly this.</p>
+  </details>
+
+  <details><summary>What is a NetworkPolicy, and how does it relate to AWS Security Groups?</summary>
+    <p>By default all pods can reach all pods (the flat model). A NetworkPolicy is a pod-level firewall that
+    restricts ingress/egress by selecting traffic via pod labels, namespaces, and ports; it is enforced by the CNI.
+    It parallels AWS Security Groups (Part 11), which select by referencing other Security Groups rather than IP
+    ranges — both express intent by identity, not address, and both survive churn. Applying any ingress policy to a
+    pod flips it from allow-all to default-deny for ingress, enabling zero-trust intra-cluster networking.</p>
+  </details>
+
+  <details><summary>Trace a request from a browser to a pod and back through a Kubernetes cluster.</summary>
+    <p>DNS resolves the hostname to the cloud LB (L7/Part 6). The cloud LB (L4, public subnet) forwards to the
+    Ingress controller pods. The controller (L7 reverse proxy, Part 10) terminates TLS (Part 8) and routes by
+    host/path to a ClusterIP Service. kube-proxy (L4) DNATs the ClusterIP to a ready pod (EndpointSlice +
+    readiness). The pod (Spring Boot :8080) handles the request and calls its dependencies — Postgres, Redis — by
+    Service name via CoreDNS, each itself a ClusterIP DNAT'd to a pod. The JSON response retraces the path, with
+    the controller re-wrapping it in TLS to the browser.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">17. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "A Service is a proxy server — a running process that receives requests."</strong><br>
+  ✅ A ClusterIP Service is virtual; no process listens on it. kube-proxy programs iptables/IPVS rules so the
+  kernel DNATs ClusterIP traffic to a real pod. There is nothing to SSH into or restart — the "load balancer" is
+  kernel packet-rewriting rules, which is why it has near-zero overhead.</p>
+
+  <p><strong>❌ "Ingress is a type of load balancer (alongside ClusterIP/NodePort/LoadBalancer)."</strong><br>
+  ✅ Ingress is not a Service type. It is L7 routing <em>rules</em> (the resource) plus a <em>reverse proxy</em>
+  controller (Nginx/Traefik/Envoy) that enforces them — operating on host/path/TLS at the application layer. It
+  sits in front of ClusterIP Services and is itself usually fronted by one cloud LoadBalancer.</p>
+
+  <p><strong>❌ "Pods have stable IPs you can rely on."</strong><br>
+  ✅ Pods are ephemeral and get a new IP from the pod CIDR every time they are rescheduled. Never hardcode a pod IP.
+  Use a Service's stable ClusterIP/DNS name (or a headless Service's StatefulSet names for stateful instances).</p>
+
+  <p><strong>❌ "Each container in a pod has its own IP address."</strong><br>
+  ✅ All containers in a pod share one network namespace — one IP and one loopback. They reach each other over
+  <code>127.0.0.1</code> on different ports. The pod, not the container, is the unit that gets an IP.</p>
+
+  <p><strong>❌ "NodePort is how you expose production apps."</strong><br>
+  ✅ NodePort uses ugly high ports (30000–32767) and makes you manage node IPs and front-end distribution yourself.
+  It is mostly a building block under LoadBalancer. Production HTTP is exposed via Ingress (one L7 entry point);
+  raw L4 services via a LoadBalancer Service — rarely NodePort directly.</p>
+
+  <p><strong>❌ "docker -p (or EXPOSE) opens the port to the whole world automatically."</strong><br>
+  ✅ Two separate things (Part 5 callback). <code>EXPOSE</code> in a Dockerfile is documentation only — it opens
+  nothing. <code>-p host:container</code> creates an iptables DNAT rule forwarding a host port to the container;
+  it binds the host port (by default on all host interfaces) but is still bounded by host firewalls/Security
+  Groups. Publishing a port is not the same as exposing it to the entire Internet — what reaches it depends on the
+  host's network and firewall rules.</p>
+
+  <p><strong>❌ "Kubernetes invented its own networking instead of using TCP/IP."</strong><br>
+  ✅ Kubernetes uses ordinary TCP/IP, Linux namespaces, veth pairs, iptables/IPVS, and DNS — everything from Parts
+  2–6. It did not replace networking; it defined a <em>model</em> (three rules) and a <em>plugin contract</em> (CNI)
+  on top of standard networking, plus higher-level objects (Service, Ingress) that are themselves built from
+  ClusterIPs, DNS names, and reverse proxies you already understand.</p>
+
+  <p><strong>❌ "localhost inside a container is the same as localhost on the host."</strong><br>
+  ✅ Each network namespace has its own loopback. A container's <code>localhost</code> reaches only that container
+  (or, for a pod, the containers sharing its namespace). This is the root of the Kafka advertised-listeners bug and
+  of "my app binds 127.0.0.1 and nothing can reach it even though I published the port."</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You came in from <a href="part11.html"><strong>Part 11 — Cloud Networking (AWS)</strong></a>, where you built
+  VPCs, subnets, Security Groups, and ENIs. This chapter put containers and Kubernetes <em>inside</em> that VPC:
+  the AWS VPC CNI gives pods real VPC IPs, the cloud LoadBalancer lives in your public subnets, and Security Groups
+  meet their in-cluster cousin, NetworkPolicy. You learned how Docker isolates with namespaces and bridges, how the
+  Kubernetes network model makes pods first-class hosts, how Services give ephemeral pods a permanent identity, and
+  how Ingress is Parts 9 and 10 in Kubernetes clothing. But notice the unfinished business: between every Service
+  hop, traffic is still plain and unencrypted, retries and timeouts are hand-rolled in each app, and you cannot see
+  the pod-to-pod call graph. Solving <em>that</em> — mutual TLS, retries, observability, and traffic shaping for
+  every microservice call, using the sidecar-proxy pattern from section 8 — is the <strong>service mesh</strong>,
+  and it is next: <a href="part13.html"><strong>Part 13 — Microservices Networking</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part11.html"><span class="dir">← Previous</span><span class="t">Part 11: Cloud Networking (AWS)</span></a>
+  <a href="part13.html"><span class="dir">Next →</span><span class="t">Part 13: Microservices Networking</span></a>
+</div>
+
+</main>
+</body>
+</html>

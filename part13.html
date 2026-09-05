@@ -1,0 +1,1731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 13: Microservices Networking — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html" class="active"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 13 of 15</p>
+<h1>Microservices Networking — When Function Calls Cross the Wire</h1>
+<p class="lede">For twelve parts we built the toolbox: signals, addresses, TCP, ports, DNS, HTTP, TLS, load
+balancers, proxies, VPCs, Kubernetes. This is the chapter where it all becomes <em>your</em> problem at once.
+The moment you split a monolith into services, a humble method call — <code>inventory.reserve(item)</code>,
+which used to take nanoseconds and never fail — turns into a network request that is slow, can be lost or
+duplicated, and may arrive at a server that has moved or died. Microservices do not add a new networking
+topic. They take everything in Parts 1–12 and make it your daily engineering reality.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#reframe">The central reframe: a method call becomes a network call</a></li>
+    <li><a href="#fallacies">The eight fallacies of distributed computing</a></li>
+    <li><a href="#sync-async">Synchronous vs asynchronous communication</a></li>
+    <li><a href="#rest">REST over HTTP — the default synchronous style</a></li>
+    <li><a href="#grpc">gRPC — RPC over HTTP/2 with protobuf</a></li>
+    <li><a href="#messaging">Message queues &amp; event streaming</a></li>
+    <li><a href="#delivery">Delivery guarantees &amp; the hard truths</a></li>
+    <li><a href="#resilience">Resilience patterns for an unreliable network</a></li>
+    <li><a href="#discovery">Service discovery</a></li>
+    <li><a href="#gateway">API gateway — the north-south edge</a></li>
+    <li><a href="#mesh">Service mesh — Istio &amp; Envoy</a></li>
+    <li><a href="#tracing">Tracing &amp; observability across services</a></li>
+    <li><a href="#summary">East-west vs north-south: the whole picture</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="reframe">1. The central reframe: a method call becomes a network call</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — why monoliths split</div>
+  <p>For decades the default was the <strong>monolith</strong>: one deployable unit — one Spring Boot JAR, one
+  WAR file — containing every domain (orders, inventory, payments, users) compiled and run together. Monoliths
+  are wonderful at first: one codebase, one database transaction wrapping everything, one deploy, and every
+  cross-domain call is a plain in-process method call. They strain at scale for <em>organizational</em> reasons
+  more than technical ones: a 300-engineer team cannot all merge into one repo and release on one schedule;
+  one tiny memory leak in the reporting code takes down checkout; you cannot scale the CPU-hungry pricing
+  engine without scaling the whole thing; a Python data team and a Java payments team cannot share a JVM.
+  Splitting the monolith into independently-deployable <strong>microservices</strong> — each owned by a small
+  team, released on its own cadence, scaled and written in whatever language fits — solves all of that. The
+  bill for these benefits is paid in exactly one currency: <strong>the network</strong>. Every boundary you
+  draw between services becomes a wire that data must cross.</p>
+</div>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this chapter is different</div>
+  <p>Every earlier part introduced <em>one</em> tool that solves <em>one</em> of the ten problems from Part 1.
+  This chapter introduces almost no new networking — it shows what happens when you, the application engineer,
+  inherit <strong>all of them simultaneously</strong>. In a monolith the network is the ops team's concern at
+  the edges. In microservices the network sits <em>inside</em> your architecture diagram: every arrow between
+  two boxes is a TCP connection (Part 4), addressed by IP (Part 3), resolved by DNS (Part 6), carrying HTTP or
+  a binary protocol (Part 7), possibly encrypted (Part 8), balanced across instances (Part 9). The entire
+  course suddenly describes your Tuesday afternoon.</p>
+</div>
+
+<p>Let us make the reframe concrete with the running example used through the whole chapter. You operate an
+e-commerce backend. In the monolith, placing an order looks like this:</p>
+
+<pre class="code">// MONOLITH — all one process, one JVM, one transaction
+@Transactional
+public Order placeOrder(OrderRequest req) {
+    inventory.reserve(req.getItemId(), req.getQty());   // in-process method call
+    Payment p = payments.charge(req.getCard(), req.getTotal());  // in-process method call
+    Order o = orders.create(req, p);                    // in-process method call
+    return o;                                           // all-or-nothing: @Transactional rolls back on any failure
+}</pre>
+
+<p>Now you split <code>inventory</code>, <code>payments</code>, and <code>orders</code> into three Spring Boot
+services — <code>order-service</code>, <code>inventory-service</code>, <code>payment-service</code> — each on
+its own pods, its own database. That <em>same line</em> <code>inventory.reserve(...)</code> now means: open a
+connection to <code>inventory-service</code>, serialize the arguments into bytes, send them across the network,
+wait, and hope a response comes back. Watch what each property of the call quietly loses:</p>
+
+<div class="figure-title">Fig 13.1 — The same call, before and after the split</div>
+<pre class="diagram">
+   IN A MONOLITH                          AS A MICROSERVICE CALL
+   inventory.reserve(item)                inventoryClient.reserve(item)
+   ┌──────────────────────────┐           ┌──────────────────────────────────────────┐
+   │ duration   ~ nanoseconds │           │ duration   ~ milliseconds   (Part 1: RTT) │
+   │ failure    never         │           │ failure    lost / timeout   (Part 4)      │
+   │ delivery   exactly once  │           │ delivery   0, 1, or 2+ times (Part 4)     │
+   │ ordering   guaranteed    │           │ ordering   may reorder      (Part 4)      │
+   │ callee     always there  │           │ callee     down / slow / moved (Part 12)  │
+   │ args       a reference   │           │ args       serialized bytes (copied)      │
+   │ atomicity  @Transactional│           │ atomicity  NONE across services           │
+   │ security   in-process    │           │ security   crosses the wire (Part 8)      │
+   └──────────────────────────┘           └──────────────────────────────────────────┘
+
+        a function call                         a tiny distributed system
+        you can trust                           you must defend
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the next desk vs the postal service</div>
+  <p>An in-process method call is <strong>asking a colleague at the next desk</strong>: you turn, ask, and have
+  an answer in a heartbeat. They are always there; you never wonder whether your question arrived; the answer is
+  instant and certain. A network call is <strong>mailing a letter</strong> (the postal callback from Part 1): you
+  drop it in the box and wait. It might be lost in transit. It might be delivered twice because you re-sent it
+  when no reply came (and the original was only delayed). The colleague might have changed offices, be on leave,
+  or be buried under a thousand other letters and answer in three weeks. You cannot tell "lost letter" from "slow
+  reply" from "they got it but their reply was lost" — all three look identical from your desk: silence. Every
+  technique in this chapter exists to make mailing letters feel as reliable as turning to the next desk —
+  knowing it never fully can.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>Microservices do not add features to networking — they expose you to all of it.</strong> Latency
+  (Part 1), packet loss and reordering and retransmission (Part 4), connection limits and timeouts (Parts 4–5),
+  name resolution and its caching traps (Part 6), HTTP semantics and idempotency (Part 7), encryption and
+  identity (Part 8), load balancing (Part 9), and ephemeral moving targets (Part 12) are no longer background
+  infrastructure facts. They are bugs in your service, on your pager, with your name on the commit. The rest of
+  this chapter is the playbook for surviving that.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>In one big program, calling another part of the code is instant and always works. Once you split the
+    program into separate services that talk over the network, that same call can be slow, can fail, or can
+    happen twice. Microservices give you team independence — but every call between services is now a little
+    package mailed across the network.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>An in-process call shares memory, the stack, and a transaction; arguments are passed by reference in
+    nanoseconds and either succeed or throw deterministically. A remote call must marshal arguments into bytes,
+    traverse the OS network stack and the wire (an RTT, Part 1), and is subject to TCP's failure modes (Part 4):
+    loss, duplication, reordering, and the fundamental ambiguity that a timeout cannot distinguish a lost request
+    from a lost response. There is no distributed <code>@Transactional</code> across service boundaries — you
+    replace ACID with sagas, idempotency, and eventual consistency.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The deepest consequence is the <em>partial failure</em> model. A monolith fails as a unit — it is up or
+    down. A distributed system is mostly up, with some calls failing, some slow, some duplicated, in
+    combinations that change second to second. The two generals' problem and FLP impossibility tell us you can
+    never have certainty about a remote peer's state over an unreliable channel; the best you get is
+    probability. This is why every mature pattern here — timeouts, retries with idempotency, circuit breakers,
+    at-least-once + dedup — is about converting an impossible "did it work?" into an acceptable "make it safe to
+    assume the worst and try again."</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="fallacies">2. The eight fallacies of distributed computing</h2>
+
+<p>In Part 1 we promised this list and called it "statements about networking." Here it is, delivered in full.
+Peter Deutsch and colleagues at Sun Microsystems catalogued the false assumptions that engineers new to
+distributed systems unconsciously make — assumptions that are harmless in a monolith and catastrophic across a
+network. Each fallacy below is paired with the microservices consequence and the earlier part that already
+armed you against it.</p>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>The fallacies were articulated around 1994–97, when distributed objects (CORBA, RMI — see §5) promised that
+  a remote call could look <em>exactly</em> like a local one. That promise was the trap: by hiding the network
+  perfectly, those frameworks let engineers write code that assumed the network's properties matched local
+  memory. It did not, and systems collapsed in production in ways the local tests never showed. The fallacies are
+  the post-mortem. Thirty years later they are still the most useful checklist in distributed engineering —
+  because the temptation to pretend the network is reliable never goes away.</p>
+</div>
+
+<table>
+  <tr><th>#</th><th>The fallacy ("we assume…")</th><th>The reality</th><th>Microservices consequence</th><th>Armed by</th></tr>
+  <tr><td>1</td><td>The network is reliable</td><td>Packets drop; connections reset; peers vanish mid-call</td><td>Every inter-service call needs timeouts, retries, and a plan for "no answer came"</td><td>Part 4 (TCP loss/retransmit), §7–8 here</td></tr>
+  <tr><td>2</td><td>Latency is zero</td><td>A round trip costs real time, floored by distance and light</td><td>A "chatty" service making 30 sequential calls is 30 RTTs slow; batch and parallelize</td><td>Part 1 (RTT, N+1), §4 (gRPC streaming)</td></tr>
+  <tr><td>3</td><td>Bandwidth is infinite</td><td>Links have finite capacity; payloads cost</td><td>Verbose JSON over millions of internal calls saturates links; binary formats matter</td><td>Part 1 (bandwidth), §5 (protobuf)</td></tr>
+  <tr><td>4</td><td>The network is secure</td><td>Traffic crosses media owned by others; can be sniffed/spoofed</td><td>East-west (service-to-service) traffic needs encryption + identity, not just the edge</td><td>Part 8 (TLS/mTLS), §11 (mesh mTLS)</td></tr>
+  <tr><td>5</td><td>Topology doesn't change</td><td>Pods restart, scale, reschedule; IPs churn constantly</td><td>You cannot hardcode an IP; you need service discovery and health-aware routing</td><td>Part 12 (ephemeral pods), §9 (discovery)</td></tr>
+  <tr><td>6</td><td>There is one administrator</td><td>Each service is owned by a different team with its own deploys</td><td>A dependency's breaking change or 3 a.m. deploy is now your incident; version contracts</td><td>Part 7 (versioning), §5 (schema contracts)</td></tr>
+  <tr><td>7</td><td>Transport cost is zero</td><td>Serialization, TLS handshakes, proxy hops all cost CPU and time</td><td>Marshalling JSON, TLS setup, and an extra mesh hop add latency and load you must budget</td><td>Part 8 (handshake cost), §11 (mesh overhead)</td></tr>
+  <tr><td>8</td><td>The network is homogeneous</td><td>Mixed languages, protocols, versions, clouds, and MTUs coexist</td><td>A Java service calling a Python service needs an agreed wire format and contract</td><td>Part 2 (layered interop), §5 (polyglot codegen)</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The fallacies are not trivia — they are the <em>agenda</em> of this chapter. Every section that follows is
+  an engineering response to one or more of them: synchronous/asynchronous styles answer #1 and #2; gRPC and
+  protobuf answer #3 and #8; resilience patterns answer #1 and #7; service discovery answers #5; the service
+  mesh answers #4 and #6 wholesale. When a distributed system bites you in production, your first diagnostic
+  question should be: <em>which fallacy did we just believe?</em></p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>People building their first distributed system quietly assume the network is fast, reliable, secure, and
+    never changes. None of that is true. These eight "fallacies" are the famous list of those wrong assumptions —
+    learning them up front saves you from re-discovering each one through an outage.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Each fallacy maps to a concrete failure class: #1 to packet loss and timeouts, #2 to RTT-bound latency,
+    #3 to saturated links, #4 to sniffing/spoofing, #5 to IP churn, #6 to independent deploy cycles, #7 to
+    serialization/TLS/proxy overhead, #8 to protocol/version heterogeneity. Good design names the fallacy it is
+    defending against in the design doc.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The fallacies are really one meta-fallacy: <em>that a remote call can be made indistinguishable from a
+    local one</em>. Every leaky abstraction in distributed systems (synchronous RPC pretending to be a function,
+    a distributed cache pretending to be local memory, cross-region replication pretending to be a single DB)
+    fails precisely where it tries to hide the network instead of exposing it. The mature stance is to make the
+    network's properties <em>visible</em> in the programming model — explicit timeouts, explicit retries,
+    explicit idempotency keys — rather than papered over.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sync-async">3. Synchronous vs asynchronous — the foundational fork</h2>
+
+<p>Before any specific protocol, there is one decision that shapes everything: when <code>order-service</code>
+needs <code>inventory-service</code> to do something, does it <strong>wait</strong> for the answer, or does it
+<strong>fire a message and move on</strong>? This single fork organizes the rest of the chapter.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why both styles exist</div>
+  <p>Synchronous request/response is the natural shape — it mirrors the method call you replaced, and you often
+  genuinely need the answer right now ("is this card valid?"). But it creates <strong>temporal coupling</strong>:
+  the caller and callee must both be healthy and reachable <em>at the same instant</em>, and the caller's latency
+  is the sum of everything downstream. Asynchronous messaging breaks that coupling: the sender hands a message to
+  a broker and returns immediately; the receiver processes it whenever it can, even minutes later, even after a
+  restart. You trade the certainty of an immediate answer for resilience and decoupling. Most real systems use
+  both — synchronous where an answer is required to proceed, asynchronous everywhere a "this happened, react when
+  you can" suffices.</p>
+</div>
+
+<div class="figure-title">Fig 13.2 — The two shapes of inter-service communication</div>
+<pre class="diagram">
+   SYNCHRONOUS  (request / response — caller blocks)
+
+   order-service                                inventory-service
+       │   reserve(item)                              │
+       │ ───────────────────────────────────────────► │ runs now
+       │   ……… caller is BLOCKED, holding a thread …… │
+       │ ◄─────────────────────────────────────────── │
+       │   200 OK { reserved: true }                  │
+       ▼                                              ▼
+   needs callee UP right now; latency = downstream sum; temporal coupling
+
+
+   ASYNCHRONOUS  (messaging via a broker — fire and continue)
+
+   order-service        ┌──────────────┐         inventory-service
+       │  publish        │              │          (consumes when ready,
+       │  OrderPlaced    │    BROKER    │           even after a restart)
+       │ ──────────────► │  (Kafka /    │ ──────────────►  │
+       │  returns NOW    │   RabbitMQ)  │  delivered later │
+       ▼                 └──────────────┘                  ▼
+   sender does not wait or even know the consumers; temporal DECOUPLING
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a phone call vs a text message</div>
+  <p>Synchronous is a <strong>phone call</strong>: the other person must pick up <em>now</em>, you both stay on
+  the line, and you get an immediate answer — but if they are out, you are stuck. Asynchronous is a
+  <strong>text message</strong>: you send it and put your phone away; they read it when convenient and reply when
+  they can; neither of you has to be available at the same moment. If they are asleep, your text is not lost — it
+  waits in their inbox. Choosing between sync and async is choosing whether this particular interaction is a call
+  or a text.</p>
+</div>
+
+<table>
+  <tr><th>Dimension</th><th>Synchronous (REST, gRPC)</th><th>Asynchronous (Kafka, RabbitMQ)</th></tr>
+  <tr><td>Caller behavior</td><td>Blocks, waits for response</td><td>Fires message, continues immediately</td></tr>
+  <tr><td>Coupling</td><td>Temporal — both up at once</td><td>Decoupled in time</td></tr>
+  <tr><td>Answer</td><td>Immediate, in-band</td><td>Eventual; often none (fire-and-forget)</td></tr>
+  <tr><td>Failure of callee</td><td>Caller fails / must degrade now</td><td>Message buffered; processed on recovery</td></tr>
+  <tr><td>Latency</td><td>Sum of the whole call chain</td><td>Sender latency is just the publish</td></tr>
+  <tr><td>Natural fit</td><td>Queries; "I need the answer to continue"</td><td>Events; "this happened, react eventually"</td></tr>
+  <tr><td>Load spikes</td><td>Propagate downstream instantly</td><td>Absorbed by the broker (buffering)</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The deciding question is rarely "which is faster?" — it is <strong>"do I need the answer to continue?"</strong>
+  If <code>checkout</code> cannot proceed without knowing the card was charged, that call is synchronous. If
+  "an order was placed" should trigger email, analytics, and a warehouse pick — none of which checkout needs to
+  wait for — that is asynchronous. A common senior move is to make the user-blocking path one short synchronous
+  hop and push everything else onto a broker, so the customer's request returns fast and the rest happens
+  eventually.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Synchronous means "ask and wait for the reply" (like a phone call). Asynchronous means "send a message and
+    carry on" (like a text). Use synchronous when you need the answer before doing the next thing; use
+    asynchronous when you just want to announce that something happened.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Synchronous calls hold a thread/connection open for the duration and couple availability and latency
+    across the chain. Asynchronous messaging inserts a durable broker between producer and consumer, decoupling
+    them in time and absorbing load spikes, at the cost of eventual (not immediate) processing and more moving
+    parts. The choice is per-interaction, not per-system.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Synchronous chains compound failure probability multiplicatively (a chain of 5 services each 99.9% available
+    is only 99.5% available) and turn a slow leaf into a cascading stall as upstream threads block — the classic
+    retry-storm precursor. Async decouples availability but moves complexity into delivery semantics, ordering,
+    and eventual consistency, forcing idempotent consumers (§7). Mature architectures minimize synchronous depth
+    (orchestration vs choreography is largely this debate) and use async to flatten failure domains.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rest">4. REST over HTTP — the default synchronous style</h2>
+<span class="osi-badge">OSI Layer 7 — Application (REST rides on HTTP, Part 7)</span>
+
+<p><strong>REST</strong> (Representational State Transfer) is the synchronous style you already know from Part 7:
+resources identified by URLs, manipulated with HTTP methods (<code>GET</code>, <code>POST</code>,
+<code>PUT</code>, <code>DELETE</code>), with status codes and — almost always — JSON bodies. It is the default
+because it inherits everything HTTP already gives you, and because every language, framework, proxy, and human
+on Earth speaks it.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why REST became the default</div>
+  <p>REST won the public-API era for sound reasons: it is <strong>universal</strong> (every stack has an HTTP
+  client and server), <strong>human-readable</strong> (you can <code>curl</code> it and read the JSON),
+  <strong>cacheable</strong> (HTTP caching and CDNs work out of the box — Part 7), <strong>firewall-friendly</strong>
+  (it is just HTTP on 80/443, which every network already permits — Part 5), and blessed with
+  <strong>enormous tooling</strong> (Postman, Swagger/OpenAPI, browser dev tools). For anything a browser or a
+  third-party developer touches, those properties are decisive.</p>
+</div>
+
+<p>Here is <code>order-service</code> calling <code>inventory-service</code> over REST, using Spring's modern
+declarative HTTP client. The point to notice: the method call <em>looks</em> local, but every invocation is a
+full HTTP round trip across the network.</p>
+
+<pre class="code">// inventory-service exposes a REST endpoint (Part 7: methods, status, JSON)
+@RestController
+@RequestMapping("/inventory")
+class InventoryController {
+    @PostMapping("/reserve")
+    ReserveResponse reserve(@RequestBody ReserveRequest req) { ... }  // 200 / 409 if out of stock
+}
+
+// order-service calls it with a declarative HTTP interface (Spring 6 @HttpExchange / RestClient)
+@HttpExchange(url = "/inventory", accept = "application/json")
+interface InventoryClient {
+    @PostExchange("/reserve")
+    ReserveResponse reserve(@RequestBody ReserveRequest req);
+}
+
+// equivalently with Spring Cloud OpenFeign — same idea, different annotation
+@FeignClient(name = "inventory-service")   // 'inventory-service' is resolved by service discovery (§9)
+interface InventoryFeignClient {
+    @PostMapping("/inventory/reserve")
+    ReserveResponse reserve(@RequestBody ReserveRequest req);
+}
+
+// usage — reads like a normal method call, but it is a network request:
+ReserveResponse r = inventoryClient.reserve(new ReserveRequest(itemId, qty));</pre>
+
+<p>Note <code>@FeignClient(name = "inventory-service")</code>: there is no IP, no port, no hostname. The literal
+string <code>inventory-service</code> is a <em>logical</em> name that the discovery layer (§9) turns into a
+healthy instance address at call time — because the topology changes (fallacy #5).</p>
+
+<h3>4.1 Where REST struggles for internal service-to-service traffic</h3>
+
+<p>REST is excellent at the edge and increasingly awkward <em>between</em> internal services making millions of
+calls per second. The weaknesses:</p>
+
+<ul>
+  <li><strong>Text/JSON overhead.</strong> JSON is verbose and must be parsed from text on every call. Field
+  names ship on the wire repeatedly; numbers are ASCII, not binary. Across millions of internal calls this is
+  real CPU and bandwidth (fallacy #3).</li>
+  <li><strong>No enforced contract.</strong> Plain REST has no built-in schema. A consumer learns the shape from
+  docs (or by guessing), and a producer renaming a field can silently break callers — the breakage shows up at
+  runtime, in production, not at compile time (fallacy #6).</li>
+  <li><strong>Over- and under-fetching.</strong> An endpoint returns a fixed representation; one caller wants
+  three fields and gets thirty, another needs a fourth field that requires a second call.</li>
+  <li><strong>HTTP/1.1 head-of-line blocking.</strong> On HTTP/1.1 a connection handles one request at a time;
+  responses queue (Part 7). Many internal hops on HTTP/1.1 means connection pools and HOL stalls.</li>
+  <li><strong>No native streaming.</strong> Classic request/response does not model "stream me results as they
+  are produced"; you bolt on polling or chunked tricks.</li>
+</ul>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — when REST is the right call</div>
+  <p>Reach for REST when any of these is true: the consumer is a <strong>browser</strong> (no native gRPC — §5);
+  the API is <strong>public</strong> or crosses an organizational boundary (third-party developers expect REST +
+  OpenAPI); the traffic is low-volume and human-debuggability matters more than microseconds; or you want HTTP
+  caching/CDN behavior for free. Your customer-facing <code>GET /api/products</code> should be REST. Your
+  internal, high-volume <code>order-service → inventory-service</code> hot path is where gRPC starts to win — §5.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>REST is "talk to other services the same way a browser talks to a website" — URLs, GET/POST, and JSON.
+    It is easy, universal, and readable, which makes it the default. It can be slow and loose for very chatty
+    internal traffic because JSON is bulky and there is no strict contract.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>REST = resources + HTTP verbs + status codes + (usually) JSON, riding HTTP/1.1 or HTTP/2 (Part 7). Spring
+    offers <code>RestClient</code>/<code>@HttpExchange</code> and OpenFeign for declarative clients that resolve
+    logical service names via discovery. Costs for internal use: JSON parse overhead, no schema enforcement,
+    over/under-fetching, and HTTP/1.1 head-of-line blocking. Strengths: universality, caching, tooling,
+    firewall-friendliness.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"RESTful" is a spectrum; most "REST" APIs are really JSON-over-HTTP RPC and that is fine. The real
+    internal-traffic question is the contract: without a schema (OpenAPI as a generated, enforced artifact — not
+    hand-written docs) you get runtime coupling failures. Teams that keep REST internally usually add generated
+    clients from OpenAPI and consumer-driven contract tests (Pact) to recover the safety gRPC gives by default,
+    accepting JSON's overhead for its ubiquity and debuggability.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="grpc">5. gRPC — RPC over HTTP/2 with Protocol Buffers</h2>
+<span class="osi-badge">OSI Layer 7 — Application, over HTTP/2 (Part 7 multiplexing/binary)</span>
+
+<p>The other major synchronous style, and the one purpose-built for internal service-to-service calls, is
+<strong>gRPC</strong>. To understand it you first need <strong>RPC</strong>.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why RPC exists — make a network call look like a function call</div>
+  <p><strong>RPC</strong> (Remote Procedure Call) is a decades-old idea: let a programmer call a function on
+  another machine using the <em>same syntax</em> as a local function, while the framework hides the
+  serialization, the network, and the waiting. You write <code>inventory.reserve(item)</code>; under the hood a
+  generated <em>stub</em> serializes the arguments, sends them, waits, and hands you back a deserialized result.
+  The appeal is obvious — code stays readable. The danger is equally obvious from §2: hiding the network too well
+  is exactly the meta-fallacy. Modern RPC (gRPC) keeps the convenience but no longer pretends failures cannot
+  happen — every call can throw a status, time out, and be retried.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before gRPC</div>
+  <p>RPC has a long, heavy lineage. <strong>CORBA</strong> (Common Object Request Broker Architecture, 1990s) let
+  objects call each other across languages — powerful but notoriously complex, with brittle interface registries.
+  <strong>Java RMI</strong> (Remote Method Invocation) did the same Java-to-Java, and was a poster child for the
+  fallacies — remote calls that looked exactly local and surprised everyone when the network misbehaved.
+  <strong>SOAP</strong> (Simple Object Access Protocol) wrapped RPC in heavyweight XML envelopes over HTTP, with
+  WSDL contracts — verbose, slow to parse, but contract-first. <strong>Thrift</strong> (Facebook) and
+  <strong>Avro</strong> brought compact binary, schema-first RPC. gRPC (Google, 2015) is the synthesis that won:
+  binary and schema-first like Thrift, contract-enforced like SOAP, but riding modern <strong>HTTP/2</strong> and
+  thus multiplexed, streaming, and firewall-friendly.</p>
+</div>
+
+<p>So: <strong>gRPC = Google's RPC framework, running over HTTP/2 (Part 7), using Protocol Buffers as its
+schema and wire format.</strong> Let us take those two pieces in turn.</p>
+
+<h3>5.1 Protocol Buffers — the schema-first, binary contract</h3>
+
+<p><strong>protobuf</strong> (Protocol Buffers) is an <strong>IDL</strong> (Interface Definition Language): you
+declare your messages and services once, in a <code>.proto</code> file, and a compiler generates type-safe code
+for every language. The serialized form is compact <em>binary</em> — fields are tagged by number, not by name,
+so the verbose field names never travel.</p>
+
+<pre class="code">// inventory.proto — the single source of truth shared by every service
+syntax = "proto3";
+package shop.inventory.v1;
+option java_package = "com.shop.inventory.grpc";
+
+// a SERVICE is a set of remotely-callable methods (the contract)
+service InventoryService {
+  // 1) UNARY: one request, one response (the everyday call)
+  rpc Reserve (ReserveRequest) returns (ReserveResponse);
+
+  // 2) SERVER-STREAMING: one request, a stream of responses
+  rpc WatchStock (WatchRequest) returns (stream StockUpdate);
+
+  // 3) CLIENT-STREAMING: a stream of requests, one response
+  rpc BulkAdjust (stream AdjustRequest) returns (AdjustSummary);
+
+  // 4) BIDIRECTIONAL-STREAMING: both sides stream over one HTTP/2 connection
+  rpc Sync (stream SyncMessage) returns (stream SyncMessage);
+}
+
+message ReserveRequest {
+  string item_id = 1;     // each field has a stable NUMBER, not a name, on the wire
+  int32  quantity = 2;
+  string idempotency_key = 3;   // Part 7 idempotency — see §7
+}
+
+message ReserveResponse {
+  bool   reserved = 1;
+  int32  remaining = 2;
+}</pre>
+
+<p>From this one file, <code>protoc</code> (the protobuf compiler) generates, in each target language, a
+<strong>client stub</strong> (you call methods on it; it does the marshalling and the network) and a
+<strong>server skeleton</strong> (you implement the business logic; it handles decoding and dispatch). In Java:</p>
+
+<pre class="code">// GENERATED server skeleton — you extend it and fill in the logic
+@GrpcService   // Spring gRPC / grpc-spring-boot-starter wires it into the server
+public class InventoryGrpcService extends InventoryServiceGrpc.InventoryServiceImplBase {
+    @Override
+    public void reserve(ReserveRequest req, StreamObserver&lt;ReserveResponse&gt; out) {
+        boolean ok = stock.tryReserve(req.getItemId(), req.getQuantity(), req.getIdempotencyKey());
+        out.onNext(ReserveResponse.newBuilder().setReserved(ok).build());
+        out.onCompleted();
+    }
+}
+
+// GENERATED client stub used by order-service — looks like a local call
+InventoryServiceGrpc.InventoryServiceBlockingStub stub =
+        InventoryServiceGrpc.newBlockingStub(channel);   // 'channel' targets inventory-service (§9)
+ReserveResponse resp = stub.reserve(
+        ReserveRequest.newBuilder().setItemId(id).setQuantity(qty).build());</pre>
+
+<h3>5.2 The four call types — all are HTTP/2 streams (Part 7)</h3>
+
+<p>Because gRPC rides HTTP/2, which natively multiplexes many independent <em>streams</em> over one connection
+(Part 7), it supports four call shapes — not just request/response:</p>
+
+<div class="figure-title">Fig 13.3 — The four gRPC call types</div>
+<pre class="diagram">
+   UNARY                     SERVER-STREAMING          CLIENT-STREAMING          BIDIRECTIONAL
+   1 req → 1 resp            1 req → N resp            N req → 1 resp            N req ↔ N resp
+
+   client    server         client    server          client    server         client    server
+     │  req ──► │             │  req ──► │               │ ──► │                  │ ◄────► │
+     │ ◄── resp │             │ ◄── r1   │               │ ──► │                  │ ◄────► │
+     ▼          ▼             │ ◄── r2   │               │ ──► │  (then)          │ ◄────► │
+                              │ ◄── r3   │               │ ◄── resp               │ ◄────► │
+   "reserve(item)"           "live price feed"         "upload bulk adjustments" "chat / real-time sync"
+</pre>
+
+<ul>
+  <li><strong>Unary</strong> — the ordinary call: <code>Reserve(item)</code>.</li>
+  <li><strong>Server-streaming</strong> — one request, many responses: a live stock or price feed.</li>
+  <li><strong>Client-streaming</strong> — many requests, one summary: bulk-uploading inventory adjustments.</li>
+  <li><strong>Bidirectional</strong> — both stream at once over one connection: real-time sync, chat, telemetry.</li>
+</ul>
+
+<h3>5.3 Why gRPC wins internally — and what it costs</h3>
+
+<table>
+  <tr><th>gRPC strength (internal)</th><th>Mechanism</th><th>Callback</th></tr>
+  <tr><td>Less bandwidth, faster parse</td><td>Compact binary protobuf; numbered fields, no repeated names</td><td>Part 1 bandwidth, fallacy #3</td></tr>
+  <tr><td>Strong, enforced contract</td><td>Schema-first <code>.proto</code>; breaking changes caught at codegen</td><td>Fallacy #6/#8</td></tr>
+  <tr><td>No head-of-line blocking</td><td>HTTP/2 multiplexes many calls over one connection</td><td>Part 7 HTTP/2</td></tr>
+  <tr><td>Streaming built in</td><td>HTTP/2 streams → server/client/bidi streaming</td><td>Part 7 streams</td></tr>
+  <tr><td>Polyglot for free</td><td>One <code>.proto</code> generates Java, Go, Python, Node clients</td><td>Fallacy #8</td></tr>
+</table>
+
+<p>The costs are real and you must weigh them:</p>
+
+<ul>
+  <li><strong>Not browser-native.</strong> Browsers cannot speak raw gRPC (no access to the necessary HTTP/2
+  framing); you need <strong>gRPC-Web</strong> plus a proxy to translate. So gRPC is for <em>internal</em>
+  east-west traffic, not your public browser API.</li>
+  <li><strong>Binary is hard to debug.</strong> You cannot just <code>curl</code> and read it; you need
+  <code>grpcurl</code>, the <code>.proto</code>, and reflection. Less casual observability than JSON.</li>
+  <li><strong>Needs HTTP/2 end-to-end.</strong> This affects your L7 load balancer choice (Part 9): an L4
+  load balancer passes it fine, but an L7 proxy must speak HTTP/2 and not "downgrade" or buffer it. AWS ALB
+  supports gRPC; older/classic L7 proxies need explicit configuration, and a proxy that terminates HTTP/2 and
+  re-opens HTTP/1.1 breaks streaming.</li>
+</ul>
+
+<div class="callout example">
+  <div class="callout-title">🧪 REST vs gRPC — the comparison interviewers want</div>
+  <table>
+    <tr><th>Dimension</th><th>REST / JSON</th><th>gRPC / protobuf</th></tr>
+    <tr><td>Payload</td><td>Text (JSON), verbose</td><td>Binary, compact</td></tr>
+    <tr><td>Schema/contract</td><td>Optional (OpenAPI, bolt-on)</td><td>Mandatory, schema-first <code>.proto</code></td></tr>
+    <tr><td>Transport</td><td>HTTP/1.1 or HTTP/2</td><td>HTTP/2 (required)</td></tr>
+    <tr><td>Streaming</td><td>Not native (polling/SSE/chunked)</td><td>Native: server/client/bidi</td></tr>
+    <tr><td>Browser support</td><td>Native</td><td>Needs gRPC-Web + proxy</td></tr>
+    <tr><td>Performance</td><td>Good; parse + verbosity overhead</td><td>Higher; binary + multiplexed</td></tr>
+    <tr><td>Debuggability</td><td>Excellent (curl, human-readable)</td><td>Harder (grpcurl, binary)</td></tr>
+    <tr><td>Best for</td><td>Public/browser/cross-org APIs</td><td>Internal high-volume service-to-service</td></tr>
+  </table>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>It is not REST <em>or</em> gRPC — it is REST <strong>at the edge</strong> (public, browser-facing,
+  cross-org, cacheable, debuggable) and gRPC <strong>inside</strong> (high-volume, contract-enforced, multiplexed,
+  streaming, polyglot). A very common production shape is exactly this: the API gateway (§10) speaks REST to the
+  outside world and gRPC to the internal services behind it — the gateway does the protocol translation.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>gRPC lets one service call another as if it were calling a local function, but the data travels as compact
+    binary and the two sides agree on an exact "contract" file (<code>.proto</code>) ahead of time. It is faster
+    and stricter than REST, great between your internal services — but browsers can't use it directly, so public
+    APIs still use REST.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>gRPC = RPC over HTTP/2 using Protocol Buffers. A <code>.proto</code> defines services and messages;
+    <code>protoc</code> generates a client stub and server skeleton per language. HTTP/2 multiplexing removes
+    head-of-line blocking and enables four call types (unary, server-/client-/bidirectional-streaming). Binary
+    protobuf is compact and schema-enforced. Costs: no native browser support (needs gRPC-Web), harder debugging,
+    and HTTP/2-aware load balancing (Part 9).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>protobuf's wire compatibility rules are the real contract discipline: never reuse or renumber a field tag,
+    only add new optional fields, reserve removed tags — do that and old and new services interoperate during
+    rolling deploys (fallacy #6). gRPC deadlines propagate across hops (a budget, not a fixed timeout), and
+    status codes are richer than HTTP's. The HTTP/2-end-to-end requirement is the operational gotcha: any L7
+    intermediary that re-frames or terminates must be gRPC-aware, which is why meshes (§11) standardize on Envoy,
+    a first-class HTTP/2 proxy.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="messaging">6. Message queues &amp; event streaming — the asynchronous pillar</h2>
+<span class="osi-badge">OSI Layer 7 — Application protocols over TCP (Part 4 callback)</span>
+
+<p>Now the asynchronous side of the fork. Instead of one service calling another and waiting, a service
+<strong>publishes a message</strong> to a <strong>broker</strong>, and other services <strong>consume</strong>
+it when they are ready. In Part 5 you met Kafka listening on port 9092; here is what it is <em>for</em>.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why asynchronous messaging exists — four wins</div>
+  <ol>
+    <li><strong>Decoupling.</strong> The producer does not know who consumes, how many, or whether they are up.
+    <code>order-service</code> publishes <code>OrderPlaced</code> and is done — it never imports
+    <code>email-service</code>.</li>
+    <li><strong>Buffering / load-leveling.</strong> A traffic spike (a flash sale) is absorbed by the broker;
+    consumers drain the backlog at their own pace instead of being hammered to death — the thundering-herd
+    protection from Part 9, applied to your own services.</li>
+    <li><strong>Resilience.</strong> If a consumer is down, its messages wait in the broker. Nothing is lost; it
+    catches up on restart. A synchronous call to a down service simply fails.</li>
+    <li><strong>Fan-out.</strong> One event, many independent reactions. <code>OrderPlaced</code> can drive
+    email, analytics, fraud-check, and warehouse — each a separate consumer, added without touching the
+    producer.</li>
+  </ol>
+</div>
+
+<div class="figure-title">Fig 13.4 — The broker as decoupling intermediary (fan-out)</div>
+<pre class="diagram">
+                                    ┌──────────────────────────┐
+   order-service ── OrderPlaced ──► │          BROKER          │
+   (producer; returns immediately) │   topic: orders.placed   │
+                                    └────┬───────┬────────┬────┘
+                          ┌──────────────┘       │        └──────────────┐
+                          ▼                      ▼                       ▼
+                  email-service          analytics-service        warehouse-service
+                  (send receipt)         (update metrics)         (start picking)
+
+      one event → many consumers; producer knows none of them;
+      a consumer being down does NOT lose the message — it waits
+</pre>
+
+<p>There are two distinct models that beginners constantly conflate. They behave very differently, and choosing
+the wrong one causes real production pain.</p>
+
+<h3>6.1 Model A — the traditional message queue / broker (RabbitMQ)</h3>
+
+<p><strong>RabbitMQ</strong> speaks <strong>AMQP</strong> (Advanced Message Queuing Protocol). The mental model
+is a <strong>smart broker, dumb consumer</strong>: the broker holds queues, routes each message to a queue via
+exchanges and bindings, hands a message to <em>one</em> of the competing consumers, and — once that consumer
+<strong>acknowledges (acks)</strong> — <strong>deletes</strong> the message. Multiple consumers on one queue
+form a <strong>competing-consumers</strong> pool: each message goes to exactly one of them, which is how you
+share work and scale throughput.</p>
+
+<div class="figure-title">Fig 13.5 — RabbitMQ: competing consumers, message removed after ack</div>
+<pre class="diagram">
+   producer ──► ┌──────────┐   message routed to ONE free consumer, then deleted
+                │  QUEUE   │ ──► consumer A   (acks → message gone)
+                │ [m4 m3]  │ ──► consumer B
+                └──────────┘ ──► consumer C
+                broker is SMART (routing, retries); consumers are simple workers
+</pre>
+
+<h3>6.2 Model B — the event log / stream (Kafka)</h3>
+
+<p><strong>Kafka</strong> is not a queue — it is a <strong>distributed, append-only commit log</strong>. Events
+are appended to a <strong>topic</strong>, which is split into <strong>partitions</strong>. Messages are
+<strong>not deleted on consumption</strong>; they are <em>retained</em> (for days, or forever) and can be
+<strong>replayed</strong>. Each consumer tracks its own position — its <strong>offset</strong> — so a new
+consumer can start from the beginning and re-read history. The model is <strong>dumb broker, smart
+consumer</strong>: the broker just stores an ordered log; consumers decide what to read and where they are.
+Crucially, <strong>ordering is guaranteed only within a partition</strong>, and which partition a message lands
+in is chosen by its <strong>key</strong> — the consistent-hashing/partitioning idea from Part 9 applied to
+events (all events for <code>order-42</code> share a key, so they land in one partition and stay ordered).</p>
+
+<div class="figure-title">Fig 13.6 — Kafka: a partitioned, retained, replayable log</div>
+<pre class="diagram">
+   topic "orders.placed"
+   partition 0:  [off0][off1][off2][off3][off4 ◄─ consumer-X is here]   ──► grows ──►
+   partition 1:  [off0][off1 ◄─ consumer-Y here][off2][off3]            ──► grows ──►
+   partition 2:  [off0][off1][off2][off3][off4][off5 ◄─ analytics here] ──► grows ──►
+
+   key("order-42") ── hash ──► always partition 1  (ordering preserved per key, Part 9)
+   messages are RETAINED; a new consumer can replay from off0; broker is DUMB
+</pre>
+
+<div class="callout example">
+  <div class="callout-title">🧪 RabbitMQ vs Kafka — pick deliberately</div>
+  <table>
+    <tr><th>Dimension</th><th>RabbitMQ (queue/broker)</th><th>Kafka (event log/stream)</th></tr>
+    <tr><td>Model</td><td>Smart broker, dumb consumer</td><td>Dumb broker, smart consumer</td></tr>
+    <tr><td>After consumption</td><td>Message deleted on ack</td><td>Retained; replayable</td></tr>
+    <tr><td>Ordering</td><td>Per-queue (weakens with competing consumers)</td><td>Strict per partition (by key)</td></tr>
+    <tr><td>Replay / history</td><td>No (gone once acked)</td><td>Yes (re-read from any offset)</td></tr>
+    <tr><td>Consumer position</td><td>Broker tracks it</td><td>Consumer tracks its own offset</td></tr>
+    <tr><td>Throughput</td><td>High</td><td>Very high (sequential disk, partitioned)</td></tr>
+    <tr><td>Best for</td><td>Task queues, RPC-ish work distribution, complex routing</td><td>Event streaming, audit logs, replayable pipelines, many consumers</td></tr>
+  </table>
+</div>
+
+<p>Here is <code>order-service</code> publishing and <code>warehouse-service</code> consuming with Spring for
+Apache Kafka — the everyday shape:</p>
+
+<pre class="code">// PRODUCER — order-service (Spring Kafka). Publish is fast; we do not wait for consumers.
+@Service
+class OrderEventPublisher {
+    private final KafkaTemplate&lt;String, OrderPlaced&gt; kafka;
+
+    void publish(OrderPlaced event) {
+        // KEY = orderId → all events for one order land in the SAME partition (ordering, Part 9)
+        kafka.send("orders.placed", event.orderId(), event);
+    }
+}
+
+// CONSUMER — warehouse-service. Reacts whenever it can, even after a restart.
+@Component
+class WarehouseListener {
+    @KafkaListener(topics = "orders.placed", groupId = "warehouse")
+    void onOrderPlaced(OrderPlaced event) {
+        // MUST be idempotent: this event may be delivered more than once (§7)
+        if (alreadyProcessed(event.orderId())) return;     // dedup on a stable id
+        warehouse.startPicking(event);
+    }
+}</pre>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Instead of one service phoning another, it drops a message into a shared "mailbox" (the broker) and moves
+    on. Other services pick it up when they can. RabbitMQ is like a to-do list where a task is removed once
+    someone does it; Kafka is like a logbook that keeps every entry so anyone can re-read the history.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Brokers decouple producers from consumers in time, buffer spikes, and enable fan-out. RabbitMQ (AMQP) is
+    a smart broker with queues, exchanges, competing consumers, and delete-on-ack. Kafka is a partitioned,
+    retained, append-only log where consumers track offsets and can replay; ordering holds per partition, keyed
+    by a partition key (Part 9 consistent hashing). Spring Kafka's <code>KafkaTemplate</code> and
+    <code>@KafkaListener</code> are the standard producer/consumer.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The queue-vs-log distinction drives architecture. A log (Kafka) makes events a <em>source of truth</em> you
+    can rebuild state from (event sourcing, CQRS) and lets new consumers backfill from history — at the cost of
+    consumers owning offset management and dedup. A queue (RabbitMQ) excels at work distribution and rich routing
+    but cannot replay. Partition count caps consumer parallelism in a Kafka group (one partition → at most one
+    consumer in the group), so partitioning is a capacity decision; rebalancing and offset-commit semantics are
+    where most real Kafka bugs live.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="delivery">7. Delivery guarantees &amp; the hard truths</h2>
+
+<p>This is where the network bites hardest, and where Part 7's promise about idempotency keys is delivered.
+Everyone wants "exactly once." Almost nobody can have it. Understanding why is the difference between a junior
+and a senior distributed engineer.</p>
+
+<p>There are three possible delivery guarantees:</p>
+
+<ul>
+  <li><strong>At-most-once</strong> — fire and forget; never retry. Fast, but messages can be silently lost.
+  Acceptable only for data you can afford to drop (e.g. a metrics sample).</li>
+  <li><strong>At-least-once</strong> — retry until acknowledged. Nothing is lost, but a message can arrive
+  <em>more than once</em> (the ack got lost, so you re-sent something that actually succeeded). This is the
+  default for almost all real systems.</li>
+  <li><strong>Exactly-once</strong> — every message processed once and only once. The holy grail.</li>
+</ul>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why true exactly-once delivery is impossible</div>
+  <p>It reduces to Part 4's fundamental ambiguity. After you send a message you await an ack. If no ack arrives,
+  you cannot tell <em>which</em> happened: (a) the message was lost, (b) it arrived and was processed but the ack
+  was lost, or (c) it is merely slow. To guarantee delivery you must retry — but if the truth was (b), retrying
+  delivers a <strong>duplicate</strong>. To guarantee no duplicates you must not retry — but then if the truth
+  was (a), you have <strong>lost</strong> the message. You cannot have both over an unreliable channel. So
+  exactly-once <em>delivery</em> on the wire is impossible; <strong>duplicates will happen.</strong></p>
+</div>
+
+<div class="figure-title">Fig 13.7 — Why a lost ack forces a duplicate</div>
+<pre class="diagram">
+   producer                         consumer
+      │  message  ───────────────────► │  processes it ✓  (side effect done!)
+      │                                │
+      │  ◄────────  ack  ───── ✗ LOST  │  (ack never arrives)
+      │
+      │  no ack → must retry to be safe
+      │  message (again) ────────────► │  processes it AGAIN ✗ duplicate!
+      ▼                                ▼
+   the producer cannot tell "lost message" from "lost ack" (Part 4)
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — idempotency is not optional in distributed systems</div>
+  <p>Since you cannot prevent duplicates, you make them <strong>harmless</strong>. The real, achievable pattern
+  is <strong>at-least-once delivery + idempotent consumers</strong> — and <em>that combination</em> is what
+  people mean by "effectively exactly-once." This is the Part 7 idempotency-key promise, delivered: every
+  message carries a stable id (an <code>idempotency_key</code>, an <code>orderId</code>, an event id), and the
+  consumer records which ids it has processed and skips repeats. "Exactly-once <em>processing</em>" is real;
+  "exactly-once <em>delivery</em>" is a myth.</p>
+</div>
+
+<p>Two supporting patterns you should be able to name:</p>
+
+<ul>
+  <li><strong>Idempotent consumer / dedup.</strong> Track processed ids (a unique key in the database, a Redis
+  set with TTL). On a duplicate, the insert violates the unique constraint or the id is already present, and you
+  skip — exactly the <code>if (alreadyProcessed(id)) return;</code> in §6.1.</li>
+  <li><strong>The outbox pattern.</strong> Writing to your database <em>and</em> publishing to Kafka in one
+  step is not atomic (two systems, no shared transaction). Instead, in the same DB transaction, write the
+  business row <em>and</em> an "outbox" row; a separate relay reads the outbox and publishes, marking rows sent.
+  Now the DB write and the eventual publish cannot diverge — and the relay being at-least-once is fine because
+  consumers are idempotent.</li>
+</ul>
+
+<table>
+  <tr><th>Guarantee</th><th>Behavior</th><th>Use when</th><th>You must add</th></tr>
+  <tr><td>At-most-once</td><td>May lose; never duplicates</td><td>Droppable data (metrics samples)</td><td>Nothing</td></tr>
+  <tr><td>At-least-once</td><td>Never loses; may duplicate</td><td>Almost everything</td><td>Idempotent consumers + dedup</td></tr>
+  <tr><td>"Exactly-once" (processing)</td><td>At-least-once + dedup illusion</td><td>Money, orders, inventory</td><td>Idempotency keys, outbox, often transactional sink</td></tr>
+</table>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Over a flaky network you can either risk losing a message or risk delivering it twice — you can't perfectly
+    avoid both. So real systems choose "deliver at least once" and make the code safe to run twice (idempotent):
+    if the same order event arrives again, the second time does nothing.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>At-most-once (no retry) can lose; at-least-once (retry until ack) can duplicate; the lost-ack ambiguity
+    (Part 4) makes true exactly-once delivery impossible. The pattern is at-least-once + idempotent consumers
+    keyed on a stable id, plus the outbox pattern to bridge the non-atomic "DB write + publish" gap. This is
+    Part 7's idempotency key applied to messaging.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Kafka offers "exactly-once semantics" (idempotent producer + transactions) but only <em>within</em> Kafka
+    (read-process-write across topics); the moment a side effect hits an external system (charge a card, send an
+    email) you are back to at-least-once + idempotency. Dedup needs a stable, business-meaningful key, a storage
+    window (you can't remember forever — TTL vs replay horizon is a real tension), and care with ordering, since
+    a retry can reorder relative to later messages. Senior designs make the <em>effect</em> idempotent, not just
+    the delivery.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="resilience">8. Resilience patterns — because the network <em>will</em> fail</h2>
+
+<p>Fallacy #1 says the network is not reliable; §7 says calls can be lost, slow, or duplicated. So every
+synchronous inter-service call must be <em>defended</em>. These patterns are the standard armor — each answers a
+specific failure mode.</p>
+
+<h3>8.1 Timeouts — never wait forever</h3>
+
+<p>The single most common production footgun: a client with <strong>no timeout</strong> (or the language default
+of "infinite"). A downstream service hangs; your caller's threads block waiting forever; the thread pool fills;
+your service stops responding to <em>everything</em> — one slow dependency took you down. Every remote call must
+have an explicit, finite timeout (Part 4's timeout concept made an application rule). If no response arrives in
+time, you fail fast and react.</p>
+
+<h3>8.2 Retries — with exponential backoff and jitter</h3>
+
+<p>Transient failures (a dropped packet, a pod mid-restart) often succeed on a second try, so retries help — but
+naive retries are dangerous. If a service is struggling and a thousand callers all immediately retry, you
+generate a <strong>retry storm</strong> that finishes off the wounded service (the Part 9 retry-storm /
+thundering-herd callback). The fixes: <strong>exponential backoff</strong> (wait 1s, 2s, 4s… between attempts),
+plus <strong>jitter</strong> (randomize the wait so retries spread out instead of synchronizing into a wave),
+and — critically — <strong>only retry idempotent operations</strong> (§7), because a retried non-idempotent call
+is how you charge a card twice.</p>
+
+<div class="figure-title">Fig 13.8 — Naive retries vs backoff + jitter</div>
+<pre class="diagram">
+   NAIVE: all clients retry at once → a synchronized wave crushes the service
+      t0  ████████████████   ← every caller retries simultaneously
+      t1  ████████████████   ← and again
+                       (the wounded service never recovers)
+
+   BACKOFF + JITTER: waits grow and are randomized → load spreads out
+      t0  ██   ██     █          █     ██
+      t1        █          ██  █        (service gets room to breathe)
+</pre>
+
+<h3>8.3 Circuit breaker — stop hammering a dead dependency</h3>
+
+<p>If a dependency is clearly down, continuing to call it (and wait for timeouts) wastes resources and slows
+your own service. A <strong>circuit breaker</strong> (CB) wraps the call and watches the failure rate. Like an
+electrical breaker, it <em>trips</em>: after too many failures it moves to <strong>OPEN</strong> and
+immediately rejects calls (fails fast) without even trying the network, giving the dependency time to recover.
+After a cooldown it goes <strong>HALF-OPEN</strong>, lets a trickle of test calls through, and either
+<strong>CLOSES</strong> (recovered) or re-opens (still broken).</p>
+
+<div class="figure-title">Fig 13.9 — Circuit breaker states</div>
+<pre class="diagram">
+        failures exceed threshold
+   ┌──────────┐ ───────────────────► ┌──────────┐
+   │  CLOSED  │                       │   OPEN   │  reject instantly,
+   │ calls go │                       │  do NOT  │  do not touch the network
+   │ through  │ ◄─────────────────── ┌┴──────────┘
+   └──────────┘   test calls pass    │   after cooldown timer
+        ▲                            ▼
+        │                       ┌────────────┐
+        └────── test calls ─────│ HALF-OPEN  │  let a few probes through
+            still failing  ◄────│  (probing) │
+                                └────────────┘
+</pre>
+
+<pre class="code"># Resilience4j config (Spring Boot) — order-service calling inventory-service
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventory:
+        sliding-window-size: 20
+        failure-rate-threshold: 50          # open if &gt;=50% of last 20 calls fail
+        wait-duration-in-open-state: 10s    # stay OPEN 10s, then HALF-OPEN
+        permitted-number-of-calls-in-half-open-state: 3
+  retry:
+    instances:
+      inventory:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true    # 200ms, 400ms, 800ms …
+  timelimiter:
+    instances:
+      inventory:
+        timeout-duration: 2s                # never wait longer than 2s</pre>
+
+<pre class="code">// applied declaratively to the client call
+@CircuitBreaker(name = "inventory", fallbackMethod = "reserveFallback")
+@Retry(name = "inventory")
+@TimeLimiter(name = "inventory")
+public ReserveResponse reserve(ReserveRequest req) { return inventoryClient.reserve(req); }
+
+// FALLBACK — graceful degradation when the breaker is open or the call fails
+private ReserveResponse reserveFallback(ReserveRequest req, Throwable t) {
+    return ReserveResponse.pendingManualCheck();   // degrade, don't crash
+}</pre>
+
+<h3>8.4 Bulkheads, fallbacks, and load shedding</h3>
+
+<ul>
+  <li><strong>Bulkhead.</strong> Named after a ship's watertight compartments: isolate resource pools so one
+  slow dependency cannot consume <em>all</em> your threads/connections. Give calls to <code>inventory-service</code>
+  their own bounded pool; if it stalls, only that pool fills, and <code>payment-service</code> calls keep
+  flowing (the Part 4 connection-pool callback — one exhausted pool must not sink the ship).</li>
+  <li><strong>Fallback / graceful degradation.</strong> When a dependency is unavailable, return a sensible
+  reduced result instead of an error: cached data, a default, "recommendations unavailable." The user gets a
+  degraded page, not a 500.</li>
+  <li><strong>Load shedding / rate limiting.</strong> When <em>you</em> are overloaded, deliberately reject
+  excess work with <code>429 Too Many Requests</code> (the Part 7 status-code callback) so the load you <em>do</em>
+  accept is served well, rather than collapsing under everything.</li>
+</ul>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Pattern → the failure it addresses</div>
+  <table>
+    <tr><th>Pattern</th><th>Failure it defends against</th><th>One-line how</th></tr>
+    <tr><td>Timeout</td><td>A hung/slow dependency blocking you forever</td><td>Cap every call's wait; fail fast</td></tr>
+    <tr><td>Retry + backoff + jitter</td><td>Transient loss — without amplifying outages</td><td>Re-try idempotent ops with growing, randomized waits</td></tr>
+    <tr><td>Circuit breaker</td><td>A dead dependency you keep hammering</td><td>Trip open after failures; reject instantly; probe to recover</td></tr>
+    <tr><td>Bulkhead</td><td>One slow dependency exhausting all threads</td><td>Isolate per-dependency resource pools</td></tr>
+    <tr><td>Fallback</td><td>A required dependency being unavailable</td><td>Return cached/default/degraded result</td></tr>
+    <tr><td>Load shedding / rate limit</td><td>Your own overload collapsing everything</td><td>Reject excess with 429; protect served traffic</td></tr>
+  </table>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Because network calls can hang or fail, you protect each one: don't wait forever (timeout), try again a
+    couple of times but space the tries out (backoff + jitter), and if a service is clearly dead, stop calling it
+    for a bit (circuit breaker) and show a fallback instead of an error.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Timeouts bound latency and free threads; retries with exponential backoff + jitter recover transient
+    failures without retry storms (Part 9) and must target idempotent ops only (§7); circuit breakers
+    (closed/open/half-open) fail fast against dead dependencies; bulkheads isolate pools (Part 4); fallbacks give
+    graceful degradation; load shedding returns 429 (Part 7) under overload. Resilience4j wires these declaratively
+    in Spring.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The patterns interact and must be ordered: timeout inside retry inside circuit breaker, with a deadline
+    <em>budget</em> propagated across hops so a deep chain doesn't multiply timeouts (a 2s call that retries 3×
+    can become 6s for the caller). Retries amplify load exactly when a system is weakest, so cap total attempts,
+    use token-bucket retry budgets, and prefer idempotency over optimism. The subtle failure is correlated
+    timeouts causing synchronized breaker trips across a fleet — jitter and staggered config are the defense.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="discovery">9. Service discovery — finding a moving target</h2>
+
+<p>Here is a problem the monolith never had. <code>order-service</code> wants to call
+<code>inventory-service</code>. But there is no single <code>inventory-service</code> — there are <em>twelve</em>
+pods, each on a different IP, and those IPs <strong>change constantly</strong>: pods restart, scale up and down,
+get rescheduled to other nodes (the Part 12 pod-IP-churn callback; fallacy #5). You cannot hardcode an address.
+So: how does a caller find a <em>healthy, current</em> instance of the service it needs? That is
+<strong>service discovery</strong>.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why discovery exists</div>
+  <p>In a static world you put the database's IP in a config file and forget it. In a dynamic world — autoscaling,
+  rolling deploys, self-healing pods — instances are <em>ephemeral</em>: born and destroyed by the minute, each
+  with a fresh IP. The set of "where is a healthy inventory-service right now?" is a moving target that no human
+  and no static config can track. Discovery is the mechanism that answers that question automatically and keeps
+  the answer fresh as the topology churns.</p>
+</div>
+
+<p>There are two models, and the difference is <em>who does the looking-up and load-balancing</em>.</p>
+
+<h3>9.1 Client-side discovery (Eureka / Consul / etcd)</h3>
+
+<p>A <strong>service registry</strong> is a database of "which instances of which service are alive, at which
+addresses." On startup each instance <strong>registers</strong> itself (and sends periodic
+<strong>heartbeats</strong>; if heartbeats stop, the registry evicts it). A caller <strong>queries the
+registry</strong> for the list of healthy <code>inventory-service</code> instances and then
+<strong>load-balances itself</strong> — it picks one and calls it directly. Netflix <strong>Eureka</strong>,
+HashiCorp <strong>Consul</strong>, and <strong>etcd</strong> are common registries; in Spring this is Spring
+Cloud LoadBalancer choosing among the addresses Eureka returns.</p>
+
+<div class="figure-title">Fig 13.10 — Client-side discovery: the caller queries the registry and load-balances</div>
+<pre class="diagram">
+                       ┌──────────────────────────┐
+        register +     │   SERVICE REGISTRY       │
+        heartbeat ───► │   (Eureka / Consul)      │
+                       │  inventory-service →     │
+                       │   10.2.0.7, 10.2.0.9,    │
+                       │   10.2.0.4 (all healthy) │
+                       └────────────▲─────────────┘
+   inventory pods ─────────────┐    │ 1. "give me healthy inventory-service"
+                               │    │
+   order-service ──────────────┴────┘
+        │  2. picks one itself (client-side LB) and calls it directly
+        └───────────────────────────────────────► inventory pod 10.2.0.9
+</pre>
+
+<h3>9.2 Server-side discovery (Kubernetes Services + CoreDNS)</h3>
+
+<p>In server-side discovery the caller stays dumb: it calls a single <strong>stable name or address</strong>,
+and the <em>platform</em> resolves that to a healthy instance and balances the load. <strong>You have already
+been using this.</strong> In Kubernetes (Part 12), a <strong>Service</strong> gives a stable virtual name and
+ClusterIP; <strong>CoreDNS</strong> (Part 12 callback) resolves <code>inventory-service.default.svc.cluster.local</code>
+to that ClusterIP, and kube-proxy load-balances across the healthy pods behind it. The caller just does
+<code>http://inventory-service/...</code> and the platform handles the rest. AWS <strong>Cloud Map</strong> is
+the same idea in plain AWS.</p>
+
+<div class="figure-title">Fig 13.11 — Server-side discovery: a stable name, the platform resolves &amp; balances</div>
+<pre class="diagram">
+   order-service
+        │  "http://inventory-service/reserve"   (just a stable name)
+        ▼
+   ┌──────────────────────────────────────────────┐
+   │  PLATFORM (Kubernetes Service + CoreDNS)      │
+   │  name → ClusterIP → kube-proxy load-balances  │
+   └───────┬───────────────┬───────────────┬───────┘
+           ▼               ▼               ▼
+        inv pod         inv pod         inv pod
+       10.2.0.7        10.2.0.9        10.2.0.4
+   caller knows nothing about instances; the platform does the work
+</pre>
+
+<p>One trap that bridges to Part 6: <strong>DNS caching</strong>. DNS-based discovery is simple, but DNS records
+are cached with a TTL, and clients (notably the JVM, whose default DNS cache can be effectively forever — the
+Part 6 JVM-DNS-cache callback) may keep calling an IP long after the pod behind it died. This is why
+DNS-for-discovery needs short TTLs and JVM cache tuning (<code>networkaddress.cache.ttl</code>), and why
+Kubernetes routes through a <em>stable ClusterIP</em> rather than handing out raw, churning pod IPs.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Client-side vs server-side discovery</div>
+  <table>
+    <tr><th>Dimension</th><th>Client-side (Eureka/Consul)</th><th>Server-side (K8s Service/Cloud Map)</th></tr>
+    <tr><td>Who load-balances</td><td>The client (Spring Cloud LoadBalancer)</td><td>The platform (kube-proxy / LB)</td></tr>
+    <tr><td>Client complexity</td><td>Higher — needs a discovery client library</td><td>Lower — just call a stable name</td></tr>
+    <tr><td>Language coupling</td><td>Per-language client (Java-centric for Eureka)</td><td>Language-agnostic (it's just DNS/IP)</td></tr>
+    <tr><td>LB intelligence</td><td>Rich (client sees all instances, can be smart)</td><td>Platform-defined</td></tr>
+    <tr><td>Extra hop</td><td>No — client calls instance directly</td><td>Through ClusterIP / LB</td></tr>
+    <tr><td>Typical home</td><td>Spring Cloud on VMs / mixed infra</td><td>Kubernetes, cloud-native</td></tr>
+  </table>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>In Kubernetes, <strong>the platform gives you discovery plus L4 load balancing for free</strong> via
+  Services and CoreDNS — you call <code>http://inventory-service</code> and never think about IPs. Many teams need
+  nothing more than this; a dedicated registry like Eureka is mostly for non-Kubernetes or mixed environments.
+  When someone says "service discovery is just DNS," they are half-right: server-side discovery often <em>is</em>
+  DNS-plus-a-load-balancer — but the caching and health-tracking details are exactly where it gets subtle.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Services run as many copies whose addresses keep changing, so you can't write the address down. Service
+    discovery is an automatic "phone book" that always knows where the live copies are. Either the caller looks
+    them up itself (client-side), or it just uses a fixed name and the platform finds a live one (server-side —
+    what Kubernetes does for you).</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Client-side: instances register + heartbeat to a registry (Eureka/Consul/etcd); clients query it and
+    load-balance themselves (Spring Cloud LoadBalancer). Server-side: clients hit a stable name/VIP and the
+    platform resolves and balances (Kubernetes Service + CoreDNS, Part 12; AWS Cloud Map). DNS-based discovery
+    must manage TTL and client-side caching (JVM DNS cache, Part 6) to avoid calling dead instances.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The registry is itself a distributed system with a consistency choice: Eureka favors availability (AP) and
+    serves possibly-stale lists to stay up during partitions; Consul/etcd lean CP via Raft. Health checking has a
+    detection-lag vs false-positive tradeoff (heartbeat interval × miss threshold). In meshes (§11) discovery moves
+    into the control plane and the sidecar gets endpoints via xDS, eliminating in-app discovery clients entirely —
+    the app just calls localhost and the proxy knows where everything is.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gateway">10. API gateway — the north-south edge</h2>
+<span class="osi-badge">OSI Layer 7 — Application (a specialized reverse proxy, Part 10)</span>
+
+<p>So far everything has been service-to-service. But external clients — browsers, mobile apps, partner systems —
+need a way <em>in</em>. You do not expose twenty internal services directly to the internet. You put one front
+door: an <strong>API gateway</strong>.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why a single entry point exists</div>
+  <p>Without a gateway, every internal service would have to independently implement TLS, authentication, rate
+  limiting, request logging, and CORS — duplicated in twenty codebases, in three languages, inconsistently, with
+  twenty public endpoints to secure. That is a security and maintenance nightmare. An API gateway is the
+  <strong>single entry point</strong> that centralizes all of these <em>cross-cutting</em> concerns in one place,
+  so the internal services stay focused on business logic and never face the raw internet. It is, in the
+  vocabulary of Part 10, a <strong>specialized reverse proxy</strong> — and in Kubernetes terms it is the job an
+  Ingress controller does (Part 12 Ingress callback).</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the company switchboard / receptionist</div>
+  <p>You do not give every employee's personal phone number to the public. You publish one number — the
+  <strong>switchboard</strong>. The receptionist greets every caller, checks they are allowed in (authentication),
+  turns away nuisance callers (rate limiting), notes who called and why (logging), and routes each call to the
+  right department (routing). Callers never need to know the internal extensions; departments never deal with
+  random outside calls. The API gateway is that switchboard for your microservices estate.</p>
+</div>
+
+<div class="figure-title">Fig 13.12 — Clients enter through one gateway; internal services stay private</div>
+<pre class="diagram">
+   browsers / mobile / partners
+            │   (public internet, HTTPS)
+            ▼
+   ┌──────────────────────────────────────────────────┐
+   │                 API GATEWAY                       │
+   │  TLS termination · authn/authz · rate limit ·     │
+   │  routing · aggregation · protocol translation ·   │
+   │  caching · request-id / observability             │
+   └───────┬───────────────┬───────────────┬───────────┘
+           ▼               ▼               ▼
+     order-service   inventory-service  payment-service
+     (private; never directly exposed to the internet)
+</pre>
+
+<p>The responsibilities a gateway centralizes — each one a callback to an earlier part:</p>
+
+<ul>
+  <li><strong>TLS termination</strong> (Part 8) — decrypt HTTPS once at the edge; internal hops can be plain or
+  mesh-encrypted.</li>
+  <li><strong>Authentication / authorization</strong> — validate the caller's token (e.g. a JWT — JSON Web
+  Token, the Part 7 callback) once, so services receive already-authenticated requests.</li>
+  <li><strong>Rate limiting / quotas</strong> — throttle abusive clients, returning <code>429</code> (Part 7).</li>
+  <li><strong>Routing, composition &amp; aggregation</strong> — map <code>/api/orders</code> to
+  <code>order-service</code>; or fan one client request out to several services and combine the responses. A
+  <strong>BFF</strong> (Backend For Frontend) is a gateway tailored to one client type — e.g. a mobile BFF that
+  bundles exactly what the mobile screen needs in one call, sparing the device many round trips (fallacy #2).</li>
+  <li><strong>Protocol translation</strong> — accept REST/JSON from browsers on the outside and call gRPC
+  services on the inside (the §5 edge-vs-internal split, realized).</li>
+  <li><strong>Caching</strong> — serve repeat responses without bothering the services.</li>
+  <li><strong>Observability</strong> — attach a correlation id (an <code>X-Request-Id</code> / W3C
+  <code>traceparent</code> header — Part 7 callback) so one request is traceable across all the services it
+  touches (§12).</li>
+</ul>
+
+<pre class="code"># Spring Cloud Gateway — declarative routing + cross-cutting filters at the edge
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: orders
+          uri: lb://order-service          # 'lb://' = resolve via service discovery (§9)
+          predicates:
+            - Path=/api/orders/**
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter      # rate limit at the edge (Part 7: 429)
+              args:
+                redis-rate-limiter.replenishRate: 100
+                redis-rate-limiter.burstCapacity: 200
+            - AddRequestHeader=X-Request-Id, ${requestId}   # correlation id (§12, Part 7)</pre>
+
+<p>Common gateways: <strong>Spring Cloud Gateway</strong>, <strong>Kong</strong>, <strong>AWS API Gateway</strong>,
+or a Kubernetes Ingress controller (NGINX, or an Envoy-based gateway) doing gateway duties. The key conceptual
+split this section sets up: traffic that enters from outside is <strong>north-south</strong> (edge) traffic and
+is the gateway's domain; traffic <em>between</em> internal services is <strong>east-west</strong> traffic — and
+that is the domain of the service mesh, next.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>An API gateway is the single front door to all your services. Outside requests hit the gateway, which
+    checks who you are, blocks abuse, and forwards you to the right internal service. It means each service
+    doesn't have to handle security and routing itself, and the internet never touches them directly.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The gateway is a specialized reverse proxy (Part 10) at the edge that centralizes TLS termination (Part 8),
+    authn/authz (JWT, Part 7), rate limiting (429, Part 7), routing, request aggregation/BFF, protocol translation
+    (REST↔gRPC), caching, and correlation-id injection (Part 7). Spring Cloud Gateway, Kong, AWS API Gateway, or an
+    Ingress controller fill the role. It governs north-south (edge) traffic.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The gateway is a chokepoint: a single place for policy, but also a single point of failure and a latency
+    hop, so it runs HA and stateless. Resist putting business logic in it (it becomes a distributed monolith) —
+    keep it to cross-cutting concerns. The BFF pattern trades reuse for client-fit and can proliferate; aggregation
+    in the gateway reintroduces coupling to downstream shapes. North-south policy (gateway) and east-west policy
+    (mesh) increasingly converge — a mesh ingress gateway is literally Envoy doing both — which is the bridge to
+    §11.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mesh">11. Service mesh — moving the network logic out of your code</h2>
+<span class="osi-badge">OSI Layers 4–7 (sidecar intercepts at L3/L4; policy at L7)</span>
+
+<p>Look back at §8 (timeouts, retries, circuit breaking) and §7 (idempotency) and §8.4 (mTLS-worthy security).
+Notice the pattern: every service had to implement all of it — in Java with Resilience4j, in Go with something
+else, in Python with something else again — duplicated, inconsistently, in every language. The
+<strong>service mesh</strong> is the insight that this logic does not belong in the application at all. It
+belongs in the <em>infrastructure</em>.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why the mesh exists — stop reimplementing the network in every service</div>
+  <p>Timeouts, retries, circuit breaking, mutual TLS, load balancing, metrics, and tracing are
+  <em>cross-cutting</em> — every service needs them, and they have nothing to do with business logic. Coding them
+  into each service means: every team re-solves the same problems; every language needs its own library; upgrading
+  the retry policy means redeploying twenty services; and a polyglot estate has inconsistent behavior. The mesh
+  moves all of it <strong>out</strong> of the app and into a dedicated proxy that runs <em>beside</em> every
+  service, identically, regardless of language — so the application code shrinks back toward "just business
+  logic," and the network concerns are configured centrally.</p>
+</div>
+
+<h3>11.1 The sidecar pattern — a proxy in every pod</h3>
+
+<p>The mechanism is the <strong>sidecar</strong> (the Part 12 sidecar/shared-namespace callback, delivered). A
+proxy container — <strong>Envoy</strong> — is injected into <em>every</em> pod, sharing the pod's network
+namespace. Traffic redirection (via <code>iptables</code> rules — the Part 11/12 callback) transparently routes
+<strong>all</strong> inbound and outbound traffic through this sidecar. The application makes a plain
+<code>localhost</code> call as if the dependency were local; the sidecar intercepts it and handles discovery,
+load balancing (Part 9), retries, timeouts, circuit breaking, and <strong>mTLS</strong> — with
+<strong>zero application code</strong>.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a personal translator and bodyguard for every employee</div>
+  <p>Imagine giving every employee a personal aide who handles all their phone calls. The employee just says
+  "connect me to inventory" in plain language; the aide finds the right person (discovery), redials if the line
+  drops (retries), hangs up if no one answers in time (timeouts), refuses to keep calling a number that's clearly
+  dead (circuit breaker), and — every single call — speaks an encrypted private language only the other aide
+  understands and checks the other side's ID badge (mutual TLS). The employee (your app) knows none of this; they
+  just talk. The mesh gives every service such an aide, identically, for free.</p>
+</div>
+
+<div class="figure-title">Fig 13.13 — The sidecar intercepts all traffic; the app just calls localhost</div>
+<pre class="diagram">
+   POD: order-service                         POD: inventory-service
+   ┌───────────────────────────┐              ┌───────────────────────────┐
+   │  app container            │              │  app container            │
+   │  calls localhost ─────►   │              │   ◄───── localhost call   │
+   │            │              │              │              ▲            │
+   │     ┌──────▼──────┐       │   mTLS over  │      ┌───────┴─────┐      │
+   │     │   ENVOY     │ ──────┼──────────────┼────► │   ENVOY     │      │
+   │     │  (sidecar)  │       │   the wire   │      │  (sidecar)  │      │
+   │     └─────────────┘       │  (Part 8)    │      └─────────────┘      │
+   └───────────────────────────┘              └───────────────────────────┘
+     sidecar does: discovery, LB, retries, timeouts, circuit-breaking, mTLS
+     the app code does NONE of it
+</pre>
+
+<h3>11.2 Data plane vs control plane</h3>
+
+<p>A mesh has two halves. The <strong>data plane</strong> is the fleet of Envoy sidecars actually moving the
+traffic and enforcing the rules on every call. The <strong>control plane</strong> is the brain that
+<em>configures</em> all those sidecars — in Istio this is <strong>istiod</strong>. It holds the policy (traffic
+rules, security settings), knows the service topology, issues and rotates the certificates that make mTLS work,
+and pushes configuration down to every Envoy. The data plane is on the request path; the control plane is not
+(it just programs the data plane).</p>
+
+<div class="figure-title">Fig 13.14 — Control plane configures the data plane (it is not on the request path)</div>
+<pre class="diagram">
+                    ┌───────────────────────────────┐
+                    │     CONTROL PLANE (istiod)     │
+                    │  policy · service topology ·   │
+                    │  identity / cert issuance      │
+                    └───────┬───────────┬────────────┘
+              config (xDS)  │           │  config + certs
+                            ▼           ▼
+   ┌──────────────────────────┐   ┌──────────────────────────┐
+   │ DATA PLANE: Envoy sidecar│◄─►│ DATA PLANE: Envoy sidecar │  ← real traffic
+   │ (order-service pod)      │   │ (inventory-service pod)   │     flows here
+   └──────────────────────────┘   └──────────────────────────┘
+   control plane PROGRAMS the proxies; it is not in the call path
+</pre>
+
+<h3>11.3 Envoy and Istio specifically</h3>
+
+<p><strong>Envoy</strong> is the programmable L7 proxy that became the de-facto mesh data plane (the Part 10
+callback — it is the same proxy family that powers many Ingress controllers and API gateways). What makes it
+special: it is reconfigurable <em>dynamically at runtime</em> via the <strong>xDS</strong> APIs (a family of
+discovery services for endpoints, routes, clusters, listeners) — the control plane pushes new config and Envoy
+applies it without restarts. It is a first-class HTTP/2 and gRPC proxy, which is exactly why it suits a world of
+gRPC services (§5).</p>
+
+<p><strong>Istio</strong> is the most common control plane on top of Envoy. You configure the mesh with Istio's
+custom resources:</p>
+
+<ul>
+  <li><strong>VirtualService + DestinationRule</strong> — traffic management: routing, canary releases, and
+  <strong>traffic splitting</strong> (the Part 9 weighted-load-balancing callback). Shift 10% of traffic to v2
+  to test it, 90% to v1 — declaratively, no code.</li>
+  <li><strong>PeerAuthentication</strong> — turn on strict mTLS for a namespace in one short manifest.</li>
+  <li><strong>Telemetry</strong> — emit golden metrics and traces uniformly.</li>
+</ul>
+
+<pre class="code"># Istio VirtualService — canary: send 90% to v1, 10% to v2 (weighted, Part 9)
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: inventory-service
+spec:
+  hosts: [ inventory-service ]
+  http:
+    - route:
+        - destination: { host: inventory-service, subset: v1 }
+          weight: 90
+        - destination: { host: inventory-service, subset: v2 }
+          weight: 10
+      retries:                       # retries configured in the MESH, not the app (§8)
+        attempts: 3
+        perTryTimeout: 2s
+---
+# PeerAuthentication — automatic mutual TLS for the whole namespace, zero app code
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+spec:
+  mtls: { mode: STRICT }            # every service-to-service call is now mTLS (Part 8)</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — mTLS with zero application code (Part 8 promise delivered)</div>
+  <p>This is the Part 8 mTLS tease, paid off. With a mesh, <strong>every service-to-service call is mutually
+  TLS-encrypted and authenticated automatically</strong>: istiod issues each service a short-lived certificate
+  tied to its identity, rotates it constantly, and the Envoy sidecars perform the mutual handshake on every call.
+  Your application sends a plain <code>localhost</code> request and writes <em>not one line</em> of TLS code. The
+  app does not even know it is encrypted. Uniform encryption-in-transit and service identity across a polyglot
+  fleet — for free.</p>
+</div>
+
+<p>What you <strong>get</strong> from a mesh: uniform mTLS and identity, golden metrics and distributed tracing
+(§12), traffic shaping (canary, mirroring, splitting), retries/timeouts/circuit-breaking as configuration, and
+fine-grained authorization policy — all polyglot, all without touching application code.</p>
+
+<p>The <strong>cost</strong> — and you must be honest about it:</p>
+
+<ul>
+  <li><strong>A proxy hop on every call.</strong> Every request now passes through two extra Envoys (caller's and
+  callee's), adding latency (Part 1) — usually a small number of milliseconds, but real, and it compounds across
+  a deep call chain.</li>
+  <li><strong>Operational complexity.</strong> The mesh is itself a sophisticated distributed system to install,
+  upgrade, and debug. When something breaks, you now have the app <em>and</em> the mesh to investigate.</li>
+  <li><strong>Resource overhead.</strong> A sidecar per pod consumes CPU and memory — multiplied by every pod in
+  the cluster.</li>
+</ul>
+
+<div class="callout example">
+  <div class="callout-title">🧪 When a mesh is overkill</div>
+  <p>If you run a handful of services, <strong>do not deploy a mesh</strong>. The operational and latency cost
+  outweighs the benefit; a few well-placed Resilience4j configs and Kubernetes Services give you most of the value
+  with none of the complexity. A mesh earns its keep at scale — dozens to hundreds of services, multiple
+  languages, and a hard requirement for uniform mTLS and observability. One line for the future: an emerging
+  lighter alternative is the <strong>ambient / sidecar-less mesh</strong> (e.g. Istio ambient mode), which moves
+  the proxy out of every pod into per-node and per-namespace components to cut the per-pod overhead.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A service mesh gives every service a little helper (a sidecar proxy) that handles all the network hard parts
+    — retries, timeouts, encryption — so the app code doesn't have to. The app just calls "localhost" and the
+    helper does the rest. You get automatic encryption between services and consistent behavior in every language,
+    but it adds an extra hop and complexity.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A sidecar Envoy proxy is injected into every pod (Part 12) and intercepts all traffic via iptables. The
+    data plane (Envoy fleet) enforces discovery, LB, retries, timeouts, circuit breaking, and mTLS; the control
+    plane (Istio's istiod) configures them via xDS and issues/rotates certs. Istio CRDs (VirtualService,
+    DestinationRule, PeerAuthentication) drive routing, canary/traffic-splitting (Part 9), and strict mTLS
+    (Part 8) — all without app code. Costs: per-call proxy latency (Part 1), ops complexity, per-pod resources.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The mesh externalizes L7 concerns into a uniformly-configured data plane, decoupling release of network
+    policy from release of services — the operational payoff. The tradeoffs are subtle: sidecars double the
+    connection count and add tail latency that matters in deep chains; mTLS identity (SPIFFE/SPIFFE IDs) becomes
+    your zero-trust foundation; and retries/timeouts now live in <em>two</em> places (app and mesh) which must be
+    reconciled to avoid multiplied attempts. Ambient mode trades some isolation for lower overhead. The decision
+    is fundamentally org-scale: below a threshold, a mesh is negative ROI.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="tracing">12. Tracing &amp; observability across services</h2>
+
+<p>One last problem the monolith never had. In a monolith, a failing request gives you one stack trace. In
+microservices, a single user click might fan out across <code>gateway → order-service → inventory-service →
+payment-service → kafka → warehouse-service</code> — and when it is slow or broken, <em>which hop</em> failed?
+A per-service log tells you nothing on its own.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why distributed tracing exists</div>
+  <p>A request's journey is now spread across many services, machines, and logs. To debug it you must stitch those
+  fragments back into one coherent story. <strong>Distributed tracing</strong> does this: at the edge, the request
+  is assigned a <strong>trace-id</strong>; each service it touches creates a <strong>span</strong> (a timed unit
+  of work with a <strong>span-id</strong>), and the trace-id is <em>propagated</em> to every downstream call via
+  HTTP headers — the W3C <strong>traceparent</strong> header, the same family as the <code>X-Request-Id</code> you
+  met in Part 7. Collect all spans sharing a trace-id and you get the full waterfall: which service, how long,
+  where it failed.</p>
+</div>
+
+<div class="figure-title">Fig 13.15 — One trace-id stitches the whole request path together</div>
+<pre class="diagram">
+   trace-id = abc123  (propagated in the 'traceparent' header at every hop — Part 7)
+
+   gateway ──► order-service ──► inventory-service
+                    │                 (span: 8ms)
+                    └──► payment-service ──► (span: 120ms ◄── the slow hop!)
+
+   span A: gateway          [■]
+   span B: order-service     [■■■■■■■■■■■■■■]
+   span C: inventory          [■]
+   span D: payment              [■■■■■■■■■■■■■■■■■■]  ← here is your latency
+</pre>
+
+<p><strong>OpenTelemetry</strong> (OTel) is the vendor-neutral standard for generating and exporting these traces
+(and metrics and logs); backends like Jaeger, Zipkin, or Tempo visualize them. Critically, the
+<strong>mesh or the gateway can inject and propagate the trace context for you</strong> — Envoy will start a
+trace and pass <code>traceparent</code> through, so you get the cross-service skeleton even before adding
+in-app instrumentation. Part 14 walks complete request journeys end to end, and this trace-id is the thread you
+will follow through them.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>When one request touches many services, you need to know which one was slow or broke. Distributed tracing
+    tags the request with one id and follows it through every service, so you can see the whole path and spot the
+    problem hop — like a tracking number for a parcel passing through many depots.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A trace-id is created at the edge and propagated via the W3C <code>traceparent</code> header (Part 7 family);
+    each service emits spans (span-id, parent, timing) under that trace-id. Collecting spans reconstructs the
+    request waterfall to localize latency/failures. OpenTelemetry standardizes instrumentation and export;
+    Jaeger/Zipkin/Tempo visualize. A mesh or gateway can propagate context automatically.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Tracing's value depends on <em>complete propagation</em> — one service that drops the header breaks the
+    trace, and async hops (Kafka) need context carried in message headers, not just HTTP. Sampling (head vs tail)
+    trades fidelity for cost; tail-based sampling keeps the interesting (slow/error) traces. Traces, metrics, and
+    logs correlated by trace-id are the "three pillars," and exemplars link a metric spike directly to a trace —
+    the fastest path from "p99 is up" to "this span on this service is why."</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">13. East-west vs north-south — the whole picture</h2>
+
+<p>Every concept in this chapter assembles into one mental model. Traffic comes in two flavors:
+<strong>north-south</strong> (external clients in and out, through the API gateway / Ingress) and
+<strong>east-west</strong> (service-to-service, through the mesh). Here is the consolidated diagram — the map of
+a modern microservices estate, and the preview of Part 14.</p>
+
+<div class="figure-title">Fig 13.16 — The complete microservices networking picture</div>
+<pre class="diagram">
+            browsers / mobile / partners          ┌─ NORTH-SOUTH (edge) ─┐
+                       │ HTTPS                     │  client ↔ gateway     │
+                       ▼                           └───────────────────────┘
+        ┌──────────────────────────────┐
+        │   API GATEWAY  /  INGRESS     │  TLS · authn · rate limit · routing
+        │   (REST outside)              │  · REST→gRPC translation (§10)
+        └───────────────┬──────────────┘
+                        ▼
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │   SERVICE MESH (Envoy sidecars + istiod)   ── EAST-WEST (internal) ── │
+   │                                                                       │
+   │   order-service ──gRPC──► inventory-service     each call defended:   │
+   │        │  (sync, §5)            ▲                · timeout (§8)        │
+   │        │                        │ discovery via  · retry+backoff (§8)  │
+   │        ├──gRPC──► payment-service  the platform   · circuit breaker(§8)│
+   │        │  (sync, §5)              (§9)            · mTLS (§11, Part 8) │
+   │        │                                                               │
+   │        └──publish──► [ KAFKA ] ──► warehouse-service                   │
+   │                       (async, §6)   email-service   (eventual, §3)     │
+   └───────────────────────────────────────────────────────────────────────┘
+        every hop carries trace-id (§12) · all secured by mTLS · all
+        discovered via the platform (§9) · sync = REST/gRPC, async = Kafka
+</pre>
+
+<p>Read the picture as a sentence: <em>external clients enter north-south through a gateway that terminates TLS
+and authenticates them; inside, services talk east-west — some synchronously over gRPC/REST, some asynchronously
+over Kafka — discovering each other through the platform, with every call defended by timeouts, retries, and
+circuit breakers, secured by automatic mTLS from the mesh, and traceable end to end by a propagated trace-id.</em>
+That single sentence is microservices networking. Part 14 walks real requests through exactly this picture.</p>
+
+<!-- ============================================================ -->
+<h2 id="interview">14. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>What changes when an in-process method call becomes a network call?</summary>
+    <p>Everything you took for granted disappears. A method call is nanoseconds, never fails, is exactly-once,
+    preserves ordering, is atomic within a transaction, and passes arguments by reference. The same call over the
+    network is milliseconds (an RTT, Part 1), can be lost/duplicated/reordered (Part 4), may hit a callee that is
+    down/slow/moved (Part 12), must serialize arguments into bytes, has no cross-service transaction, and crosses
+    untrusted wire (Part 8). The deep point is partial failure: you cannot distinguish a lost request from a lost
+    response from a slow one, so you must design with timeouts, idempotency, and retries rather than assume
+    success. Microservices don't add networking features — they expose you to all of Parts 1–12 at once.</p>
+  </details>
+
+  <details><summary>REST vs gRPC — what's the difference and when do you use each?</summary>
+    <p>REST is resources + HTTP verbs + (usually) JSON; gRPC is RPC over HTTP/2 using binary Protocol Buffers with
+    a mandatory schema. gRPC is more compact, has enforced contracts, multiplexes over HTTP/2 (no head-of-line
+    blocking), and supports streaming and polyglot codegen — which is why it wins for high-volume internal
+    service-to-service calls. REST is universal, human-readable, cacheable, firewall-friendly, and browser-native,
+    which is why it wins for public, browser-facing, and cross-org APIs. The mature answer: REST at the edge, gRPC
+    inside, with the API gateway translating between them. gRPC's costs: not browser-native (needs gRPC-Web),
+    harder to debug (binary), and needs HTTP/2-aware load balancing (Part 9).</p>
+  </details>
+
+  <details><summary>Synchronous vs asynchronous — when do you use a message queue?</summary>
+    <p>Synchronous (REST/gRPC) means the caller blocks for a response and needs the callee up now — use it when
+    you need the answer to continue (validate a card before confirming an order). Asynchronous (Kafka/RabbitMQ)
+    means publishing a message to a broker and continuing immediately — use it for "this happened, react when you
+    can." Choose a message queue when you want decoupling (producer doesn't know consumers), buffering/load-leveling
+    (absorb spikes — Part 9), resilience (a down consumer doesn't lose the message), or fan-out (one event, many
+    reactions). A common senior pattern: keep the user-blocking path one short synchronous hop and push everything
+    else (email, analytics, fulfillment) onto a broker so the request returns fast.</p>
+  </details>
+
+  <details><summary>Why is exactly-once delivery hard, and what do you do instead?</summary>
+    <p>It reduces to Part 4's ambiguity: after sending, if no ack arrives, you can't tell whether the message was
+    lost, or it was processed but the ack was lost, or it's just slow. To guarantee delivery you must retry — which
+    can duplicate; to guarantee no duplicates you must not retry — which can lose. You can't have both over an
+    unreliable network, so exactly-once <em>delivery</em> is impossible. The real pattern is <strong>at-least-once
+    delivery + idempotent consumers</strong>: every message carries a stable id (Part 7 idempotency key), and the
+    consumer records processed ids and skips duplicates, making re-delivery harmless. Supporting patterns: the
+    outbox pattern (atomic DB-write-plus-publish) and dedup with a stable key. "Exactly-once processing" is real;
+    "exactly-once delivery" is a myth.</p>
+  </details>
+
+  <details><summary>Client-side vs server-side service discovery?</summary>
+    <p>Both solve "how do I find a healthy instance when IPs churn (Part 12)?" In client-side discovery, instances
+    register and heartbeat to a registry (Eureka/Consul/etcd); the caller queries it and load-balances itself
+    (Spring Cloud LoadBalancer) — more client complexity and per-language clients, but the client sees all
+    instances and can be smart. In server-side discovery, the caller hits one stable name/VIP and the platform
+    resolves and balances (Kubernetes Service + CoreDNS — Part 12; AWS Cloud Map) — the client stays dumb and
+    language-agnostic. In Kubernetes you get server-side discovery plus L4 load balancing for free; many teams need
+    nothing more. Watch DNS caching (the JVM's near-infinite default — Part 6), which is why K8s routes through a
+    stable ClusterIP rather than raw pod IPs.</p>
+  </details>
+
+  <details><summary>What is an API gateway and what does it centralize?</summary>
+    <p>It's the single entry point for external (north-south) traffic into the microservices estate — a specialized
+    reverse proxy (Part 10), the job an Ingress controller does (Part 12). It centralizes cross-cutting concerns so
+    each service doesn't reimplement them: TLS termination (Part 8), authn/authz and token (JWT) validation
+    (Part 7), rate limiting/quotas (429, Part 7), request routing and composition/aggregation (BFF), protocol
+    translation (REST outside to gRPC inside), caching, and observability/correlation-ids (Part 7). Examples:
+    Spring Cloud Gateway, Kong, AWS API Gateway, or an Ingress controller. Keep business logic out of it — it
+    should handle edge concerns only, or it becomes a distributed monolith and a single point of failure.</p>
+  </details>
+
+  <details><summary>What is a service mesh, and what problem does the sidecar solve?</summary>
+    <p>A service mesh moves cross-cutting network concerns — retries, timeouts, circuit breaking, mTLS, load
+    balancing, metrics, tracing — out of every application and into infrastructure. The sidecar pattern is the
+    mechanism: an Envoy proxy is injected into every pod (sharing its network namespace, Part 12) and intercepts
+    all inbound/outbound traffic via iptables. The app makes a plain localhost call and the sidecar transparently
+    handles discovery, load balancing (Part 9), resilience (§8), and mTLS (Part 8) — with zero app code, identically
+    across every language. The problem it solves: without it, every team re-implements the same network logic in
+    every language, inconsistently, and upgrading a policy means redeploying every service.</p>
+  </details>
+
+  <details><summary>Data plane vs control plane in a mesh?</summary>
+    <p>The data plane is the fleet of Envoy sidecars that actually carry the traffic and enforce the rules on every
+    call — it is on the request path. The control plane (Istio's istiod) is the brain that configures all those
+    sidecars: it holds policy and service topology, issues and rotates the certificates for mTLS, and pushes config
+    to every Envoy via the xDS APIs — it is <em>not</em> on the request path. The separation means you can change
+    network policy (retry rules, traffic splits, mTLS mode) centrally in the control plane without redeploying any
+    service; the data plane picks up the new config dynamically.</p>
+  </details>
+
+  <details><summary>How does mTLS happen with zero application code?</summary>
+    <p>The control plane (istiod) assigns every service a cryptographic identity and issues it a short-lived
+    certificate, rotating it automatically. The Envoy sidecars in each pod perform the mutual TLS handshake on
+    every service-to-service call — each side presents and verifies the other's certificate (Part 8 mTLS). The
+    application just sends a plain localhost request; the sidecar transparently upgrades it to mutually-authenticated,
+    encrypted traffic on the wire. The app writes no TLS code and doesn't even know it's encrypted. You enable it
+    with a one-line PeerAuthentication policy, giving uniform encryption-in-transit and service identity across a
+    polyglot fleet for free.</p>
+  </details>
+
+  <details><summary>What is a circuit breaker and what are its states?</summary>
+    <p>It's a resilience pattern that stops a service from repeatedly calling a dependency that is clearly failing,
+    so it fails fast instead of piling up slow timeouts. It wraps the call and watches the failure rate, with three
+    states: CLOSED (calls flow normally), OPEN (after failures exceed a threshold, it rejects calls instantly
+    without touching the network, giving the dependency time to recover), and HALF-OPEN (after a cooldown, it lets
+    a few probe calls through — if they succeed it closes, if they fail it re-opens). Resilience4j implements this
+    in Spring. It pairs with timeouts and a fallback for graceful degradation, and it prevents one dead dependency
+    from cascading into your own service's collapse.</p>
+  </details>
+
+  <details><summary>Why don't retries always make a system more reliable?</summary>
+    <p>Naive retries can make things worse in two ways. First, a <strong>retry storm</strong> (Part 9): when a
+    service is struggling and all callers immediately retry, the extra load finishes off the wounded service. The
+    fix is exponential backoff plus jitter so retries spread out and grow, giving the service room to recover.
+    Second, retrying a <strong>non-idempotent</strong> operation can cause double effects — a retried "charge card"
+    can charge twice. So only retry idempotent operations (§7), cap total attempts, and ideally use a retry budget.
+    Retries are a sharp tool: correct with backoff + jitter + idempotency, dangerous without.</p>
+  </details>
+
+  <details><summary>How do you debug a slow request that spans many services?</summary>
+    <p>With distributed tracing. At the edge the request gets a trace-id, propagated to every hop via the W3C
+    traceparent header (the X-Request-Id family from Part 7); each service emits a span with timing. Collecting all
+    spans for one trace-id reconstructs the request as a waterfall, so you can see exactly which service consumed
+    the time or threw the error. OpenTelemetry standardizes the instrumentation; Jaeger/Zipkin/Tempo visualize it;
+    and the mesh or gateway can propagate the context automatically. The key requirement is complete propagation —
+    including across async Kafka hops, where the context must ride in message headers, not just HTTP.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">15. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "Microservices are faster than a monolith."</strong><br>
+  ✅ Usually the opposite for any single request. An in-process method call is nanoseconds and never fails; the
+  same call as a network request is milliseconds (an RTT, Part 1) plus serialization, and can fail or retry. A
+  request that was three method calls becomes three network round trips. Microservices buy team independence,
+  independent scaling, and fault isolation — <em>not</em> per-request speed. You adopt them despite the latency
+  cost, not because of a speed gain.</p>
+
+  <p><strong>❌ "gRPC replaces REST everywhere."</strong><br>
+  ✅ gRPC wins for internal, high-volume, contract-enforced service-to-service traffic, but browsers can't speak
+  raw gRPC (you need gRPC-Web plus a proxy), and public/cross-org APIs still expect REST + OpenAPI. The real shape
+  is REST at the edge, gRPC inside, with the gateway translating. Different tools for north-south vs east-west.</p>
+
+  <p><strong>❌ "Message queues guarantee exactly-once delivery."</strong><br>
+  ✅ True exactly-once <em>delivery</em> is impossible over an unreliable network (Part 4): a lost ack forces you
+  to choose between losing a message and duplicating it. Brokers give at-least-once; you achieve "effectively
+  once" by making consumers idempotent (Part 7 keys) and deduping on a stable id. Even Kafka's "exactly-once" is
+  only within Kafka — the moment a side effect hits an external system you're back to at-least-once + idempotency.</p>
+
+  <p><strong>❌ "A service mesh and an API gateway are the same thing."</strong><br>
+  ✅ They govern different traffic. An API gateway handles <strong>north-south</strong> (external clients in/out)
+  at the edge — TLS termination, authn, rate limiting, routing. A service mesh handles <strong>east-west</strong>
+  (internal service-to-service) — per-call mTLS, retries, timeouts, observability via sidecars. One is the front
+  door; the other is the internal road network. They are complementary, often both present.</p>
+
+  <p><strong>❌ "Service discovery means DNS only."</strong><br>
+  ✅ DNS-based, server-side discovery (Kubernetes Service + CoreDNS) is one common model, but there's also
+  client-side discovery via a registry (Eureka/Consul/etcd) where the client queries and load-balances itself. And
+  even DNS discovery is more than "just DNS" — TTLs, health tracking, and client-side caching (the JVM's
+  near-infinite default, Part 6) are exactly where it gets subtle and where stale-IP bugs come from.</p>
+
+  <p><strong>❌ "Retries always make things more reliable."</strong><br>
+  ✅ Naive retries cause retry storms (Part 9) that finish off a struggling service, and retrying non-idempotent
+  operations causes double effects (double charges). Retries help only with exponential backoff + jitter, capped
+  attempts, and strictly for idempotent operations (§7). Without those guardrails, retries amplify outages.</p>
+
+  <p><strong>❌ "A service mesh is free / pure upside."</strong><br>
+  ✅ It costs a proxy hop on every call (added latency, Part 1), per-pod CPU and memory for every sidecar, and
+  significant operational complexity — the mesh is itself a distributed system to run and debug. It earns its keep
+  at scale (dozens-plus services, polyglot, hard mTLS/observability needs); for a handful of services it's
+  negative ROI, and a few Resilience4j configs plus Kubernetes Services do the job.</p>
+
+  <p><strong>❌ "There's a distributed transaction that makes cross-service calls atomic."</strong><br>
+  ✅ There is no <code>@Transactional</code> across services. Two services with two databases cannot share an
+  atomic commit in practice. You replace ACID with sagas (a sequence of local transactions with compensating
+  actions), idempotency, and eventual consistency. "Roll back the whole order if payment fails" becomes "emit a
+  compensating event to release the reservation" — designed, not free.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You arrived from <a href="part12.html"><strong>Part 12 — Docker &amp; Kubernetes</strong></a>, where pods,
+  Services, Ingress, CoreDNS, and the sidecar pattern gave you the <em>platform</em>. This chapter put real
+  application traffic onto that platform: synchronous REST and gRPC, asynchronous Kafka and RabbitMQ, the hard
+  truths of delivery and idempotency, the resilience armor of timeouts/retries/circuit-breakers, service
+  discovery, the API gateway at the north-south edge, and the Envoy/Istio service mesh weaving the east-west
+  fabric with automatic mTLS. Every fallacy from §2 now has a countermeasure. What remains is to watch it all run
+  as one motion: a real user click entering through the gateway, fanning across services synchronously and
+  asynchronously, defended and traced at every hop. <strong>Part 14 walks these journeys end to end</strong> —
+  the whole course, finally, as a single living request: <a href="part14.html"><strong>Part 14 — Complete
+  Request Journeys</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part12.html"><span class="dir">← Previous</span><span class="t">Part 12: Docker &amp; Kubernetes</span></a>
+  <a href="part14.html"><span class="dir">Next →</span><span class="t">Part 14: Complete Request Journeys</span></a>
+</div>
+
+</main>
+</body>
+</html>

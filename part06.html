@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 6: DNS — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html" class="active"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 6 of 15</p>
+<h1>DNS — The Internet's Phonebook</h1>
+<p class="lede">Part 3 gave every machine an address. Part 5 gave every program a port. Yet you have never typed
+an IP address to reach Google — you type <em>names</em>. This part is about DNS, the system that turns
+<code>google.com</code> into <code>142.250.183.78</code> trillions of times a day: the oldest and most
+successful distributed database ever built, and the reason the most repeated sentence in operations is
+<em>"it's always DNS."</em></p>
+
+<p><span class="osi-badge">📍 OSI Layer 7 — Application</span></p>
+
+<p>First, place DNS (Domain Name System) on Part 2's map. It feels like infrastructure — it serves every other
+protocol — so engineers are surprised that it sits at <strong>Layer 7, the application layer</strong>. But look
+at what it is: a client process sends a small request to a server process listening on well-known port 53
+(Part 5), and gets a response. Request–response between two programs, with its own message format, riding on
+UDP or TCP (Part 4) — the definition of an application protocol. Layers 1–4 neither know nor care that this
+particular datagram is "special." DNS is infrastructure <em>sociologically</em>, not technically: an ordinary
+application that every other application happens to call first.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why-dns">Why DNS exists</a></li>
+    <li><a href="#history">Before DNS: one text file</a></li>
+    <li><a href="#namespace">The namespace: tree, zones, delegation</a></li>
+    <li><a href="#cast">The cast of characters</a></li>
+    <li><a href="#recursive-iterative">Recursive vs iterative queries</a></li>
+    <li><a href="#walkthrough">The full journey: you type google.com</a></li>
+    <li><a href="#caching-ttl">Caching and TTL</a></li>
+    <li><a href="#dig">Reading dig and nslookup</a></li>
+    <li><a href="#records">The record types that matter</a></li>
+    <li><a href="#transport">Transport: why UDP, when TCP</a></li>
+    <li><a href="#your-stack">DNS in your stack</a></li>
+    <li><a href="#load-distribution">DNS as a (weak) load balancer</a></li>
+    <li><a href="#security">Security: poisoning, DNSSEC, hygiene</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-dns">1. Why DNS exists</h2>
+
+<p>Count the names in your own stack: <code>registry.npmjs.org</code>, <code>github.com</code>,
+<code>postgres</code> in a Compose file, <code>kafka1:9092</code>, <code>orders-service</code> in a Kubernetes
+manifest, <code>api.shop.example.com</code> in a frontend <code>.env</code>. You work in names all day — yet
+Part 3 was emphatic that machines route by IP addresses and nothing else. Someone is translating constantly.
+Why does that translation layer deserve to exist?</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why DNS exists — four reasons, in increasing order of importance</div>
+  <ol>
+    <li><strong>(a) Humans cannot memorize IPs.</strong> <code>142.250.183.78</code> is hostile to memory and
+    marketing; <code>google.com</code> is not. With IPv6 it gets hopeless — nobody dictates
+    <code>2001:db8:85a3::8a2e:370:7334</code> over the phone.</li>
+    <li><strong>(b) IPs change; names persist.</strong> The professionally important reason. Relaunch an EC2
+    instance: new IP. Fail a database over to its replica: new IP. A name is a <em>stable identity</em> over an
+    unstable address — indirection — so you can redeploy, migrate, and fail over <strong>without telling your
+    users anything</strong>.</li>
+    <li><strong>(c) One name → many IPs.</strong> <code>google.com</code> cannot be one machine. One name
+    resolving to many addresses spreads load across a fleet and routes users to a nearby region (section 12).</li>
+    <li><strong>(d) Many names → one IP.</strong> <code>blog.example.com</code>, <code>shop.example.com</code>,
+    and <code>docs.example.com</code> can share one server running one nginx, serving a different site per
+    requested name — <em>virtual hosting</em>. It works because the name arrives inside the request itself: the
+    <code>Host</code> header, explained first thing in Part 7.</li>
+  </ol>
+</div>
+
+<div class="figure-title">Fig 6.1 — The indirection layer, working in both directions</div>
+<pre class="diagram">
+      one name → many IPs                          many names → one IP
+
+  api.example.com ──┬──► 203.0.113.10          blog.example.com ──┐
+                    ├──► 203.0.113.11          shop.example.com ──┼──► 203.0.113.42
+                    └──► 198.51.100.7          docs.example.com ──┘
+                                                                      one server, one nginx,
+  three servers share the traffic;             three sites — it reads the requested
+  callers never know or care                   name from the request (Part 7: Host header)
+</pre>
+
+<p>Now the counterfactual. Suppose DNS vanished and everything used raw IPs: your <code>application.yml</code>
+holds IPs for the database, Redis, and Kafka; partners hardcoded your API's IP into <em>their</em> systems;
+mobile apps shipped with it baked in. Now migrate clouds. Every copy must change <strong>at the same
+instant</strong> — including ones in other companies' codebases and on phones that will never update. Every
+migration is a coordinated catastrophe. DNS puts the mapping in <strong>one place you control</strong>,
+consulted (freshly enough — see TTL, section 7) by everyone.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>Names are the API; IP addresses are the implementation.</strong> DNS is the indirection layer that
+  lets the implementation change without breaking callers — the reason you code against interfaces in Java.
+  Most traffic tricks later in this course (blue-green, canaries, failover, CDNs) are someone editing what a
+  name resolves to.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the phonebook, but genuinely better</div>
+  <p>The classic analogy: DNS is the Internet's phonebook — know the <em>name</em>, look up the <em>number</em>.
+  Good start — but DNS beats it in four ways. A phonebook is
+  <strong>printed once</strong>; DNS is live-edited by millions of owners, each maintaining only their own page
+  (<em>delegation</em>, section 3). A phonebook is <strong>one volume</strong>; the DNS "book" exists nowhere in
+  full — it is assembled on demand from servers each holding a fragment (<em>distribution</em>). You <strong>look
+  up a phonebook yourself</strong>; in DNS a librarian makes the calls for you and remembers recent answers on
+  sticky notes (<em>recursion and caching</em>, sections 5 and 7). And a phonebook gives <strong>everyone the
+  same answer</strong>; DNS may deliberately answer by location and health (section 11). Where the analogy
+  honestly breaks: a phone number identifies a <em>person</em> and rarely changes, so a stale phonebook stays
+  useful for years. An IP identifies a <em>network location</em> and changes routinely — so DNS entries are
+  built to <em>expire</em>, each stamped with a freshness deadline (TTL). The phonebook quietly rots; DNS made
+  rot a managed, configurable feature.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="history">2. Before DNS: one text file for the whole Internet</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>In the ARPANET era (Part 1), name-to-address mapping was one text file, <strong><code>HOSTS.TXT</code></strong>,
+  maintained by hand at the <strong>Network Information Center</strong> at SRI (Stanford Research Institute) —
+  "NIC," colliding with Part 1's network interface card; this NIC was an office with people in it. Every host
+  periodically downloaded the whole file over FTP (File Transfer Protocol). A new hostname meant contacting the
+  NIC, waiting for a human to edit the file, then waiting for everyone to re-download. It collapsed for four
+  reasons: <strong>scale</strong> (file size and fetch traffic grew with every host on Earth);
+  <strong>update lag</strong> (your mapping was invisible until each host re-downloaded — days of staleness);
+  <strong>name collisions</strong> (one flat, first-come namespace — two sites could not both be
+  <code>mail</code>); and a <strong>single bottleneck</strong> (one organization, one master file, one point of
+  failure). In 1983 Paul Mockapetris designed the replacement (RFC 882/883): a database that is
+  <strong>distributed</strong> (no single copy), <strong>hierarchical</strong> (a tree — no collisions),
+  <strong>delegated</strong> (each organization edits its own branch, instantly), and <strong>cached</strong>
+  (answers remembered near the askers). Each property negates one HOSTS.TXT failure.</p>
+</div>
+
+<p>The delightful part: <strong>HOSTS.TXT never died.</strong> Every OS carries a local descendant and consults
+it <em>before</em> asking DNS anything: <code>/etc/hosts</code> on Linux/macOS,
+<code>C:\Windows\System32\drivers\etc\hosts</code> on Windows. The fossil is load-bearing — and a precision
+tool:</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — using the hosts file to test before a DNS cutover</div>
+  <p>You are about to repoint <code>shop.example.com</code> to <code>198.51.100.20</code> and want to verify the
+  new box serves correctly <em>under its real name</em> (TLS certificates and virtual hosting both care —
+  Parts 7–8). Override DNS for <em>your machine only</em>:</p>
+  <pre class="code"># Linux / macOS: sudo nano /etc/hosts
+# Windows:       notepad (run as Administrator)
+#                C:\Windows\System32\drivers\etc\hosts
+
+127.0.0.1       localhost              # the classics, already there
+::1             localhost
+
+# temporary override — THIS machine only:
+198.51.100.20   shop.example.com       # staging box. REMOVE after cutover!</pre>
+  <p>Your browser and code now resolve <code>shop.example.com</code> to staging while the world gets production.
+  Flush the OS cache to apply (<code>ipconfig /flushdns</code> on Windows, <code>sudo dscacheutil
+  -flushcache</code> on macOS). Two warnings: <strong>remove the line afterwards</strong> (a forgotten entry is
+  a classic "works only on my machine" generator), and some tools bypass the file — <code>dig</code> speaks DNS
+  directly (section 8), as does Node's <code>dns.resolve()</code> (section 11).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="namespace">3. The namespace: a tree, zones, and delegation</h2>
+
+<p>HOSTS.TXT had a flat namespace, and flat namespaces collide. DNS fixed it the way filesystems did: a
+<strong>tree</strong>. Every domain name is a path through the tree, read <strong>right to left</strong>, root
+to leaf:</p>
+
+<div class="figure-title">Fig 6.2 — The DNS namespace is one global tree</div>
+<pre class="diagram">
+                               "."  (the root)
+                                │
+        ┌─────────┬─────────────┼─────────────┬──────────┐
+        ▼         ▼             ▼             ▼          ▼
+       com       org           in            io         dev        ← TLDs
+        │
+   ┌────┴──────────────┐
+   ▼                   ▼
+ example             google                                        ← second-level domains
+   │
+   ├─────────┬──────────┐
+   ▼         ▼          ▼
+  www      shop        api                                         ← subdomains
+             │
+             ▼
+            api          =  api.shop.example.com.
+                            ▲    ▲     ▲      ▲ ▲
+                            │    │     │      │ └── the root "."
+                            │    │     │      └──── TLD
+                            │    │     └─────────── second-level
+                            │    └───────────────── subdomain
+                            └────────────────────── sub-subdomain (leaf)
+</pre>
+
+<ul>
+  <li>The <strong>root</strong> is the unnamed top, written as a single dot <code>.</code></li>
+  <li>A <strong>TLD</strong> (Top-Level Domain) is a direct child of the root: <code>com</code>,
+  <code>org</code>, country codes like <code>in</code>, plus the newer wave (<code>io</code>, <code>dev</code>).
+  TLDs are administrative real estate — <code>.io</code> is technically a country code, <code>.dev</code> is
+  run by Google — each operated under rules set by ICANN (the Internet Corporation for Assigned Names and
+  Numbers).</li>
+  <li>A <strong>second-level domain</strong> is what you buy: <code>example.com</code>.</li>
+  <li><strong>Subdomains</strong> are everything you create below it — free, instant, no permission needed:
+  <code>shop.example.com</code>, <code>api.shop.example.com</code>, as deep as you like.</li>
+</ul>
+
+<h3>3.1 FQDNs and the secret trailing dot</h3>
+
+<p>An <strong>FQDN</strong> (Fully Qualified Domain Name) is the complete path from leaf to root — and written
+pedantically it <em>ends with a dot</em>: <code>api.shop.example.com.</code> The final dot is the root, and it
+is not a typo: it marks the name <strong>absolute</strong>. A name without it is technically <em>relative</em>,
+and resolvers may complete it from a configured <strong>search list</strong> — exactly like relative vs absolute
+filesystem paths. Sounds like trivia until Kubernetes (section 11), where the search list is the entire trick
+behind short names like <code>orders</code> resolving at all. Browsers hide the dot; zone files and
+<code>dig</code> do not.</p>
+
+<h3>3.2 Zones and delegation — the design that makes it scale</h3>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why a delegated tree, not one big database</div>
+  <p>The genius is not the tree — it is <strong>who runs each part</strong>. A <strong>zone</strong> is a
+  contiguous region of the tree managed by one party on its own servers: the root zone (root operators),
+  <code>com</code> (Verisign), <code>example.com</code> (you, via whoever you choose). The tree is stitched
+  by <strong>delegation</strong>: a parent zone holds <strong>NS (Name Server) records</strong> saying "for
+  everything under this name, ask <em>those</em> servers." NS records are the glue of the whole system — how
+  <code>com</code> hands <code>example.com</code> to you. The payoff: edit a record in your zone and it is live
+  on your servers <em>immediately</em>, with zero coordination with Verisign or ICANN — the exact opposite of
+  emailing the NIC. Scale, autonomy, and instant updates all fall out of one idea: <em>every owner runs their
+  own page of the phonebook</em>.</p>
+</div>
+
+<div class="figure-title">Fig 6.3 — Zones, stitched together by NS-record delegation</div>
+<pre class="diagram">
+   ZONE: the root  ──────  "."                    run by: 12 root-server operators
+                            │
+                            │  NS records in the root zone:
+                            │  "com? ask the .com servers"        ◄── a delegation (a "cut")
+                            ▼
+   ZONE: com  ───────────  com                    run by: Verisign (the .com registry)
+                            │
+                            │  NS records in the com zone:
+                            │  "example.com? ask ns1/ns2.exampledns.net"
+                            ▼
+   ZONE: example.com  ───  example.com            run by: YOU (hosted on e.g. Route 53)
+                            │        www, shop, api.shop … all live in this zone
+                            │
+                            │  "corp.example.com? ask the internal IT servers"
+                            ▼
+   ZONE: corp.example.com  corp.example.com       run by: your IT department
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — delegation is an org chart, not an encyclopedia</div>
+  <p>Ask a CEO "who owns the payments retry logic?" — a good CEO does not know, but knows which VP owns
+  payments; the VP knows the team lead; the lead knows the engineer. Nobody knows everything; everyone knows
+  one level of "who to ask next," and each manager staffs their own slice without filing paperwork upward. DNS
+  is exactly this: root knows only TLD servers; <code>com</code> knows only each domain's nameservers; yours
+  know your records. The weak spot: a company's chain takes days — DNS referrals complete in milliseconds, and
+  caching means the chain is rarely walked at all (section 7).</p>
+</div>
+
+<h3>3.3 Registrar vs registry vs DNS hosting — three businesses, not one</h3>
+
+<p>"Buying a domain" involves three distinct parties, and conflating them is how you end up changing nameservers
+in the wrong console at 2 a.m.:</p>
+
+<table>
+  <tr><th>Party</th><th>What they do</th><th>Examples</th><th>Your relationship</th></tr>
+  <tr><td><strong>Registrar</strong></td><td>Sells you the right to a name; submits your registration and NS choices to the registry. ICANN-accredited.</td><td>Namecheap, GoDaddy, Cloudflare Registrar, Route 53 (also a registrar)</td><td>You <strong>BUY</strong> here: renewals, contacts, transfer locks.</td></tr>
+  <tr><td><strong>Registry</strong></td><td>Operates the TLD: runs its authoritative servers and the database of registrations.</td><td>Verisign (<code>.com</code>, <code>.net</code>), NIXI (<code>.in</code>), Google Registry (<code>.dev</code>)</td><td>None directly — the registrar talks to them.</td></tr>
+  <tr><td><strong>DNS hosting provider</strong></td><td>Runs the authoritative nameservers answering for <em>your zone's records</em>.</td><td>Route 53, Cloudflare DNS, your own BIND</td><td>You <strong>HOST</strong> here: this is where you edit A records, CNAMEs…</td></tr>
+</table>
+
+<p>Fully mixable: buy <code>example.com</code> at Namecheap (registrar), registered in Verisign's
+<code>.com</code> zone (registry), hosted on Route 53 — by entering Route 53's nameservers at Namecheap, which
+makes Verisign publish NS records delegating your zone there. Clouds bundle the roles; that convenience is
+exactly why people forget they are separate. One practical corollary worth pinning now: <em>switching DNS hosts
+means changing NS records at the registrar</em>, because the operative delegation lives in the parent zone,
+not yours.</p>
+
+<!-- ============================================================ -->
+<h2 id="cast">4. The cast of characters</h2>
+
+<p>Resolution is a play with five roles — what each knows, and who operates it. Section 6 is just these five
+talking in order.</p>
+
+<div class="figure-title">Fig 6.4 — Who's who in a DNS lookup</div>
+<pre class="diagram">
+  YOUR MACHINE                 THE LEGWORK                    THE AUTHORITATIVE HIERARCHY
+ ┌──────────────────┐      ┌──────────────────────┐      ┌─────────────────────────────────┐
+ │  STUB RESOLVER   │      │  RECURSIVE RESOLVER  │      │  ROOT SERVERS  (".")            │
+ │  in your OS      │ ───► │  ISP's, or public:   │ ───► │  know: where every TLD's        │
+ │  knows: only the │      │  8.8.8.8  (Google)   │      │  servers are. nothing else.     │
+ │  resolver's IP   │      │  1.1.1.1 (Cloudflare)│      ├─────────────────────────────────┤
+ │  (from DHCP,     │ ◄─── │  does ALL the work   │ ───► │  TLD SERVERS  (com, in, io…)    │
+ │   Part 3)        │      │  + caches answers    │      │  know: the NS records for every │
+ └──────────────────┘      └──────────────────────┘      │  domain registered in the TLD   │
+   asks ONE question          walks the tree on           ├─────────────────────────────────┤
+   expects ONE answer         your behalf          ───►  │  AUTHORITATIVE SERVERS          │
+                                                          │  hold YOUR actual records       │
+                                                          │  (Route 53, Cloudflare DNS,     │
+                                                          │   ns1.example.com)              │
+                                                          └─────────────────────────────────┘
+</pre>
+
+<ul>
+  <li><strong>The stub resolver</strong> — a small client inside your OS (what <code>getaddrinfo()</code>
+  calls). Deliberately dumb: it checks the hosts file and a local cache, then forwards everything to one
+  configured recursive resolver. Who configured that address? <strong>DHCP</strong> (Dynamic Host Configuration
+  Protocol) — the same Part 3 handshake that leased your IP also handed you a DNS server.</li>
+  <li><strong>The recursive resolver</strong> — the workhorse. It accepts your question and takes on the
+  <em>obligation to find the full answer</em>, walking the hierarchy and caching everything it learns. Run by
+  your ISP (Internet Service Provider) by default, or a public operator: <code>8.8.8.8</code> (Google),
+  <code>1.1.1.1</code> (Cloudflare), <code>9.9.9.9</code> (Quad9). Clouds run their own (Part 11).</li>
+  <li><strong>The root servers</strong> — the entry point. They know one thing: where each TLD's servers are.
+  There are <strong>13 named identities</strong>, <code>a.root-servers.net</code> through
+  <code>m.root-servers.net</code>, run by 12 organizations (Verisign runs two) — emphatically <em>not</em>
+  13 machines (history box below).</li>
+  <li><strong>The TLD nameservers</strong> — run by each TLD's registry. Verisign's <code>.com</code> servers
+  (<code>a.gtld-servers.net</code> and friends) hold NS delegations for ~160 million domains. They do not know
+  your A records; they know who does.</li>
+  <li><strong>The authoritative nameservers</strong> — hold <em>your zone's records</em> and answer with
+  authority: Route 53, Cloudflare DNS, or your own <code>ns1.example.com</code>. The only place
+  <code>shop.example.com → 203.0.113.80</code> truly lives; everything else is referral or cache.</li>
+</ul>
+
+<div class="callout history">
+  <div class="callout-title">📜 Why exactly 13 root servers — a 512-byte fossil</div>
+  <p>Early DNS over UDP capped messages at <strong>512 bytes</strong> (section 10), and the full list of root
+  servers — names plus IPs — had to fit in one such message so a resolver could bootstrap with a single query.
+  Thirteen entries fit. The number stuck; the constraint did not: each identity is now announced via
+  <strong>anycast</strong> (Part 3 — one IP advertised from many places, routing delivers you to the nearest)
+  from <strong>well over 1,700 physical instances</strong> worldwide. Query <code>a.root-servers.net</code>
+  (<code>198.41.0.4</code>) from Mumbai and you reach a machine near India, not a bunker in the US.</p>
+</div>
+
+<table>
+  <tr><th>Character</th><th>Knows</th><th>Operated by</th><th>Answer style</th></tr>
+  <tr><td>Stub resolver</td><td>hosts file, small cache, one resolver IP</td><td>your OS (configured via DHCP)</td><td>asks; does not answer</td></tr>
+  <tr><td>Recursive resolver</td><td>its cache; how to walk the tree</td><td>ISP / Google / Cloudflare / your VPC</td><td>full answers (recursion)</td></tr>
+  <tr><td>Root servers</td><td>where every TLD's servers are</td><td>12 operators, 13 identities, 1,700+ anycast instances</td><td>referrals only (iterative)</td></tr>
+  <tr><td>TLD servers</td><td>NS records for every domain in the TLD</td><td>the registry (Verisign for .com, NIXI for .in)</td><td>referrals only (iterative)</td></tr>
+  <tr><td>Authoritative servers</td><td>your zone's actual records</td><td>your DNS host (Route 53…) or you</td><td>final, authoritative answers</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="recursive-iterative">5. Recursive vs iterative queries</h2>
+
+<p>Two query styles coexist in every resolution, and interviewers love the distinction:</p>
+
+<ul>
+  <li>A <strong>recursive query</strong> says: <em>"give me the final answer; I'll wait while you do whatever it
+  takes."</em> Your stub sends exactly this to the resolver — one question out, one finished answer back. The
+  stub never meets the hierarchy.</li>
+  <li>An <strong>iterative query</strong> says: <em>"tell me what you know; I'll take it from there."</em> The
+  resolver asks root, TLD, and authoritative servers iteratively — and the first two reply with
+  <strong>referrals</strong>: "I don't know, but ask <em>them</em>; here are their addresses." The resolver
+  follows the trail itself.</li>
+</ul>
+
+<div class="figure-title">Fig 6.5 — Recursive ("do it for me") vs iterative ("here's who to ask next")</div>
+<pre class="diagram">
+   RECURSIVE — the stub's view                ITERATIVE — the resolver's reality
+
+   stub                resolver               resolver ──"A for shop.example.com?"──►  ROOT
+    │                     │                   resolver ◄──"not mine. try the .com    ─  ROOT
+    │── one question ───► │                               servers, at these IPs"
+    │                     │                   resolver ──same question──────────────►  .com TLD
+    │   (resolver does    │                   resolver ◄──"not mine. try             ─  .com TLD
+    │    all the work,    │                               ns1.exampledns.net"
+    │    however long     │                   resolver ──same question──────────────►  ns1.exampledns.net
+    │    it takes)        │                   resolver ◄──"shop.example.com           ─ ns1.exampledns.net
+    │                     │                               A 203.0.113.80  TTL 300"
+    │◄── one final ────── │                                      ▲
+    │     answer          │                              the only FINAL answer —
+    │                     │                              everything before it was a referral
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the hotel concierge</div>
+  <p>You ask a concierge for "a table tonight at the best sushi place." You don't care that they called three
+  restaurants and chased two "try our other branch" referrals — you asked once and got a finished result: your
+  stub's <strong>recursive</strong> query. Each restaurant behaved <strong>iteratively</strong>, answering only
+  with what it knew, never making calls on the concierge's behalf. A good concierge also writes the answer
+  down — the next guest gets it from memory. Where the analogy bends: the resolver's notes carry a contractual
+  obligation to forget after TTL seconds — on the Internet, restaurants change buildings constantly.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The split is load engineering: root and TLD servers stay fast by refusing recursion — stateless referrals
+  only — while the patient, cache-heavy work concentrates in resolvers near users. The contract is visible in
+  the protocol: the stub sets the <code>rd</code> flag (recursion desired); the resolver's reply sets
+  <code>ra</code> (recursion available). Section 8 shows both.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="walkthrough">6. The full journey: you type https://google.com and press Enter</h2>
+
+<p>The centerpiece. Before a single byte of HTTP can exist — before TCP can even attempt its three-way
+handshake (Part 4) — the browser needs an IP. Here is the complete resolution story, assuming the worst case:
+every cache cold. (Section 7 shows why the worst case is rare.)</p>
+
+<ol>
+  <li><strong>Step 0 — browser cache.</strong> The browser keeps its own small DNS cache (Chrome's is visible
+  at <code>chrome://net-internals/#dns</code>; entries capped around a minute). Hit? Done, ~0 ms. Miss?
+  Continue.</li>
+  <li><strong>Step 1 — OS cache and hosts file.</strong> The browser calls <code>getaddrinfo()</code>, landing
+  in the stub resolver, which checks the <strong>hosts file first</strong> (section 2's fossil), then the OS
+  cache (<code>ipconfig /displaydns</code> shows it on Windows). Hit? Under a millisecond. Miss? Continue.</li>
+  <li><strong>Step 2 — stub asks the configured resolver.</strong> One UDP datagram to port 53 (Part 5's
+  well-known port) of the recursive resolver, <code>rd</code> flag set. Who configured the resolver's address?
+  <strong>DHCP did</strong>, back in Part 3, in the same lease that assigned your IP.</li>
+  <li><strong>Step 3 — resolver cache miss.</strong> The resolver checks its enormous shared cache. For
+  <code>google.com</code> a miss is nearly impossible in real life — but we said cold, so it walks the tree,
+  iteratively.</li>
+  <li><strong>Step 4 — ask the root.</strong> "A record for <code>google.com</code>?" The root (reached via
+  anycast, Part 3) answers with a referral: <em>"I only know TLDs. For <code>com</code>, ask these servers —
+  here are their names AND their IPs."</em> Including the IPs is the small-but-crucial idea of <strong>glue
+  records</strong>: without them, resolving the nameserver's own name would itself require DNS —
+  chicken-and-egg. Glue is the egg supplied with the chicken.</li>
+  <li><strong>Step 5 — ask the .com TLD.</strong> Same question. Referral again: <em>"google.com is delegated
+  to <code>ns1</code>–<code>ns4.google.com</code> — addresses attached (glue again, since those nameservers
+  live inside the zone they serve)."</em></li>
+  <li><strong>Step 6 — ask Google's authoritative server.</strong> <code>ns1.google.com</code> owns the zone
+  and returns the real thing, flagged authoritative: <code>google.com. 300 IN A 142.250.183.78</code>.
+  (Possibly a different IP than a friend abroad gets — big operators answer by query origin; sections
+  11–12.)</li>
+  <li><strong>Step 7 — the answer flows back and is cached at every level.</strong> Resolver caches it (for
+  TTL seconds — 300 here), stub caches it, browser caches it. The next asker on that resolver skips steps 4–6
+  entirely.</li>
+  <li><strong>Step 8 — the browser hands the IP to TCP.</strong> Resolution over; networking begins. TCP
+  three-way handshake to <code>142.250.183.78:443</code> (Part 4), then TLS (Part 8), then HTTP. <em>The story
+  continues in Part 7.</em></li>
+</ol>
+
+<div class="figure-title">Fig 6.6 — The whole cast, one cold lookup (steps 0–8)</div>
+<pre class="diagram">
+ BROWSER        STUB (OS)           RECURSIVE RESOLVER        ROOT         .com TLD      AUTHORITATIVE
+ cache          cache + hosts       (ISP / 8.8.8.8)           servers      servers       ns1.google.com
+   │                │                       │                    │             │             │
+   │ 0. own cache:  │                       │                    │             │             │
+   │    miss        │                       │                    │             │             │
+   ├───────────────►│ 1. hosts file: miss   │                    │             │             │
+   │                │    OS cache:   miss   │                    │             │             │
+   │                ├──────────────────────►│ 2. "A google.com?" │             │             │
+   │                │   UDP :53, rd flag    │ 3. cache: miss     │             │             │
+   │                │                       ├───────────────────►│ 4.          │             │
+   │                │                       │◄───────────────────┤ "ask .com,  │             │
+   │                │                       │  referral + GLUE   │  addrs incl"│             │
+   │                │                       ├─────────────────────────────────►│ 5.          │
+   │                │                       │◄─────────────────────────────────┤ "ask        │
+   │                │                       │  referral + glue: ns1.google.com │  google's   │
+   │                │                       │                    │             │  servers"   │
+   │                │                       ├─────────────────────────────────────────────► │ 6.
+   │                │                       │◄───────────────────────────────────────────── ┤
+   │                │◄──────────────────────┤ 7. ANSWER (cached  │             │  "google.com│
+   │◄───────────────┤   A 142.250.183.78    │    at every level) │             │   A 142.250.│
+   │ (caches too)   │   (caches too)        │    TTL 300         │             │   183.78    │
+   │                │                       │                    │             │   TTL 300"  │
+   │ 8. hand IP to TCP (Part 4) ──► handshake ──► TLS (Part 8) ──► HTTP (Part 7)            │
+</pre>
+
+<table>
+  <tr><th>Step</th><th>Conversation</th><th>Result</th><th>Typical cost (cold)</th></tr>
+  <tr><td>0</td><td>browser checks its own cache</td><td>miss (we assumed cold)</td><td>~0 ms (in-process)</td></tr>
+  <tr><td>1</td><td>stub checks hosts file + OS cache</td><td>miss</td><td>&lt;1 ms (local)</td></tr>
+  <tr><td>2–3</td><td>stub → recursive resolver (UDP :53)</td><td>resolver cache miss</td><td>1–20 ms (hop to resolver)</td></tr>
+  <tr><td>4</td><td>resolver → root server</td><td>referral to .com + glue</td><td>5–30 ms (anycast keeps it close)</td></tr>
+  <tr><td>5</td><td>resolver → .com TLD server</td><td>referral to ns1–ns4.google.com + glue</td><td>5–40 ms</td></tr>
+  <tr><td>6</td><td>resolver → authoritative</td><td><strong>A 142.250.183.78, TTL 300</strong></td><td>5–50 ms</td></tr>
+  <tr><td>7</td><td>answer returns; cached at every level</td><td>resolver/OS/browser all cache</td><td>(return path of step 2)</td></tr>
+  <tr><td>8</td><td>browser hands IP to TCP</td><td>resolution complete</td><td>—</td></tr>
+  <tr><td colspan="3"><strong>Total, fully cold walk</strong></td><td><strong>~20–120 ms</strong></td></tr>
+  <tr><td colspan="3"><strong>Total, warm resolver or OS cache (the common case)</strong></td><td><strong>&lt;1 ms – 20 ms</strong></td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>All of this happens <strong>before any TCP connection to Google can exist</strong> — Part 4's SYN packet
+  needs a destination IP, and until DNS answers there isn't one. DNS latency is a tax on connection setup, paid
+  before TLS and HTTP add their own round trips. Hence DNS prefetching and connection reuse (no new connection,
+  no lookup) — and "every request does a DNS lookup" lands on section 15's misconception list.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Your computer checks its own notes first (browser cache, hosts file, OS cache). If unknown, it asks its
+    resolver, which asks the root ("who handles .com?"), then .com ("who handles google.com?"), then Google's
+    own server, which gives the IP. Everyone remembers the answer for next time; only then does the browser
+    connect.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Stub → resolver (recursive, <code>rd</code> set) → iterative walk: root refers to TLD with glue; TLD
+    refers to the domain's NS with glue; authoritative answers with the record, TTL, and <code>aa</code> flag.
+    Caching at resolver, OS, browser. Cold ≈ 20–120 ms; warm ≈ sub-millisecond. Resolution strictly precedes
+    the handshake: time-to-first-byte = DNS + TCP + TLS + HTTP.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Real resolvers parallelize and short-circuit: hot TLD referral sets (two-day TTLs), racing multiple
+    authoritative servers, qname minimization (RFC 9156 — asking the root only "<code>com.?</code>" for
+    privacy). Failure modes live in stub timeout/retry behavior (~5 s timeouts make a flaky resolver feel like
+    "the whole Internet is down") — why node-local DNS caches exist in Kubernetes (Part 12). And cached answers
+    carry a <em>decremented</em> TTL, so two clients of one resolver see different remaining lifetimes — the
+    diagnostic trick in section 8.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="caching-ttl">7. Caching and TTL — the craft of going stale gracefully</h2>
+
+<p>The cold walk is rare; the cache hit is the norm. The whole economy of DNS — its speed and its biggest
+operational gotcha — is governed by one number on every record: the <strong>TTL</strong> (Time To Live), in
+<strong>seconds</strong>.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — two unrelated things are both called TTL (Part 3 callback)</div>
+  <p>Part 3's IP header has a TTL: a <strong>hop counter</strong> routers decrement to kill looping packets
+  (the field traceroute exploits). DNS TTL is a <strong>cache lifetime in wall-clock seconds</strong>: "you may
+  reuse this answer for this long." Same name, zero relationship.</p>
+</div>
+
+<div class="figure-title">Fig 6.7 — Every layer between your code and the truth keeps a copy</div>
+<pre class="diagram">
+        WHERE ANSWERS GET REMEMBERED                       typical answer time on a hit
+
+   ┌  your own process  ────────────────────────────┐
+   │   JVM InetAddress cache (!)  / app-level cache │      ~0 ms     ◄── §11's war story
+   └────────────────────────────────────────────────┘
+   ┌  your machine  ────────────────────────────────┐
+   │   browser cache (≈60 s cap in Chrome)          │      ~0 ms
+   │   OS / stub cache  +  hosts file               │      under 1 ms
+   └────────────────────────────────────────────────┘
+   ┌  your network  ────────────────────────────────┐
+   │   recursive resolver cache — shared by         │      1–20 ms
+   │   thousands of users: the big one              │
+   └────────────────────────────────────────────────┘
+   ┌  the truth  ───────────────────────────────────┐
+   │   authoritative servers (no cache —            │      20–120 ms when everything
+   │   this IS the record)                          │      above missed
+   └────────────────────────────────────────────────┘
+</pre>
+
+<p>You can watch TTL working — ask twice and the resolver hands back the same cached answer with the remaining
+lifetime counting down:</p>
+
+<pre class="code">$ dig +noall +answer shop.example.com
+shop.example.com.   300   IN   A   203.0.113.80    ← fresh from authoritative: full TTL 300
+
+$ dig +noall +answer shop.example.com    # ~20 seconds later, same resolver
+shop.example.com.   280   IN   A   203.0.113.80    ← cached copy: 280 s of life left
+
+$ dig +noall +answer shop.example.com    # after the countdown hits zero
+shop.example.com.   300   IN   A   203.0.113.80    ← expired → re-fetched → fresh TTL</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — expiry dates, not announcements</div>
+  <p>Every cached answer is a carton of milk with a best-before date. When you change a record you cannot send
+  a recall notice to every fridge on Earth — there is no list of fridges. You just start handing out new
+  cartons, and old ones <strong>expire wherever they sit</strong>, on their own schedules. So the universal
+  phrase "waiting for DNS to propagate" is wrong about the mechanism: <em>nothing propagates outward</em>;
+  cached answers expire independently and fresh queries fetch the new truth. The analogy also carries the
+  trade: shorter dates = fresher milk but constant trips to the store (query load, cache-miss latency);
+  longer dates = cheap and fast but stale after a change.</p>
+</div>
+
+<h3>7.1 The operational craft: the pre-migration TTL playbook</h3>
+
+<p>TTL is a dial you are expected to turn. Repointing <code>shop.example.com</code> to a new IP:</p>
+
+<ol>
+  <li><strong>At least one full old-TTL before the cutover</strong> (a day ahead if TTL is 86,400), lower the
+  TTL to ~60. Why so early? Caches serve the <em>old</em> TTL until it runs out — you cannot shorten a promise
+  already made.</li>
+  <li><strong>Cut over:</strong> change the A record. Worst-case staleness is now ~60 seconds.</li>
+  <li><strong>Verify</strong> (<code>dig @8.8.8.8</code>, <code>dig @ns1…</code> at the authoritative —
+  section 8); keep the old box alive until its traffic drains.</li>
+  <li><strong>Raise the TTL back</strong> (300–3600) to stop paying the query-load tax for agility you no
+  longer need.</li>
+</ol>
+
+<table>
+  <tr><th></th><th>Low TTL (30–60 s)</th><th>High TTL (1–24 h)</th></tr>
+  <tr><td><strong>Failover / migration speed</strong></td><td>Fast — world converges in ~a minute</td><td>Slow — stragglers for hours</td></tr>
+  <tr><td><strong>Query load on your DNS</strong></td><td>High — caches re-ask constantly</td><td>Low — caches absorb nearly everything</td></tr>
+  <tr><td><strong>Latency for users</strong></td><td>More cold lookups on the critical path</td><td>Mostly instant cache hits</td></tr>
+  <tr><td><strong>Cost (Route 53 bills per query)</strong></td><td>Higher</td><td>Lower</td></tr>
+  <tr><td><strong>Blast radius of a bad record</strong></td><td>Small — mistakes expire in 60 s</td><td>Large — mistakes cached for a day</td></tr>
+  <tr><td><strong>Use for</strong></td><td>Traffic-steering records, migration windows</td><td>Stable infrastructure, NS, MX</td></tr>
+</table>
+
+<h3>7.2 Negative caching — even "no" gets remembered</h3>
+
+<p>Resolvers also cache <strong>NXDOMAIN</strong> ("non-existent domain") answers, for a duration set by your
+zone's <strong>SOA</strong> (Start of Authority) record — its last field, historically called <em>minimum</em>,
+repurposed by RFC 2308 as the <strong>negative-caching TTL</strong>. The classic sting: you hit
+<code>api.shop.example.com</code> <em>before</em> creating the record, get NXDOMAIN, and your resolver caches
+that "no" for, say, 300 seconds. You then add the record — correct and live at the authoritative servers — and
+your machine <em>keeps saying the name doesn't exist</em> until the negative cache expires. The typo'd record
+that "stays broken" briefly after you fix it is the same effect. Not haunted; RFC 2308.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Every answer carries a use-by time in seconds. Browsers, your OS, and resolvers remember answers until
+    expiry — that's why DNS is usually instant, and why changes take time to be seen: old answers expire on
+    their own; nothing pushes updates. Even "that name doesn't exist" gets remembered for a while.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The zone owner sets TTL per record; caches serve answers with the remaining TTL counting down. Playbook:
+    drop TTL one old-TTL early, cut over, verify, raise. Negative answers cache per the SOA minimum (RFC 2308).
+    The trade is freshness vs query load, latency, cost, and mistake blast-radius — and the protocol has no
+    push invalidation, period.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>TTL is a contract not everyone honors: some resolvers clamp very low TTLs upward, the JVM ignores DNS
+    TTLs entirely (section 11), and serve-stale resolvers (RFC 8767) deliberately answer with expired data when
+    authoritative servers are down — availability over correctness. Treat TTL as a <em>probabilistic
+    convergence horizon</em>, never a deadline: anything that must flip atomically belongs behind a load
+    balancer (Part 9), not a DNS change.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="dig">8. Reading dig and nslookup — your eyes into DNS</h2>
+
+<p><code>dig</code> (Domain Information Groper, from the BIND tools; preinstalled on macOS and most Linux) is
+the tool of record. Windows ships <code>nslookup</code>. Read one full <code>dig</code> output line by line and
+DNS stops being spooky:</p>
+
+<pre class="code">$ dig shop.example.com
+
+; &lt;&lt;&gt;&gt; DiG 9.18.24 &lt;&lt;&gt;&gt; shop.example.com
+;; Got answer:
+;; -&gt;&gt;HEADER&lt;&lt;- opcode: QUERY, status: NOERROR, id: 53217
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; QUESTION SECTION:
+;shop.example.com.        IN    A
+
+;; ANSWER SECTION:
+shop.example.com.   280   IN    A     203.0.113.80
+
+;; Query time: 2 msec
+;; SERVER: 192.168.1.1#53(192.168.1.1) (UDP)
+;; WHEN: Fri Jun 12 09:14:02 IST 2026
+;; MSG SIZE  rcvd: 61
+
+── line-by-line ────────────────────────────────────────────────────────────
+status: NOERROR     it worked. also seen: NXDOMAIN (no such name — cached! §7.2)
+                    and SERVFAIL (the resolver itself failed)
+id: 53217           16-bit ID matching answer to question — a character in
+                    §13's cache-poisoning story
+flags: qr rd ra     qr = this is a response · rd = recursion desired (§5)
+                    ra = recursion available (a recursive resolver answered)
+                    aa would mean "authoritative answer" — its ABSENCE says
+                    this came from a CACHE, not example.com's own servers
+QUESTION SECTION    what was asked: A record for shop.example.com.
+                    (trailing dot — dig always shows FQDNs, §3.1)
+ANSWER SECTION      name · REMAINING TTL (280, counting down from 300 — a
+                    cached copy) · class IN (Internet) · type A · the IP
+Query time: 2 ms    a resolver cache hit. a cold walk reads 20–120 ms
+SERVER: …#53 (UDP)  who answered, on Part 5's well-known port 53, over UDP</pre>
+
+<p>Two flags you will use weekly. <strong>Ask a specific server</strong> with <code>@</code> — for "is it just
+my resolver?" debugging, and for comparing a cache against the source of truth:</p>
+
+<pre class="code">$ dig @8.8.8.8 shop.example.com +noall +answer       # ask Google's public resolver
+shop.example.com.   163   IN   A   203.0.113.80      ← Google's cache: 163 s left
+
+$ dig @ns1.exampledns.net shop.example.com +noall +answer   # ask the AUTHORITATIVE directly
+shop.example.com.   300   IN   A   203.0.113.80      ← always full TTL: this IS the record
+                                                       (new IP here + old IP at resolvers
+                                                        = not an error. that is caching.
+                                                        wait out the TTL.)</pre>
+
+<p>And <strong>watch the actual walk</strong> with <code>+trace</code> — dig plays resolver itself, from the
+root down, showing every referral from section 6 in the flesh:</p>
+
+<pre class="code">$ dig +trace shop.example.com
+
+.                  515371  IN  NS  a.root-servers.net.      ┐ the ROOT referral set —
+.                  515371  IN  NS  b.root-servers.net.      │ the 13 identities (§4),
+.                  515371  IN  NS  m.root-servers.net.      ┘ cached ~6 days
+;; Received 525 bytes from 192.168.1.1#53 in 1 ms
+
+com.               172800  IN  NS  a.gtld-servers.net.      ┐ step 4: root says ".com?
+com.               172800  IN  NS  m.gtld-servers.net.      ┘ ask Verisign" — TTL 2 days
+;; Received 1170 bytes from 198.41.0.4#53(a.root-servers.net) in 28 ms
+
+example.com.       172800  IN  NS  ns1.exampledns.net.      ┐ step 5: .com delegates to
+example.com.       172800  IN  NS  ns2.exampledns.net.      ┘ the zone's own servers
+;; Received 112 bytes from 192.5.6.30#53(a.gtld-servers.net) in 32 ms
+
+shop.example.com.  300     IN  A   203.0.113.80             ← step 6: the real answer,
+;; Received 61 bytes from 198.51.100.53#53(ns1.exampledns.net) in 18 ms   from the source</pre>
+
+<p>On Windows, <code>nslookup</code> covers the basics — and one phrase confuses everyone the first time:</p>
+
+<pre class="code">C:\&gt; nslookup shop.example.com
+Server:  dns.google
+Address:  8.8.8.8
+
+Non-authoritative answer:              ← NOT an error. it means: served from the
+Name:    shop.example.com                resolver's cache rather than from
+Address:  203.0.113.80                   example.com's own servers (dig's aa flag)
+
+C:\&gt; nslookup shop.example.com ns1.exampledns.net    ← the dig @server equivalent:
+Server:  ns1.exampledns.net                            ask the authoritative directly
+
+C:\&gt; ipconfig /displaydns     ← inspect the Windows stub cache
+C:\&gt; ipconfig /flushdns       ← clear it (after hosts-file edits, stale answers)</pre>
+
+<!-- ============================================================ -->
+<h2 id="records">9. The record types that matter</h2>
+
+<p>A zone is, concretely, a set of typed <strong>resource records</strong>. Zone files (the classic BIND text
+format) remain the lingua franca even when your "zone file" is a Route 53 console or Terraform. Here is
+<code>example.com</code> with one of everything; then the types one at a time:</p>
+
+<pre class="code">$ORIGIN example.com.        ; names below not ending in "." get this appended
+$TTL 3600                   ; default TTL: 1 hour
+
+; name            TTL    class  type    value
+@                 3600   IN     SOA     ns1.exampledns.net. admin.example.com. (
+                                          2026061201 ; serial  (bump on every edit)
+                                          7200       ; refresh   (secondary sync)
+                                          900        ; retry
+                                          1209600    ; expire
+                                          300 )      ; minimum → NEGATIVE-cache TTL (§7.2)
+@                 3600   IN     NS      ns1.exampledns.net.    ; who serves this zone
+@                 3600   IN     NS      ns2.exampledns.net.    ; (always at least two)
+@                 300    IN     A       203.0.113.42           ; the apex: example.com itself
+@                 300    IN     AAAA    2001:db8:f00d::42      ; same, IPv6
+www               3600   IN     CNAME   example.com.           ; www = alias for the apex
+shop              300    IN     A       203.0.113.80
+api.shop          60     IN     A       203.0.113.81           ; = api.shop.example.com.
+@                 3600   IN     MX      10 mail1.example.com.  ; mail, priority 10 (preferred)
+@                 3600   IN     MX      20 mail2.example.com.  ; backup mail host
+@                 3600   IN     TXT     "v=spf1 include:_spf.example.net -all"
+_acme-challenge   60     IN     TXT     "kX9rL...one-time-proof-token"   ; certs (Part 8)
+@                 3600   IN     CAA     0 issue "letsencrypt.org"
+_grpc._tcp.api    300    IN     SRV     10 50 50051 api1.example.com.
+
+; "@" = the zone apex (the bare name example.com itself)
+; trailing dots matter: "mail1.example.com." is absolute</pre>
+
+<h3>9.1 A — name to IPv4</h3>
+<p>The workhorse: name → 32-bit IPv4 address (Part 3). You touch it for every "point this domain at that
+server" moment and every migration. Multiple A records on one name = round-robin (section 12).</p>
+
+<h3>9.2 AAAA — name to IPv6</h3>
+<p>The same mapping for IPv6 — "quad-A" because IPv6 addresses are 128 bits, <strong>four times</strong> an A
+record's 32 (Part 3 callback). IPv6-capable clients ask for A and AAAA in parallel and prefer AAAA. You touch
+it when enabling IPv6 on an ALB/CloudFront, and when debugging "works on 4G (IPv6), fails on office Wi-Fi
+(IPv4)" mysteries.</p>
+
+<h3>9.3 CNAME — an alias to another NAME (never an IP)</h3>
+<p>A <strong>CNAME</strong> (Canonical Name) record says "this name is an alias; the canonical name is over
+there — go resolve <em>that</em>." It points to a <strong>name, never an IP</strong>:</p>
+
+<pre class="code">www.example.com.    3600  IN  CNAME  example.com.
+shop.example.com.   300   IN  CNAME  my-alb-1234567890.ap-south-1.elb.amazonaws.com.
+                                     ; ▲ the classic backend use: alias onto an AWS load
+                                     ;   balancer's hostname — its fleet of IPs changes
+                                     ;   constantly; you could never maintain A records</pre>
+
+<p>Two iron rules, the second of which spawned an AWS feature:</p>
+<ul>
+  <li><strong>Rule 1 — a CNAME'd name can hold no other records.</strong> "This name is really that name" is an
+  exclusive claim; an A or MX alongside would contradict it.</li>
+  <li><strong>Rule 2 — no CNAME at the zone apex.</strong> The apex (<code>example.com</code> itself) is
+  <em>required</em> to hold SOA and NS records — and rule 1 forbids roommates. So the bare domain cannot be a
+  CNAME… yet the thing you most want at the apex is an alias to an ALB hostname. This collision is why
+  <strong>Route 53 invented the ALIAS record</strong> (section 11): CNAME-like behavior resolved server-side,
+  answered to clients as plain A records — legal at the apex. (The ALB behind it: Parts 9 and 11.)</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — "see other entry," with a cost</div>
+  <p>A CNAME is the index entry "Sockets — <em>see</em> Ports &amp; Sockets." Useful indirection: the real
+  entry moves, every cross-reference stays valid. But each "see…" sends the reader on another lookup — and
+  CNAME chains do that to resolvers: <code>a → CNAME → b → CNAME → c → A</code> can cost extra resolutions on
+  a cold cache (resolvers bundle what they can, but cross-zone chains routinely add round trips). One alias is
+  a tool; three is a smell — "CNAME chains are free" is on section 15's list.</p>
+</div>
+
+<h3>9.4 MX — where this domain's mail goes</h3>
+<p>An <strong>MX</strong> (Mail eXchanger) record names the host accepting email for the domain, with a
+<strong>priority — lower wins</strong>; higher values are backups. Why not just use the A record? Because mail
+should not have to go to the machine serving the website: <code>example.com</code>'s web traffic goes to your
+servers while its mail goes to Google Workspace, neither knowing about the other. MX is DNS doing
+<em>service-specific routing</em> — and the record you break once in your career while "cleaning up" a zone.</p>
+<pre class="code">example.com.   3600  IN  MX  1   aspmx.l.google.com.         ; primary (Google Workspace)
+example.com.   3600  IN  MX  5   alt1.aspmx.l.google.com.    ; backups, tried in order
+example.com.   3600  IN  MX  10  alt2.aspmx.l.google.com.</pre>
+
+<h3>9.5 TXT — free-form proof and policy</h3>
+<p>A <strong>TXT</strong> record holds arbitrary text — the duct tape of DNS, with two big uses.
+<strong>Proof of control:</strong> services verify domain ownership by asking you to publish a token only the
+owner could — Google's <code>google-site-verification=…</code>, AWS ACM (AWS Certificate Manager) validation
+records before issuing a certificate. Part 8 reuses exactly this trick: certificate authorities accept a DNS
+TXT challenge (<code>_acme-challenge</code>) as proof you control a domain. <strong>Email policy:</strong> the
+anti-spoofing trio lives in TXT — SPF (Sender Policy Framework: which servers may send mail as you), DKIM
+(DomainKeys Identified Mail: a public key verifying mail signatures), DMARC (Domain-based Message
+Authentication, Reporting &amp; Conformance: what receivers do with failures).</p>
+<pre class="code">example.com.            3600  IN  TXT  "v=spf1 include:amazonses.com -all"
+selector1._domainkey    3600  IN  TXT  "v=DKIM1; k=rsa; p=MIIBIjANBgkq...key"
+_dmarc                  3600  IN  TXT  "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"</pre>
+
+<h3>9.6 NS — the delegation glue</h3>
+<p><strong>NS</strong> (Name Server) records are section 3's delegation made flesh — the records that make the
+tree a tree. They live in <em>two</em> places: the parent zone (the <code>.com</code> servers holding
+<code>example.com. NS ns1.exampledns.net.</code> — that <em>is</em> the delegation) and your own zone. You
+touch them when changing DNS hosts — at the <em>registrar</em>, because the operative copies live in the parent
+zone, not yours.</p>
+
+<h3>9.7 PTR — reverse DNS: IP back to name</h3>
+<p>A <strong>PTR</strong> (Pointer) record answers the inverse question: which name belongs to
+<code>203.0.113.80</code>? Reverse lookups reuse the ordinary tree via a special domain,
+<code>in-addr.arpa</code>, with the IP's octets <strong>reversed</strong> so the tree's broad-to-specific order
+matches the address:</p>
+<pre class="code">; forward: name → IP    (lives in example.com's zone — the DOMAIN owner controls it)
+shop.example.com.            300  IN  A    203.0.113.80
+
+; reverse: IP → name    (lives under in-addr.arpa — the IP BLOCK's owner controls it)
+80.113.0.203.in-addr.arpa.   300  IN  PTR  shop.example.com.
+;  ▲ octets reversed: 203.0.113.80 → 80.113.0.203   (IPv6: same idea under ip6.arpa)</pre>
+<p>Who controls PTR? <strong>Not you</strong> — the reverse tree is delegated along <em>address-block</em>
+ownership, down to whoever owns the IP range: your cloud or ISP (you file a request with AWS for a PTR on your
+Elastic IP; <code>in-addr.arpa</code> is not your zone). Who uses it: <strong>mail servers</strong>, heavily —
+receivers distrust senders whose PTR doesn't match their name (forward-confirmed reverse DNS), making PTR
+table stakes for deliverability — plus logging pipelines and traceroute, which decorate IPs with names.</p>
+
+<h3>9.8 Briefly: SRV and CAA</h3>
+<p><strong>SRV</strong> (Service) records generalize MX to any service: <code>_service._proto.name</code> maps
+to a <strong>priority, weight, port, and target host</strong> — name <em>and</em> port discovery in one query
+(DNS otherwise never tells you ports — Part 5's problem). The web ignored SRV, but the idea won inside
+infrastructure: Kubernetes publishes SRV records for named service ports, and Consul's DNS interface serves
+them for service discovery (Parts 12–13). <strong>CAA</strong> (Certification Authority Authorization) records
+whitelist which certificate authorities may issue certificates for your domain — <code>0 issue
+"letsencrypt.org"</code> means everyone else must refuse. One line of hygiene against mis-issuance; the
+certificate story is Part 8's.</p>
+
+<table>
+  <tr><th>Type</th><th>Maps</th><th>Backend dev touches it when…</th></tr>
+  <tr><td><strong>A</strong></td><td>name → IPv4</td><td>pointing anything at a server; migrations</td></tr>
+  <tr><td><strong>AAAA</strong></td><td>name → IPv6</td><td>enabling IPv6; v6-vs-v4 debugging</td></tr>
+  <tr><td><strong>CNAME</strong></td><td>name → another name</td><td>aliasing onto ALBs/CDNs/SaaS; never at the apex</td></tr>
+  <tr><td><strong>MX</strong></td><td>domain → mail host (+priority)</td><td>email setup; the day you break it</td></tr>
+  <tr><td><strong>TXT</strong></td><td>name → arbitrary text</td><td>domain verification, ACM/ACME, SPF/DKIM/DMARC</td></tr>
+  <tr><td><strong>NS</strong></td><td>zone → its nameservers</td><td>changing DNS hosts; delegating subdomains</td></tr>
+  <tr><td><strong>PTR</strong></td><td>IP → name (reverse)</td><td>mail deliverability; asking your cloud/ISP</td></tr>
+  <tr><td><strong>SRV</strong></td><td>service+proto → host AND port</td><td>K8s/Consul service-discovery internals</td></tr>
+  <tr><td><strong>CAA</strong></td><td>domain → allowed cert issuers</td><td>security hardening (Part 8)</td></tr>
+  <tr><td><strong>SOA</strong></td><td>zone → its metadata</td><td>reading the negative-cache TTL (§7.2)</td></tr>
+</table>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>DNS stores typed entries: A/AAAA give a name's IPv4/IPv6, CNAME says "this name is an alias for that
+    name," MX says where email goes, TXT holds text proving ownership and setting mail policy, NS says which
+    servers manage a zone, and PTR answers the reverse question — which name belongs to an IP.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Records live in zones with per-record TTLs. CNAME's two rules (no coexisting records; never at the apex,
+    which must hold SOA+NS) explain why ALIAS/flattening exists. MX priorities order delivery; TXT carries
+    SPF/DKIM/DMARC and ownership challenges; NS exists in parent (delegation) and child (authority); PTR lives
+    under <code>in-addr.arpa</code>/<code>ip6.arpa</code> and follows IP-block ownership, not domain
+    ownership.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The type system is where DNS politics shows: SRV solved name+port discovery in 2000 and the web ignored
+    it — ossification, the same story Part 4 told about middleboxes. Newer types keep landing (HTTPS/SVCB
+    records now carry protocol hints like HTTP/3 support). And the CNAME-at-apex saga is standards archaeology:
+    vendors shipped proprietary fixes (ALIAS, CNAME flattening) because amending a 1987 rule would break four
+    decades of deployed resolvers. When a rule looks absurd, check what year it made perfect sense.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="transport">10. Transport: why UDP, when TCP, and who's reading your queries</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why DNS chose UDP port 53</div>
+  <p>Run Part 4's arithmetic. A DNS exchange is tiny: a question of a few dozen bytes, an answer classically
+  under 512. Over <strong>UDP</strong> that is one datagram out, one back — <strong>one round trip,
+  total</strong>. Over <strong>TCP</strong>, the same exchange pays the three-way handshake first (a full RTT
+  before any data), then the query/answer trip, then teardown — at least <strong>double the latency</strong>,
+  plus connection state on servers answering millions of queries a second. For a one-shot, idempotent question,
+  reliability machinery is dead weight: if a datagram is lost, the resolver simply asks again — the retry
+  <em>is</em> the recovery protocol. UDP gives DNS exactly the Part 4 trade it wants.</p>
+</div>
+
+<p>But TCP was never optional — port 53 is reserved on <strong>both</strong> transports (Part 5), and DNS
+switches to TCP in defined cases:</p>
+
+<ul>
+  <li><strong>Truncation.</strong> Classic DNS-over-UDP capped messages at <strong>512 bytes</strong> (the limit
+  that froze the root count at 13). An answer that doesn't fit is sent truncated with the <strong>TC
+  flag</strong> set — the client's instruction to <em>retry over TCP</em>. <strong>EDNS0</strong> (Extension
+  Mechanisms for DNS, version 0) defused most of this by letting clients advertise bigger UDP buffers — the
+  <code>EDNS: … udp: 1232</code> line in section 8's dig output — but large answers (many records, DNSSEC
+  signatures) still overflow into TCP.</li>
+  <li><strong>Zone transfers.</strong> <strong>AXFR</strong> (a full zone copy, syncing primary and secondary
+  nameservers) is bulk data needing reliability: always TCP.</li>
+</ul>
+
+<p>One paragraph on the modern privacy layer: classic DNS is <strong>plaintext</strong> — everyone between
+your stub and the resolver (coffee-shop Wi-Fi, your ISP) can read and log every name you look up, a remarkably
+complete diary of your life. <strong>DoT</strong> (DNS over TLS, port 853) and <strong>DoH</strong> (DNS over
+HTTPS, port 443 — queries hidden inside ordinary-looking HTTPS) encrypt the <em>stub-to-resolver leg</em>;
+Firefox and Chrome can speak DoH directly to Cloudflare or Google, bypassing the OS stub. Be precise about the
+gain: the local network and ISP can no longer read your queries, but <strong>the resolver still sees
+everything</strong> — you have not eliminated trust, you have <em>chosen whom to trust</em>. (And a browser
+doing DoH ignores your hosts file — a debugging gotcha already arriving in real tickets.)</p>
+
+<!-- ============================================================ -->
+<h2 id="your-stack">11. DNS in your stack — six places it is silently load-bearing</h2>
+
+<h3>11.1 Route 53 — your zone as a cloud service, plus traffic steering</h3>
+
+<p>AWS Route 53 (named for port 53, naturally) is section 3.3's DNS hosting: you create a <strong>hosted
+zone</strong> for <code>example.com</code>, AWS assigns four authoritative nameservers, you register them at
+your registrar, and your records become rows in an AWS API. Two features matter beyond basic hosting.
+<strong>First, routing policies</strong> — Route 53 varies its <em>answers</em>, turning DNS into a
+traffic-steering layer, optionally wired to <strong>health checks</strong> that pull dead endpoints out of
+rotation:</p>
+
+<table>
+  <tr><th>Policy</th><th>Answers with…</th><th>Backend use case</th></tr>
+  <tr><td><strong>Simple</strong></td><td>the record, always</td><td>normal hosting</td></tr>
+  <tr><td><strong>Weighted</strong></td><td>each record set with probability ∝ weight</td><td>canary releases — 5% of resolutions hit the new version</td></tr>
+  <tr><td><strong>Latency-based</strong></td><td>the region with lowest latency to the asking resolver</td><td>multi-region APIs: India → ap-south-1, US → us-east-1</td></tr>
+  <tr><td><strong>Failover</strong></td><td>primary while its health check passes; else secondary</td><td>active-passive disaster recovery</td></tr>
+  <tr><td><strong>Geolocation</strong></td><td>a record chosen by the asker's mapped country</td><td>compliance (EU data stays in EU), localization</td></tr>
+  <tr><td><strong>Multivalue answer</strong></td><td>up to 8 healthy records at once</td><td>round-robin (section 12) minus the dead servers</td></tr>
+</table>
+
+<p>Notice the implication — <strong>DNS does not return the same answer for everyone, by design</strong> — and
+the ceiling: every policy steers <em>resolutions</em>, not requests. Caches hold answers for TTL seconds, JVMs
+longer (11.4); no policy sees connections or load. Weighted 95/5 means 95/5 of <em>cache-missing
+resolvers</em>, not of traffic. DNS steering is coarse and eventually consistent — exactly why Part 9
+exists.</p>
+
+<p><strong>Second, ALIAS records</strong> — Route 53's answer to section 9.3's apex problem. You want
+<code>example.com</code> (apex — CNAME illegal) pointing at an ALB (Application Load Balancer), which AWS
+publishes only as a <em>hostname</em> with deliberately unstable IPs:</p>
+
+<pre class="code">; what you CANNOT write (§9.3 rule 2 — CNAME at apex is illegal):
+example.com.   300  IN  CNAME  my-alb-1234567890.ap-south-1.elb.amazonaws.com.   ; ✗ REFUSED
+
+; what Route 53 lets you do — the ALIAS record (a console/Terraform concept,
+; not standard zone-file syntax):
+example.com.   ALIAS → my-alb-1234567890.ap-south-1.elb.amazonaws.com.  (type A)
+
+; what resolvers actually SEE: Route 53 resolves the ALB name server-side,
+; at query time, and answers with plain A records:
+example.com.   60   IN  A   203.0.113.7
+example.com.   60   IN  A   198.51.100.9
+; legal at the apex, tracks the ALB's IP churn automatically, free queries.
+; (Cloudflare's "CNAME flattening" is the same trick. The ALB itself: Parts 9/11.)</pre>
+
+<h3>11.2 Kubernetes — CoreDNS names every Service</h3>
+
+<p>Inside a Kubernetes cluster, DNS <em>is</em> the service-discovery mechanism. A cluster component called
+<strong>CoreDNS</strong> automatically gives every Service a name with a fixed anatomy:</p>
+
+<pre class="code">orders.shop.svc.cluster.local
+  │      │    │      │
+  │      │    │      └── the cluster's domain suffix (configurable)
+  │      │    └───────── "svc" = this is a Service
+  │      └────────────── namespace: shop
+  └───────────────────── the Service name: orders
+
+# why your code can write just http://orders — each pod's /etc/resolv.conf:
+nameserver 10.96.0.10               # ← CoreDNS's Service IP (the cluster resolver)
+search shop.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
+# "orders" is a RELATIVE name (§3.1!) — the search list completes it to
+# orders.shop.svc.cluster.local. — the secret trailing-dot machinery, earning its keep</pre>
+
+<p>When your Spring Boot pod calls <code>http://orders/api/v1/orders</code>, the pod's stub asks CoreDNS, which
+answers with the Service's stable cluster IP. Flag planted: what that IP actually is, why it never changes as
+pods churn, and what kube-proxy does with it — <strong>Part 12</strong>.</p>
+
+<h3>11.3 Docker Compose — service names are DNS names</h3>
+
+<p>Same idea, smaller: Compose runs an <strong>embedded DNS server</strong> at <code>127.0.0.11</code>
+<em>inside every container</em> on the Compose network, registering each service name. That is the entire magic
+behind the most-copied line in backend configuration:</p>
+
+<pre class="code"># docker-compose.yml
+services:
+  api:
+    build: .
+    environment:
+      # "postgres" is not special syntax — it is a DNS name, resolved by Docker's
+      # embedded resolver (127.0.0.11) to the postgres container's IP:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orders
+  postgres:
+    image: postgres:16</pre>
+
+<p>It also explains the classic mystery: <code>localhost:5432</code> works on your laptop but fails inside the
+<code>api</code> container — in a container, <code>localhost</code> is <em>that container's own</em> loopback
+(Part 3). The name <code>postgres</code> is the right address, and it is DNS all the way down. More in
+Part 12.</p>
+
+<h3>11.4 The JVM gotcha — a war story</h3>
+
+<div class="callout example">
+  <div class="callout-title">🧪 War story — the Spring service that kept calling a dead IP</div>
+  <p><strong>2:10 a.m.</strong> A payments provider fails over; their API's DNS flips to a standby region,
+  TTL 60, textbook playbook (§7.1). Everything in your company recovers within minutes — except one Spring Boot
+  service, which keeps timing out for hours. <strong>2:40 a.m.</strong> On-call SSHes in:
+  <code>curl https://api.payments-partner.example</code> works <em>perfectly from the same box</em>. The
+  service still fails. <strong>3:05 a.m.</strong> Someone restarts the JVM. Instantly healthy. Nobody sleeps
+  well — restarts are not explanations.</p>
+  <p><strong>The explanation:</strong> Java does not honor DNS TTLs. <code>InetAddress</code> keeps its own
+  cache, with historical defaults: <strong>with a SecurityManager installed, successful lookups are cached
+  FOREVER</strong> (a 1990s applet-era defense), <strong>30 seconds otherwise</strong> — and plenty of app
+  servers and copy-pasted "hardening" configs ran in cache-forever mode. The service resolved the partner's
+  name once at startup; that IP was now a corpse. <code>curl</code> does a fresh lookup per invocation; the
+  JVM had decided it already knew. The restart "fixed" it by emptying the cache.</p>
+  <pre class="code"># the dials — JVM security properties, $JAVA_HOME/conf/security/java.security:
+networkaddress.cache.ttl=60            # seconds to cache SUCCESSFUL lookups
+                                       # (-1 = forever — the SecurityManager-era default)
+networkaddress.cache.negative.ttl=10   # seconds to cache FAILURES (never set -1)
+
+# or at startup (legacy but widely used system property):
+java -Dsun.net.inetaddr.ttl=60 -jar app.jar
+
+# AWS's standing guidance for exactly this failure: JVM TTL ≈ 60 s, because
+# ALB / RDS / ElastiCache endpoints rotate IPs as a matter of routine.</pre>
+  <p><strong>The lesson</strong>, bigger than Java: <em>your platform has a resolver too.</em> The OS stub is
+  only the bottom layer — JVMs, HTTP clients, and sidecars each cache under their own policies. (Its twin: a
+  connection pool holding keep-alive connections to the old IP re-resolves nothing — DNS was fine, the pool
+  was the cache. Part 9.) When traffic follows a corpse after failover, audit every layer that remembers.</p>
+</div>
+
+<h3>11.5 Node.js — two resolvers in one runtime</h3>
+
+<p>Node ships two lookalike APIs that are not interchangeable. <code>dns.lookup()</code> — the default inside
+<code>http.get()</code> and <code>fetch</code> — calls the OS resolver (<code>getaddrinfo</code>), so it honors
+the hosts file and OS cache; but the call is blocking C code on libuv's <strong>worker threadpool</strong>
+(default size 4), so lookup bursts or one slow resolver queue behind file I/O — mysterious latency.
+<code>dns.resolve4()</code> and family are a <strong>pure DNS client</strong> (c-ares): true async network
+I/O, no threadpool — but they <em>skip the hosts file and OS cache entirely</em>. Rule of thumb:
+<code>lookup</code> = "resolve like the OS would"; <code>resolve</code> = "speak DNS itself." And Node itself
+caches nothing — the mirror image of the JVM's cache-forever sin.</p>
+
+<h3>11.6 Kafka — bootstrap is just DNS</h3>
+
+<p><code>bootstrap.servers=kafka1.example.com:9092,kafka2.example.com:9092</code> is a DNS exercise: the client
+resolves a bootstrap name, connects, and fetches cluster metadata — which returns every broker's
+<strong>advertised listener</strong>: more names, also resolved before connecting to partition leaders. Hence
+the classic failure: works inside the broker network, dies from your laptop with
+<code>UnknownHostException</code>, because brokers advertised internal-only names. The bootstrap list opens the
+door; the <em>advertised</em> names must resolve from wherever the client lives. (Being a JVM client, 11.4
+applies on top.)</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Your tools are full of hidden DNS: Route 53 hosts records and can answer by region or health; Kubernetes
+    and Compose give services names so containers find each other; Java caches lookups by its own rules
+    (sometimes forever — the famous "restart fixed it"); Node has one API that asks the OS and one that speaks
+    DNS directly; Kafka clients find brokers by resolving names.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Route 53: hosted zones, health-checked weighted/latency/failover/geo policies, ALIAS for apex-to-ALB.
+    K8s: CoreDNS + resolv.conf search lists implement <code>service.namespace.svc.cluster.local</code>.
+    Compose: embedded resolver at 127.0.0.11. JVM: <code>networkaddress.cache.ttl</code> /
+    <code>sun.net.inetaddr.ttl</code> override DNS TTLs — set ~60 s for cloud targets. Node:
+    <code>dns.lookup</code> (OS, threadpool) vs <code>dns.resolve</code> (c-ares). Kafka: bootstrap and
+    advertised listeners are two separate resolution steps.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The theme is <em>resolver pluralism</em>: any real deployment runs four-plus resolvers (OS stub, runtime,
+    cluster DNS, VPC resolver) with different caches and search paths, and most "DNS is flaky" tickets are two
+    of them disagreeing. Debug by asking each layer the same question and diffing: <code>dig</code> (pure DNS),
+    <code>getent hosts</code> (OS view, hosts file included), the runtime API, the cluster resolver directly.
+    In K8s, <code>ndots:5</code> means external names like <code>api.stripe.com</code> first try several doomed
+    in-cluster suffixes — an NXDOMAIN tax that node-local caching and trailing-dot FQDNs (§3.1!) both
+    mitigate.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="load-distribution">12. DNS as a (weak) load balancer</h2>
+
+<p>Section 1 promised one name → many IPs. Here it is. Publish three A records and resolvers hand back all
+three, rotating the order; most clients take the first:</p>
+
+<pre class="code">$ dig +noall +answer api.example.com
+api.example.com.   60   IN   A   203.0.113.10    ← this client will likely use .10
+api.example.com.   60   IN   A   203.0.113.11
+api.example.com.   60   IN   A   198.51.100.7
+
+$ dig +noall +answer api.example.com     # asked again — note the rotation
+api.example.com.   60   IN   A   203.0.113.11    ← next asker likely lands on .11
+api.example.com.   60   IN   A   198.51.100.7
+api.example.com.   60   IN   A   203.0.113.10</pre>
+
+<div class="figure-title">Fig 6.8 — Round-robin DNS: statistical spreading, with blind spots</div>
+<pre class="diagram">
+                         "api.example.com?"
+   client A ──────────►  ┌────────────────┐ ──► answers rotated per query
+   client B ──────────►  │    resolver    │
+   client C ──────────►  └────────────────┘
+                                 │
+            ┌────────────────────┼────────────────────┐
+            ▼                    ▼                    ▼
+      203.0.113.10         203.0.113.11         198.51.100.7
+      ┌──────────┐         ┌──────────┐         ┌──────────┐
+      │ server 1 │         │ server 2 │         │ ▼ DEAD ▼ │   ◄── DNS has NO IDEA.
+      │   OK     │         │   OK     │         │          │       it keeps serving .7
+      └──────────┘         └──────────┘         └──────────┘       until a human (or a
+                                                                    health check) edits
+      …and one corporate resolver caching one answer                the zone AND caches
+      can pin thousands of employees to server 1                    expire
+</pre>
+
+<p>Why it is weak load balancing — four structural reasons:</p>
+
+<ul>
+  <li><strong>No health awareness.</strong> Plain DNS serves a dead server's IP until the zone is edited
+  <em>and</em> caches expire — TTL seconds of failed requests, minimum. Health-checked policies (§11.1) patch
+  resolution time only; already-cached answers stay broken.</li>
+  <li><strong>Cache stickiness.</strong> Rotation happens per <em>resolver query</em>, not per request. One
+  office resolver caches one ordering and pins everyone behind it for the TTL — and a JVM (§11.4) pins itself
+  far longer.</li>
+  <li><strong>Uneven client distribution.</strong> One cached answer may stand for one user — or an ISP
+  resolver serving half a city. Equal rotation of answers is nothing like equal distribution of load.</li>
+  <li><strong>No request awareness.</strong> DNS sees a name and answers an IP. It cannot see connection
+  counts, latency, CPU, or the difference between a health ping and a 4 GB upload — it cannot
+  <em>balance</em>; it can only spread blindfolded.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — and the handoff</div>
+  <p>DNS distributes <em>name resolutions</em>; a load balancer distributes <em>requests</em>. Resolutions are
+  cached, client-controlled, and health-blind — so DNS-level spreading is the coarse outer layer (steering
+  users to a region), never the fine-grained one. <strong>Part 9 picks up exactly here:</strong> a device
+  holding the single stable IP your DNS points at, seeing every request and every backend's health in real
+  time, balancing for real.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="security">13. Security touches: poisoning, DNSSEC, and hygiene</h2>
+
+<p>Three things every backend engineer should know exist — one paragraph each, no depth required today.</p>
+
+<p><strong>Cache poisoning.</strong> A DNS answer is matched to its question by a 16-bit ID (section 8's
+<code>id:</code>), over connectionless UDP — no handshake proves who is talking (Part 4). An attacker who can
+guess the ID can <em>race</em> the real answer: fire forged responses at a resolver just after it asks, and if
+a fake with the right ID arrives first, the resolver caches the attacker's IP for
+<code>bank.example.com</code> — poisoning every downstream user for the TTL. Dan Kaminsky showed this practical
+at scale in 2008, and the fixes are entropy patches you can still see in packet captures:
+<strong>source-port randomization</strong> (queries leave from random ephemeral ports — Part 5 — adding ~16
+bits to guess) and <strong>0x20 encoding</strong> (the resolver randomizes letter case,
+<code>bAnK.eXamPLe.cOm</code>, and requires the answer to echo it exactly — yes, really). Together they make
+blind forgery a lottery with hundreds of millions of losing tickets.</p>
+
+<p><strong>DNSSEC</strong> (DNS Security Extensions) is the principled fix: zone owners <em>sign</em> records,
+parents publish children's key fingerprints, and a chain of trust runs from the root down — so any resolver
+can verify an answer is authentic regardless of who delivered it. Know two things: it provides
+<strong>authenticity and integrity, not confidentiality</strong> (signed, not encrypted — DoH is the privacy
+tool), and adoption remains a minority of domains after two decades: signing is operationally fussy (botched
+key rollovers have taken major sites offline), responses balloon past UDP limits, and validation failure means
+SERVFAIL for everyone. It exists; it matters for high-value zones; you are not behind for never deploying
+it.</p>
+
+<p><strong>Hygiene one-liners.</strong> <em>Typosquatting:</em> attackers register <code>examp1e.com</code> to
+harvest typos — defensive registrations are cheap insurance. <em>Dangling-CNAME subdomain takeover:</em> you
+decommission an S3 site or Heroku app but leave <code>promo.example.com CNAME old-bucket.s3.amazonaws.com</code>
+in the zone; an attacker claims the now-free bucket name and serves content (and harvests cookies — Part 7) on
+<em>your</em> subdomain. The rule: <strong>DNS records are inventory</strong> — when infrastructure dies, its
+records die with it. Decommissioning checklists end with a zone audit.</p>
+
+<!-- ============================================================ -->
+<h2 id="interview">14. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>Walk me through everything DNS does when you type https://shop.example.com into a browser.</summary>
+    <p>Caches first: browser, then the OS stub — hosts file, then OS cache. On miss, the stub sends a recursive
+    query (UDP, port 53, <code>rd</code> flag) to its DHCP-assigned resolver. The resolver checks its cache,
+    then iterates: root → referral to the <code>.com</code> TLD servers (with glue IPs); TLD → referral to the
+    domain's authoritative nameservers; authoritative → the A record with TTL, flagged <code>aa</code>. The
+    answer is cached at resolver, OS, and browser, then handed to the app — which only now can open TCP (the
+    SYN needs a destination IP). Cold ≈ 20–120 ms; warm under 1 ms. Bonus: mention negative caching and that
+    answers may legitimately differ by geography/policy.</p>
+  </details>
+
+  <details><summary>Recursive vs iterative queries — who does which, and why is the split designed that way?</summary>
+    <p>The stub sends a <em>recursive</em> query: "get me the final answer, however long it takes." The
+    resolver queries root, TLD, and authoritative servers <em>iteratively</em> — each answers only with what it
+    knows: a referral ("not mine — ask them") or the final record. The split is load engineering: root/TLD
+    servers stay fast by being stateless and refusing recursion; patient, cache-heavy work concentrates in
+    resolvers near users. Visible in the protocol as the <code>rd</code> and <code>ra</code> flags in dig
+    output.</p>
+  </details>
+
+  <details><summary>CNAME vs A record — and why can't I put a CNAME at the zone apex?</summary>
+    <p>A maps a name to an IPv4 address; CNAME maps a name to <em>another name</em>, which must then be
+    resolved. CNAME rules: the aliased name may hold no other records, and the apex must hold SOA and NS —
+    so the bare domain can't be a CNAME. Painful in the cloud, where load balancers are hostnames with unstable
+    IPs — hence Route 53 ALIAS (and Cloudflare CNAME flattening): alias behavior resolved server-side, answered
+    as plain A records, legal at the apex, auto-tracking the ALB. Also worth saying: CNAME chains cost extra
+    lookups.</p>
+  </details>
+
+  <details><summary>Why does DNS use UDP? When does it use TCP?</summary>
+    <p>The exchange is one tiny question, one small answer — UDP does it in a single round trip with no
+    connection state, while TCP's handshake alone would double the latency and force state onto servers doing
+    millions of queries per second. Lost datagram? Re-ask — queries are idempotent. TCP is used when answers
+    exceed the UDP budget (classically 512 bytes; the TC truncation flag means "retry over TCP"; EDNS0 raised
+    typical budgets to ~1232), for DNSSEC-sized responses, and always for AXFR zone transfers. Port 53 on
+    both.</p>
+  </details>
+
+  <details><summary>What are the TTL trade-offs, and what's your pre-migration playbook?</summary>
+    <p>Low TTL: fast convergence and failover, but more cache misses — more query load, cost, and lookup
+    latency. High TTL: cheap and fast steady-state, but changes and mistakes stay visible for hours. Playbook:
+    at least one full <em>old</em>-TTL before cutover, lower the TTL (86400 → 60) — early, because caches honor
+    the TTL they fetched and you cannot shorten a promise already made; change the record; verify with
+    <code>dig @8.8.8.8</code> and <code>dig @authoritative</code>; drain the old target; raise the TTL back.</p>
+  </details>
+
+  <details><summary>You fixed a wrong DNS record an hour ago but some users still hit the old IP. Is it "still propagating"?</summary>
+    <p>Nothing propagates — DNS has no push channel. The authoritative servers answered correctly the moment
+    you saved; what persists is caching: every resolver that fetched the old record serves it until its copy's
+    TTL expires, plus OS/browser layers, plus a JVM that may cache far beyond any TTL. If the bad state was
+    NXDOMAIN, negative caching (SOA minimum) keeps "doesn't exist" alive too. Diagnose by diffing
+    <code>dig @authoritative</code> (truth) against <code>dig @8.8.8.8</code> and the local cache, watching the
+    remaining-TTL countdown.</p>
+  </details>
+
+  <details><summary>How does Kubernetes service discovery relate to DNS?</summary>
+    <p>Kubernetes uses plain DNS for discovery: CoreDNS runs in-cluster, and every Service gets
+    <code>service.namespace.svc.cluster.local</code>, resolving to the Service's stable cluster IP. Pods'
+    <code>/etc/resolv.conf</code> points at CoreDNS and carries a search-domain list — which is why the short
+    name <code>orders</code> works in-namespace: it is a relative name completed by the search list. Named
+    ports even get SRV records. So "calling a microservice by name" in K8s is ordinary DNS against a
+    cluster-local authoritative server — with section 1's indirection payoff: pods churn, IPs change, the name
+    holds.</p>
+  </details>
+
+  <details><summary>After a failover, one Java service kept calling the dead IP for hours while curl on the same host worked. Why?</summary>
+    <p>The JVM's InetAddress cache ignores DNS TTLs: historically it caches successful lookups <em>forever</em>
+    with a SecurityManager (30 seconds otherwise), governed by <code>networkaddress.cache.ttl</code> in
+    <code>java.security</code> or the legacy <code>sun.net.inetaddr.ttl</code> property. The service resolved
+    once at startup and never again; curl does a fresh lookup per invocation. Fix: set the JVM TTL to ~60 s
+    (AWS's standing recommendation — ALB/RDS IPs rotate routinely), and check the twin culprit: connection
+    pools holding keep-alive connections to the old IP never re-resolve until those connections close.</p>
+  </details>
+
+  <details><summary>Registrar, registry, DNS hosting provider — who does what?</summary>
+    <p>Registrar: where you buy and renew the name (Namecheap, GoDaddy, Cloudflare, Route 53-as-registrar);
+    ICANN-accredited; submits your nameserver choices upward. Registry: operates the TLD — Verisign runs
+    <code>.com</code>'s servers and database; NIXI runs <code>.in</code>. DNS host: runs the authoritative
+    servers for your zone's records (Route 53, Cloudflare DNS, your own BIND). Fully mixable — and the
+    corollary: switching DNS hosts means changing NS records <em>at the registrar</em>, because the operative
+    delegation lives in the parent zone.</p>
+  </details>
+
+  <details><summary>What is negative caching, and when does it bite?</summary>
+    <p>Resolvers cache NXDOMAIN answers, for a duration set by the zone's SOA <em>minimum</em> field
+    (repurposed by RFC 2308 as the negative-cache TTL). It bites when you query a name <em>before</em> creating
+    its record — a pre-deploy health check, an eager retry loop — caching the "no," so the name stays dead on
+    that resolver even after you add the record; and when a fixed typo "stays broken" briefly for the same
+    reason. Mitigate with patience, targeted cache flushes, and a modest SOA minimum (e.g., 300) so mistakes
+    age out fast.</p>
+  </details>
+
+  <details><summary>How does round-robin DNS distribute load, and why isn't it a real load balancer?</summary>
+    <p>Multiple A records on one name; resolvers return the set and rotate the order; most clients take the
+    first — statistically spreading connections. It fails as load balancing on four axes: no health awareness
+    (a dead IP keeps being served until the zone changes and TTLs expire), cache stickiness (one resolver's
+    cached ordering pins all its users), uneven client weight (one cached answer may represent an entire ISP),
+    and request-blindness (DNS can't see connections, load, or latency). It spreads resolutions, not requests —
+    coarse geographic steering at best. Dedicated load balancers (Part 9) close exactly that gap.</p>
+  </details>
+
+  <details><summary>Are there really only 13 root servers? What happens if they "go down"?</summary>
+    <p>Thirteen root server <em>identities</em> (a–m.root-servers.net, 12 operators) — a relic of fitting the
+    list plus IPs into one 512-byte UDP answer — but each is anycast from many sites: 1,700+ physical instances
+    worldwide, with routing (Part 3) delivering you to a nearby one. "Taking down the roots" means defeating
+    hundreds of independent sites simultaneously — and resolvers cache the TLD referral set for ~two days, so
+    the Internet would coast on caches while operators responded.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">15. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "After a DNS change, the update propagates across the Internet like a wave."</strong><br>
+  ✅ Nothing is pushed anywhere — there is no propagation channel. Your authoritative servers answer with the
+  new value instantly; everyone else holds <em>caches</em> that expire on their own TTL schedules and then
+  re-fetch. "Waiting for propagation" is really "waiting for independently distributed cache expiries" — which
+  is why the fix for stragglers is lowering TTLs <em>before</em> the change, not waiting harder after it.</p>
+
+  <p><strong>❌ "There are 13 root server machines."</strong><br>
+  ✅ Thirteen named <em>identities</em> (a 512-byte-UDP-era artifact), each anycast from many locations — 1,700+
+  physical instances operated by 12 organizations. Your "root query" is usually answered within your own
+  region.</p>
+
+  <p><strong>❌ "Every HTTP request does a DNS lookup."</strong><br>
+  ✅ Lookups are heavily amortized: browser, OS, and resolver caches answer most in microseconds, and connection
+  reuse (keep-alive, pools — Parts 7 and 9) means most requests ride an existing connection and trigger
+  <em>no resolution at all</em>. A busy JVM service might resolve a downstream name once a minute — or,
+  misconfigured, once per process lifetime (§11.4).</p>
+
+  <p><strong>❌ "CNAME chains are free — it's just an alias."</strong><br>
+  ✅ Each link is another name to resolve: cold-cache chains add real round trips, every link is one more record
+  to misconfigure, and a dangling link is a takeover risk (§13). Plus the hard rules: no coexisting records,
+  never at the apex. Alias once, deliberately — not thrice, accidentally.</p>
+
+  <p><strong>❌ "DNS returns the same answer for everyone."</strong><br>
+  ✅ Modern DNS answers depend on who asks, from where, and what's healthy: geolocation, latency-based routing,
+  weighted canaries, failover health checks (§11.1) — plus anycast (Part 3) handing you a different server
+  instance per region. Two engineers diffing <code>dig</code> outputs across continents may both be seeing
+  correct, intended behavior.</p>
+
+  <p><strong>❌ "The trailing dot in <code>example.com.</code> is a typo."</strong><br>
+  ✅ The dot is the root of the tree: it marks the name fully qualified (absolute). Without it a name is
+  technically relative and may be completed by search lists — the very mechanism Kubernetes uses to turn
+  <code>orders</code> into <code>orders.shop.svc.cluster.local</code>. Zone files and dig print it because, at
+  this layer, precision is load-bearing.</p>
+
+  <p><strong>❌ "DNS only uses UDP."</strong><br>
+  ✅ DNS is specified on both transports, port 53 each: UDP for the common case, TCP for truncated/oversized
+  answers (TC flag, DNSSEC) and always for AXFR zone transfers — plus DoT (853) and DoH (443). A firewall that
+  "helpfully" blocks TCP/53 causes the weirdest partial outage: everything works except the big answers.</p>
+
+  <p><strong>❌ "My laptop walks the DNS tree itself."</strong><br>
+  ✅ Your machine runs only a stub: hosts file, small cache, and one configured recursive resolver (courtesy of
+  DHCP) that does the walking and the heavy caching. That split is why "change your DNS server" is a thing
+  users can do — and why one broken resolver makes the whole Internet "go down" for an office while every cable
+  stays lit.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>The addressing story is complete end to end. <strong>Part 3</strong> gets packets to the right machine
+  (IP). <strong>Part 4</strong> turns packets into a reliable conversation (TCP). <strong>Part 5</strong>
+  delivers it to the right process (ports — DNS itself lives on port 53, as promised there). <strong>This
+  part</strong> closed the human loop: names that resolve to all of the above, delegated and cached at
+  planetary scale. Every prerequisite for an application conversation is finally in place — your browser holds
+  <code>142.250.183.78</code>, the socket is ready — and now that names resolve, we can finally speak
+  <strong>HTTP</strong>: verbs, paths, status codes, and the <code>Host</code> header this chapter kept
+  teasing. Next: <a href="part07.html"><strong>Part 7 — HTTP</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part05.html"><span class="dir">← Previous</span><span class="t">Part 5: Ports &amp; Sockets</span></a>
+  <a href="part07.html"><span class="dir">Next →</span><span class="t">Part 7: HTTP</span></a>
+</div>
+
+</main>
+</body>
+</html>

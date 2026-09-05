@@ -1,0 +1,1735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 3: IP Addresses — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html" class="active"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 3 of 15</p>
+<h1>IP Addresses — Finding One Machine Among Billions</h1>
+<p class="lede">Part 2 left you with a puzzle: MAC addresses can deliver a frame to a neighbor on the same
+network, but they are useless for reaching a server on another continent. This part introduces the address
+that <em>can</em> — the IP address — and with it the machinery of subnets, routers, gateways, DHCP, ARP, and
+NAT. By the end, you will be able to narrate, hop by hop, exactly what happens when your laptop sends one
+packet to <code>google.com</code>.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why-ip">Why IP addresses exist</a></li>
+    <li><a href="#ipv4">IPv4 — anatomy of an address</a></li>
+    <li><a href="#ipv4-header">The IPv4 header and TTL</a></li>
+    <li><a href="#ipv6">Running out — IPv6</a></li>
+    <li><a href="#public-private">Public vs private addresses</a></li>
+    <li><a href="#cidr">CIDR and subnet masks</a></li>
+    <li><a href="#subnetting">Subnetting a network by hand</a></li>
+    <li><a href="#local-or-remote">The local-or-remote decision</a></li>
+    <li><a href="#routing">Routers, routing tables, gateways</a></li>
+    <li><a href="#dhcp">DHCP — how you got your address</a></li>
+    <li><a href="#cast">Unicast, broadcast, multicast, anycast</a></li>
+    <li><a href="#arp">ARP — the L3→L2 glue</a></li>
+    <li><a href="#nat">NAT — sharing one public address</a></li>
+    <li><a href="#journey">How my laptop finds google.com</a></li>
+    <li><a href="#commands">Commands corner</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-ip">1. Why IP addresses exist — MAC addresses cannot scale</h2>
+
+<span class="osi-badge">📍 OSI Layer 3 — Network</span>
+
+<p>In Part 2 you met the <strong>MAC address</strong> (Media Access Control address): a 48-bit identifier
+burned into every network interface at the factory, like <code>3c:7d:0a:12:34:56</code>. MAC addresses are how
+frames find their target <em>within one network</em> — the switch keeps a table of which MAC lives on which
+port and forwards accordingly. So an obvious question: if every device on Earth already has a globally unique
+MAC address, why invent a second addressing system at all? Why not route everything by MAC?</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Because MAC addresses are <strong>flat</strong>. A MAC address tells you <em>which device</em> but nothing
+  about <em>where it is</em>. The first half identifies the manufacturer and the rest is a serial number —
+  two laptops bought the same day in the same shop can end up on opposite sides of the planet, with
+  near-identical MACs. There is no geography in the number, so there is nothing to summarize: a router trying
+  to deliver "to MAC <code>3c:7d:0a:12:34:56</code>" would need a table with <strong>one entry for every
+  device on Earth</strong> — tens of billions of rows, changing every time any phone moves between networks.
+  No router could hold that table, and no protocol could keep it up to date. Routing needs addresses that are
+  <strong>hierarchical and aggregatable</strong>: addresses where one short prefix ("everything starting
+  142.250…") can stand for millions of machines in one direction. That is exactly what the
+  <strong>IP address</strong> (Internet Protocol address) provides — and why Layer 3 exists as a separate
+  layer at all.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — delivering worldwide post by fingerprint</div>
+  <p>A MAC address is like a person's fingerprint: globally unique, permanent, and utterly useless for
+  delivering a letter. Imagine addressing an envelope with only a fingerprint. Every post office on Earth
+  would need a constantly updated directory of every fingerprint and the building it is currently in. Nobody
+  would even try. Instead, the postal system invented <strong>hierarchical addresses</strong>: country → city
+  → street → house number. A sorting center in Mumbai doesn't know where Frau Müller lives; it only needs to
+  know "Germany → put it on the Frankfurt plane." Each step narrows the search, and each sorting center holds
+  a tiny table. An IP address is the postal address of networking: the front of the number says <em>which
+  network</em> (country/city), the end says <em>which machine on that network</em> (house number). The
+  fingerprint — the MAC — still matters, but only for the final handover, when the local courier is standing
+  on the right street.</p>
+</div>
+
+<p>This gives us the division of labor you saw at the end of Part 2, now with its full meaning:</p>
+
+<div class="figure-title">Fig 3.1 — Two addresses, two jobs: hop-by-hop vs end-to-end</div>
+<pre class="diagram">
+              LAYER 2 (MAC)                      LAYER 3 (IP)
+        "deliver to my neighbor"          "deliver across the world"
+
+   ┌───────────────────────────────┐   ┌──────────────────────────────────┐
+   │ flat identifier (fingerprint) │   │ hierarchical address (postal)    │
+   │ scope: one local network      │   │ scope: the entire Internet       │
+   │ used by: switches             │   │ used by: routers                 │
+   │ changes: at EVERY hop         │   │ changes: never (almost — NAT)    │
+   │ assigned: by manufacturer     │   │ assigned: by network you join    │
+   └───────────────────────────────┘   └──────────────────────────────────┘
+
+   laptop ──frame──► router ──frame──► router ──frame──► server
+            MAC #1            MAC #2            MAC #3
+            ════════ new MAC addressing on every hop ════════
+            ─────── same IP source and destination ──────────
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>MAC answers "which device on this wire?"; IP answers "which machine on the planet?"</strong>
+  A frame's MAC addresses are rewritten at every router hop; the packet's IP addresses stay the same from
+  source to destination (until NAT complicates this — section 13). You need both: IP to plan the route,
+  MAC to execute each individual hop. Section 12 (ARP) is the glue that converts one into the other.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>The ARPANET's first protocol, NCP (Network Control Program), assumed one single network — addresses were
+  essentially "which port of which ARPANET switch." The moment researchers wanted to interconnect
+  <em>different</em> networks (packet radio, satellite links, Ethernets), NCP's addressing collapsed: it had
+  no concept of "a different network over there." The fix was the Internet Protocol, whose version 4 was
+  standardized in <strong>RFC 791 (Request for Comments 791) in 1981</strong> — an address split into a
+  <em>network part</em> and a <em>host part</em>, so that routers could forward on the network part alone
+  and ignore the rest until arrival. That two-part split, refined over four decades (classes → subnets →
+  CIDR), is still the core idea under every VPC, every Docker network, every Kubernetes cluster you will
+  ever touch.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ipv4">2. IPv4 — anatomy of an address</h2>
+
+<span class="osi-badge">📍 OSI Layer 3 — Network</span>
+
+<p>An <strong>IPv4</strong> (Internet Protocol version 4) address is simply a <strong>32-bit number</strong>.
+That's it — one unsigned integer. Humans are bad at reading <code>2398795598</code>, so we write the 32 bits
+as four 8-bit groups (<strong>octets</strong>), each shown in decimal (0–255), separated by dots:
+<strong>dotted-decimal notation</strong>. Here is a real address — one of Google's — taken apart:</p>
+
+<div class="figure-title">Fig 3.2 — One IPv4 address is just 32 bits: 142.250.183.78</div>
+<pre class="diagram">
+   dotted decimal:        142     .    250     .    183     .     78
+
+   binary octets:       10001110   11111010   10110111    01001110
+
+   bit values:          128 64 32 16 8 4 2 1   (per octet)
+
+   octet 1:  10001110 = 128 + 8 + 4 + 2          = 142
+   octet 2:  11111010 = 128 + 64 + 32 + 16 + 8 + 2 = 250
+   octet 3:  10110111 = 128 + 32 + 16 + 4 + 2 + 1  = 183
+   octet 4:  01001110 = 64 + 8 + 4 + 2             = 78
+
+   as one 32-bit integer:  10001110 11111010 10110111 01001110
+                        =  2,398,795,598
+</pre>
+
+<p>Because the address is 32 bits, there are exactly 2³² ≈ <strong>4.29 billion</strong> possible IPv4
+addresses. In 1981 that looked infinite. It was not (section 4). Three facts to install permanently:</p>
+
+<ul>
+  <li><strong>An IP address identifies an interface, not a machine.</strong> Your laptop's Wi-Fi interface,
+  its Ethernet port, its loopback interface, and its <code>docker0</code> bridge each have their own IP.
+  A router, by definition, has at least two. Run <code>ip addr</code> or <code>ipconfig /all</code> (section
+  15) and count how many addresses "your machine's IP" actually is.</li>
+  <li><strong>An IP address is two fields glued together:</strong> the leading bits name the <em>network</em>,
+  the trailing bits name the <em>host on that network</em>. Where exactly the split falls is the subject of
+  CIDR (section 6) — it is configurable, and that configurability is most of this chapter.</li>
+  <li><strong>IP addresses are assigned, not burned in.</strong> Move your laptop from home to the office and
+  its MAC stays the same but its IP changes — because the IP describes <em>where you are plugged in</em>,
+  exactly like your postal address changes when you move house.</li>
+</ul>
+
+<p>Why does this concept live at OSI Layer 3? Because Layer 3's contract is <em>deliver a packet between
+machines on different networks</em> — and that requires an address with location structure that routers can
+aggregate. Layer 2 addresses (MAC) deliberately have no such structure, because their contract ends at the
+edge of one network. The layer boundary <em>is</em> the addressing boundary.</p>
+
+<!-- ============================================================ -->
+<h2 id="ipv4-header">3. The IPv4 header — and what TTL really does</h2>
+
+<p>Part 2 taught you encapsulation: each layer wraps the data in its own header. The IPv4 header is the
+wrapper that Layer 3 puts around every packet, and unlike most headers you will meet, it is worth knowing
+field by field — several of its fields explain everyday backend phenomena (traceroute, fragmentation
+warnings, "protocol 6 vs 17" in firewall rules). Here is the layout, drawn the way every RFC draws it,
+32 bits per row:</p>
+
+<div class="figure-title">Fig 3.3 — The IPv4 header (20 bytes minimum, field widths in bits)</div>
+<pre class="diagram">
+    0               8               16              24            31
+   ┌───────┬───────┬───────────────┬───────────────────────────────┐
+   │Version│  IHL  │ DSCP/ECN      │         Total Length          │
+   │ (4b)  │ (4b)  │ (8b)          │            (16b)              │
+   ├───────┴───────┴───────────────┼─────┬─────────────────────────┤
+   │        Identification (16b)   │Flags│   Fragment Offset (13b) │
+   ├───────────────┬───────────────┼─────┴─────────────────────────┤
+   │   TTL (8b)    │ Protocol (8b) │     Header Checksum (16b)     │
+   ├───────────────┴───────────────┴───────────────────────────────┤
+   │              Source IP Address (32 bits)                      │
+   ├───────────────────────────────────────────────────────────────┤
+   │           Destination IP Address (32 bits)                    │
+   ├───────────────────────────────────────────────────────────────┤
+   │              Options (rare)  …then the payload:               │
+   │        ┌─────────────────────────────────────────────┐        │
+   │        │  TCP or UDP segment (Part 4) carrying your  │        │
+   │        │  HTTP request, SQL query, Kafka message …   │        │
+   │        └─────────────────────────────────────────────┘        │
+   └───────────────────────────────────────────────────────────────┘
+</pre>
+
+<table>
+  <tr><th>Field</th><th>Size</th><th>What it is for</th><th>Backend relevance</th></tr>
+  <tr><td><strong>Version</strong></td><td>4 bits</td><td>4 for IPv4, 6 for IPv6</td><td>The very first thing any router reads</td></tr>
+  <tr><td><strong>IHL</strong> (Internet Header Length)</td><td>4 bits</td><td>Header length in 32-bit words; almost always 5 (= 20 bytes, no options)</td><td>Why "IP header" ≈ 20 bytes in every overhead calculation</td></tr>
+  <tr><td><strong>DSCP/ECN</strong> (Differentiated Services / Explicit Congestion Notification)</td><td>8 bits</td><td>Priority marking and congestion signals</td><td>How VoIP gets prioritized over your <code>npm install</code></td></tr>
+  <tr><td><strong>Total Length</strong></td><td>16 bits</td><td>Header + payload size in bytes; max 65,535</td><td>In practice limited by the link's MTU (Maximum Transmission Unit), ~1,500 bytes on Ethernet (Part 2)</td></tr>
+  <tr><td><strong>Identification, Flags, Fragment Offset</strong></td><td>32 bits</td><td>If a packet exceeds a link's MTU, a router may slice it into <em>fragments</em>; these fields let the destination reassemble them. The DF (Don't Fragment) flag forbids slicing.</td><td>Fragmentation is rare and slow today; modern stacks set DF and discover the path MTU instead</td></tr>
+  <tr><td><strong>TTL</strong> (Time To Live)</td><td>8 bits</td><td>Hop budget — see below</td><td>Powers traceroute; explains "TTL expired in transit"</td></tr>
+  <tr><td><strong>Protocol</strong></td><td>8 bits</td><td>What is inside the payload: <strong>6 = TCP, 17 = UDP, 1 = ICMP</strong></td><td>This number is how the receiving OS knows which Layer-4 code to hand the payload to; you will meet it again in security-group rules</td></tr>
+  <tr><td><strong>Header Checksum</strong></td><td>16 bits</td><td>Detects corruption <em>of the header only</em>, recomputed at every hop (because TTL changed)</td><td>Your data is not protected here — that is Layer 4's job (Part 4)</td></tr>
+  <tr><td><strong>Source IP</strong></td><td>32 bits</td><td>Who sent it</td><td>What your access logs record; what NAT rewrites</td></tr>
+  <tr><td><strong>Destination IP</strong></td><td>32 bits</td><td>Where it is going</td><td>The only field routers truly route on</td></tr>
+</table>
+
+<p>A concrete header, as your laptop would build it for an HTTP request to Google (values you could see today
+in Wireshark):</p>
+
+<pre class="code">IPv4 header of one outgoing packet
+──────────────────────────────────
+Version:         4
+IHL:             5        (5 × 4 = 20-byte header, no options)
+DSCP/ECN:        0x00     (default, best-effort)
+Total Length:    60       (20 IP header + 40 of TCP handshake)
+Identification:  0x3a91
+Flags:           DF       (don't fragment)
+TTL:             64       (Linux/macOS default; Windows uses 128)
+Protocol:        6        (TCP)
+Header Checksum: 0x7c2e
+Source IP:       192.168.1.7        ← my private address (section 5)
+Destination IP:  142.250.183.78     ← google.com (resolved in section 14)</pre>
+
+<h3>3.1 TTL — the loop killer</h3>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why TTL exists</div>
+  <p>Routing tables are maintained by independent routers exchanging information, and during failures or
+  misconfiguration they can briefly disagree: router A thinks the path goes via B, and B thinks it goes via A.
+  A packet caught in that disagreement would bounce between them <strong>forever</strong>, and with thousands
+  of such packets arriving every second, the loop would melt both routers. TTL is the circuit breaker: the
+  sender sets a hop budget (typically 64 or 128), <strong>every router decrements it by 1</strong> before
+  forwarding, and any router that decrements it to 0 <strong>drops the packet</strong> and sends back an
+  <strong>ICMP</strong> (Internet Control Message Protocol) <code>Time Exceeded</code> message to the source.
+  A loop now wastes at most 64 hops per packet instead of infinity. Despite the name — a leftover from an
+  early design where it meant seconds — <strong>TTL counts router hops, not time</strong>.</p>
+</div>
+
+<p>And here is the beautiful part: <strong>traceroute is a deliberate abuse of TTL.</strong> It wants to
+discover every router between you and a destination — but routers are invisible by design. So it sends a
+packet with <strong>TTL=1</strong>: the first router decrements to 0, drops it, and replies "Time Exceeded" —
+revealing its own IP address. Then TTL=2 exposes the second router. Then TTL=3, and so on, until the
+destination itself answers:</p>
+
+<div class="figure-title">Fig 3.4 — Traceroute: burning TTL on purpose to make routers confess</div>
+<pre class="diagram">
+   laptop          router 1         router 2         router 3      google
+     │                │                │                │             │
+     │ TTL=1 ───────► │ TTL 1→0: DROP  │                │             │
+     │ ◄── ICMP Time Exceeded from r1  │                │             │
+     │                │                │                │             │
+     │ TTL=2 ───────► │ TTL 2→1 ─────► │ TTL 1→0: DROP  │             │
+     │ ◄────────── ICMP Time Exceeded from r2           │             │
+     │                │                │                │             │
+     │ TTL=3 ───────► │ 3→2 ─────────► │ 2→1 ─────────► │ 1→0: DROP   │
+     │ ◄──────────────── ICMP Time Exceeded from r3     │             │
+     │                │                │                │             │
+     │ TTL=4 ───────► │ ────────────► │ ─────────────► │ ──────────► │
+     │ ◄───────────────────── reply from the destination ────────────┤
+     │                                                                │
+     │   each "failure" reveals one router; the list of senders       │
+     │   of Time Exceeded messages IS the route                       │
+</pre>
+
+<p>Section 15 shows real <code>tracert</code> output and ties every line back to this picture.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>An IPv4 address is a 32-bit number written as four dot-separated values like
+    <code>142.250.183.78</code> — a postal address for one network interface. Every packet carries a small
+    label (the IP header) with sender, receiver, what's inside (TCP or UDP), and a hop counter (TTL) that
+    stops lost packets from circling the Internet forever.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The 20-byte IPv4 header is prepended to every Layer-4 segment. Routers forward on Destination IP,
+    decrement TTL, recompute the header checksum, and drop at TTL 0 with ICMP Time Exceeded — which
+    traceroute exploits with incrementing TTLs. The Protocol field (6/17/1) is the demultiplexing key to
+    Layer 4. Fragmentation fields exist but modern stacks avoid them via DF + Path MTU Discovery.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>IP is deliberately a <strong>best-effort, connectionless</strong> service: no delivery guarantee, no
+    ordering, no duplication protection — packets are independent datagrams that may take different paths.
+    That minimalism is a design philosophy (the end-to-end principle): keep the network's core dumb and fast,
+    push intelligence to the endpoints (TCP, Part 4). It is why routers scale to terabits and why every
+    reliability feature you rely on lives in the endpoints' operating systems, not in the network. When ICMP
+    is blocked by an overzealous firewall, Path MTU Discovery silently breaks — the classic "small requests
+    work, big uploads hang" production mystery.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ipv6">4. Running out — address exhaustion and IPv6</h2>
+
+<span class="osi-badge">📍 OSI Layer 3 — Network</span>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — how 4.3 billion ran out</div>
+  <p>4.3 billion addresses, 8 billion humans, each with a phone, a laptop, a TV, and a doorbell — the math was
+  always going to fail. It failed <em>faster</em> because of how early addresses were handed out: the original
+  classful system (section 6) allocated in wasteful fixed blocks of 16 million, 65 thousand, or 254 — early
+  universities and corporations received blocks of 16,777,216 addresses they could never use. By the early
+  1990s the IETF (Internet Engineering Task Force) saw the cliff coming and responded on two tracks: a
+  series of stopgaps to stretch IPv4 (CIDR in 1993 — section 6; private addresses + NAT in 1994–96 —
+  sections 5 and 13), and a permanent replacement, IPv6, standardized in 1998. The stopgaps worked almost too
+  well — they delayed the crisis by two decades and with it the urgency to migrate. The milestone dates:
+  <strong>on 31 January 2011, IANA (Internet Assigned Numbers Authority) handed out its last free IPv4
+  blocks</strong> to the regional registries; the regions then ran dry one by one (Asia-Pacific in 2011,
+  Europe in 2019…). Today, "new" public IPv4 addresses are bought second-hand at auction — tens of dollars
+  per address — which is why AWS started charging for every public IPv4 address in 2024.</p>
+</div>
+
+<p><strong>IPv6</strong> (Internet Protocol version 6) solves exhaustion by brute force:
+<strong>128-bit addresses</strong> — 2¹²⁸ ≈ 3.4×10³⁸ of them, comfortably enough to address every grain of
+sand on Earth with billions to spare. An IPv6 address is written as <strong>eight groups of four hexadecimal
+digits</strong> separated by colons, with two compression rules to keep it readable:</p>
+
+<div class="figure-title">Fig 3.5 — IPv6 notation and the two compression rules</div>
+<pre class="diagram">
+   full form:        2001:0db8:0000:0000:0000:ff00:0042:8329
+                     └─┬──┘ └─┬──┘ 8 groups × 16 bits = 128 bits
+                       │      │
+   rule 1: drop leading zeros in each group
+                     2001:db8:0:0:0:ff00:42:8329
+
+   rule 2: replace ONE run of all-zero groups with ::
+                     2001:db8::ff00:42:8329
+                              ▲
+                              └── "::" means "fill with zero groups"
+                                  allowed only ONCE per address
+                                  (twice would be ambiguous — how many
+                                   zeros in each gap?)
+
+   loopback:         ::1            (the IPv6 localhost — Part 1!)
+   unspecified:      ::             (the IPv6 version of 0.0.0.0)
+   link-local:       fe80::…        (auto-generated on every interface)
+   documentation:    2001:db8::/32  (reserved for examples, like our
+                                     203.0.113.x in IPv4)
+</pre>
+
+<p>Things genuinely changed in IPv6, beyond length: the header was simplified (routers no longer fragment or
+recompute checksums — faster forwarding); <strong>there is no broadcast</strong> (multicast does that job —
+section 11); ARP is replaced by NDP (Neighbor Discovery Protocol — section 12); and machines can configure
+their own addresses without a DHCP server via SLAAC (Stateless Address Autoconfiguration — section 10).
+Every interface also automatically gets a <strong>link-local</strong> address starting <code>fe80::</code>,
+usable only on the local network segment.</p>
+
+<h3>4.1 Why isn't everything IPv6 already?</h3>
+
+<p>IPv6 is over twenty-five years old, and still carries roughly 40–45% of global traffic, not 100%. Three
+reasons:</p>
+
+<ul>
+  <li><strong>NAT bought IPv4 time.</strong> The killer motivation — "we have no addresses left!" — was
+  defused by letting thousands of devices share one public address (section 13). Pain postponed is migration
+  postponed.</li>
+  <li><strong>IPv6 is not backward compatible.</strong> An IPv6-only machine cannot talk to an IPv4-only
+  server. So everyone who enables IPv6 must keep IPv4 too — running both at once, called
+  <strong>dual-stack</strong> — which doubles configuration and halves the incentive (you cannot drop IPv4
+  until the <em>last</em> service you rely on supports IPv6).</li>
+  <li><strong>No flag day is possible.</strong> The 1983 switch to TCP/IP worked because the ARPANET had a few
+  hundred hosts under one authority. Today's Internet has no owner (Part 1), so the transition is voluntary,
+  incremental, and driven mostly by mobile carriers and big clouds, where address scarcity actually bites.</li>
+</ul>
+
+<p><strong>What changes for you as a backend engineer?</strong> Mostly small but sharp edges: DNS has a
+separate record type for IPv6 addresses (<code>AAAA</code> instead of <code>A</code> — Part 6 tells the full
+story); your code and logs must not assume an IP fits the dotted-decimal shape (regexes that match only
+<code>\d+\.\d+\.\d+\.\d+</code> are a classic bug); and because IPv6 literals contain colons, which URLs
+already use before the port number, a literal IPv6 address in a URL must be wrapped in square brackets —
+<code>http://[2001:db8::1]:8080/health</code> — otherwise the parser cannot tell address colons from the port
+colon. Spring Boot, Node, and FastAPI all listen happily on dual-stack sockets today; your cloud load
+balancers (Part 9) typically accept IPv6 from clients and speak IPv4 to your services behind them, so most
+backends meet IPv6 only at the front door.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>For the rest of this course we compute and reason in IPv4, because every concept — subnets, CIDR,
+  routing, gateways — transfers to IPv6 unchanged (a <code>/64</code> is a prefix exactly like a
+  <code>/24</code>, just longer). The things that do NOT transfer are the IPv4 workarounds: IPv6 needs no
+  NAT, no ARP, and no broadcast. IPv6 is not "longer IPv4" — it is IPv4 with forty years of regret
+  removed.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="public-private">5. Public vs private addresses — two parallel worlds</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why private addresses exist</div>
+  <p>By the mid-1990s it was obvious that not every machine needs to be reachable from the whole Internet —
+  your printer, your build server, your database have no business being globally addressable (security agrees
+  enthusiastically). So <strong>RFC 1918</strong> (1996) carved out three address ranges that are
+  <strong>never routed on the public Internet</strong>: anyone may use them inside their own network, without
+  asking anyone, for free, forever. Millions of networks reuse the same ranges simultaneously — every home
+  in your city probably has a <code>192.168.1.1</code> — and it works precisely because those addresses never
+  appear on the public Internet. The price: a private machine that wants to reach the Internet needs a
+  translator at the border. That translator is NAT (section 13).</p>
+</div>
+
+<table>
+  <tr><th>Range (CIDR)</th><th>Addresses</th><th>Mask form</th><th>Where you meet it</th></tr>
+  <tr><td><strong>10.0.0.0/8</strong></td><td>16,777,216</td><td>10.0.0.0 – 10.255.255.255</td><td>Corporate networks, almost every AWS VPC (Virtual Private Cloud) and Kubernetes cluster you will ever see (Parts 11–12)</td></tr>
+  <tr><td><strong>172.16.0.0/12</strong></td><td>1,048,576</td><td>172.16.0.0 – 172.31.255.255</td><td>Docker's default bridge network is <code>172.17.0.0/16</code> — inside this block (Part 12); AWS default VPCs use <code>172.31.0.0/16</code></td></tr>
+  <tr><td><strong>192.168.0.0/16</strong></td><td>65,536</td><td>192.168.0.0 – 192.168.255.255</td><td>Home routers and small offices — your laptop is probably <code>192.168.1.x</code> right now</td></tr>
+</table>
+
+<p>Four more special ranges complete the map of "addresses that are not normal public addresses":</p>
+
+<ul>
+  <li><strong>127.0.0.0/8 — loopback.</strong> Part 1 promised the full story of <code>localhost</code>: here
+  it is. The entire 16-million-address block is reserved for "this machine talking to itself." Packets to any
+  <code>127.x.x.x</code> address never leave the operating system — they go down the network stack and
+  straight back up through a virtual interface, never touching a cable. <code>127.0.0.1</code> is merely the
+  conventional first address. This is why your Spring Boot app on <code>localhost:8080</code> is unreachable
+  from a colleague's laptop — loopback is not on any wire.</li>
+  <li><strong>169.254.0.0/16 — link-local, a.k.a. APIPA</strong> (Automatic Private IP Addressing). If a
+  machine asks for an address via DHCP (section 10) and <em>nobody answers</em>, it gives itself a random
+  <code>169.254.x.x</code> so the local segment still works. Burn this into your debugging instincts: seeing
+  <code>169.254.…</code> in <code>ipconfig</code> means <strong>"my DHCP request failed"</strong> — the
+  network's equivalent of a check-engine light.</li>
+  <li><strong>100.64.0.0/10 — CGNAT</strong> (Carrier-Grade NAT): a range for ISPs (Internet Service
+  Providers) that NAT <em>their own customers</em>, meaning the "public" address your home router shows may
+  itself be private inside the ISP — one more reason inbound connections to home networks are hard
+  (section 13).</li>
+  <li><strong>0.0.0.0</strong> — not an address you send to but a wildcard meaning "no/any address." When a
+  server binds to <code>0.0.0.0</code> it means "listen on <strong>all</strong> of this machine's interfaces";
+  binding to <code>127.0.0.1</code> means "loopback only — local clients only." This single distinction
+  explains the classic Docker mystery "the app works inside the container but the published port is dead":
+  the app bound to <code>127.0.0.1</code> inside the container, so Docker's forwarded traffic, arriving on
+  another interface, found nobody listening. Part 5 returns to binding in depth.</li>
+</ul>
+
+<h3>5.1 Who hands out public addresses?</h3>
+
+<p>Public addresses must be globally unique, so they are delegated through a hierarchy — the same pattern as
+the postal system delegating country codes, and (Part 6 will show) the same pattern as DNS:</p>
+
+<div class="figure-title">Fig 3.6 — The address delegation hierarchy</div>
+<pre class="diagram">
+                      ┌──────────────────────────┐
+                      │   IANA (global root)     │  Internet Assigned
+                      │   holds the whole pool   │  Numbers Authority
+                      └────────────┬─────────────┘
+              ┌──────────┬─────────┼─────────┬───────────┐
+              ▼          ▼         ▼         ▼           ▼
+          ┌───────┐ ┌────────┐ ┌───────┐ ┌────────┐ ┌─────────┐
+          │ ARIN  │ │RIPE NCC│ │ APNIC │ │ LACNIC │ │ AFRINIC │   5 RIRs
+          │ N.Am  │ │ Europe │ │AsiaPac│ │ LatAm  │ │ Africa  │   (Regional
+          └───┬───┘ └───┬────┘ └───┬───┘ └────────┘ └─────────┘   Internet
+              │         │          │                              Registries)
+              ▼         ▼          ▼
+        ┌──────────────────────────────────┐
+        │  ISPs and cloud providers        │   Jio, Comcast, AWS, Google…
+        │  receive large blocks            │   (AWS owns tens of millions)
+        └────────────────┬─────────────────┘
+                         ▼
+        ┌──────────────────────────────────┐
+        │  you: one address per home,      │   your router's WAN side,
+        │  or per EC2 Elastic IP           │   e.g. 203.0.113.5
+        └──────────────────────────────────┘
+</pre>
+
+<p>Throughout this course, public addresses in examples come from the ranges reserved for documentation
+(<code>203.0.113.0/24</code>, <code>198.51.100.0/24</code>, <code>192.0.2.0/24</code>) so no real machine is
+ever implicated — the networking equivalent of <code>example.com</code>.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — you already live in RFC 1918 all day</div>
+  <pre class="code">$ docker network inspect bridge | grep Subnet
+        "Subnet": "172.17.0.0/16"          ← Docker picked RFC 1918 space
+
+$ docker inspect my-postgres | grep IPAddress
+        "IPAddress": "172.17.0.2"          ← your database's PRIVATE address
+
+aws ec2 create-vpc --cidr-block 10.0.0.0/16   ← every VPC begins by choosing
+                                                 an RFC 1918 block (Part 11)</pre>
+  <p>Your containers, your pods, your EC2 instances — virtually everything you deploy lives on private
+  addresses, with public exposure granted only at deliberate, controlled points (load balancers, NAT
+  gateways). That is not an accident; it is the architecture.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Public IPs are like street addresses — globally unique, handed out by authorities. Private IPs
+    (10.x.x.x, 172.16–31.x.x, 192.168.x.x) are like apartment numbers — reused in every building, meaningful
+    only inside. <code>127.0.0.1</code> means "this machine itself," and <code>169.254.x.x</code> means
+    "I asked for an address and nobody answered."</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>RFC 1918 space is non-routable on the public Internet and infinitely reusable; NAT bridges it to the
+    public world. Public space flows IANA → RIR → ISP/cloud → you. Loopback never leaves the OS; APIPA
+    signals DHCP failure; CGNAT means even your router's "public" address may be translated again. Binding
+    to 0.0.0.0 vs 127.0.0.1 controls which interfaces a server accepts connections on.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Private-range collisions are a real architectural constraint: when two companies merge, or you peer
+    two VPCs, or a VPN connects your laptop's <code>192.168.1.0/24</code> home network to an office using the
+    same range, identical prefixes cannot be routed to two places — fixes range from renumbering to double
+    NAT, all painful. This is why cloud network design guides say: pick boring, unusual CIDR blocks early
+    (e.g. <code>10.137.0.0/16</code>, not <code>10.0.0.0/16</code>) and keep a company-wide address plan.
+    Kubernetes makes it worse by consuming three independent ranges per cluster (nodes, pods, services —
+    Part 12).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cidr">6. CIDR and subnet masks — where the address splits</h2>
+
+<span class="osi-badge">📍 OSI Layer 3 — Network</span>
+
+<p>Everything so far said an IP address is "network part + host part." Now the obvious question:
+<em>where is the split?</em> The modern answer is written after a slash:
+<strong>CIDR notation</strong> (Classless Inter-Domain Routing, pronounced "cider").</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><code>10.0.0.0<strong>/16</strong></code> means: <strong>the first 16 bits are the network part</strong>;
+  the remaining 32−16 = 16 bits are the host part. That is the entire notation. /N = "N leading bits
+  identify the network." Bigger N → more specific network → fewer hosts inside it.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — classes, and why they failed</div>
+  <p>Original IPv4 (1981) had <strong>no slash — the split was hard-coded by the address's first bits</strong>,
+  giving three fixed "classes": <strong>Class A</strong> (first bit 0 → split after 8 bits → 16,777,214 hosts
+  per network, only 128 such networks possible), <strong>Class B</strong> (split after 16 bits → 65,534
+  hosts), <strong>Class C</strong> (split after 24 bits → 254 hosts). The fatal flaw was the gap: a company
+  with 2,000 machines was too big for a Class C and absurdly small for a Class B — so it took the Class B and
+  wasted 63,000 addresses. Early allocations of entire Class A blocks (16 million addresses to single
+  universities and corporations) accelerated exhaustion, and the rigid sizes bloated routing tables (a
+  company with sixteen Class Cs needed sixteen separate routing entries worldwide). <strong>CIDR (1993,
+  RFC 1519)</strong> abolished classes: the split can fall after ANY number of bits, declared explicitly with
+  /N — allocations can finally fit actual need, and adjacent blocks can be summarized into one routing entry.
+  "Classless" in the name is literal: it is the classful system's tombstone. (The word "octet," and phrases
+  like "class C-sized network," survive as vocabulary fossils.)</p>
+</div>
+
+<h3>6.1 The subnet mask — the same fact, written for machines</h3>
+
+<p>Before the slash notation, the split was expressed as a <strong>subnet mask</strong>: a 32-bit value with
+N ones followed by zeros. Both notations carry identical information, and you must read both fluently
+because tools mix them freely (<code>ipconfig</code> shows masks; <code>ip addr</code> shows slashes):</p>
+
+<div class="figure-title">Fig 3.7 — /24 and 255.255.255.0 are the same statement</div>
+<pre class="diagram">
+   address 192.168.1.7/24
+
+   address:   11000000 . 10101000 . 00000001 . 00000111   = 192.168.1.7
+   mask /24:  11111111 . 11111111 . 11111111 . 00000000   = 255.255.255.0
+              └────────── 24 ones ──────────┘ └─ zeros ─┘
+                    NETWORK PART                HOST PART
+
+   bitwise AND of address and mask  →  the network address:
+              11000000 . 10101000 . 00000001 . 00000000   = 192.168.1.0
+
+   the mask is a stencil: 1 = "this bit is network", 0 = "this bit is host"
+</pre>
+
+<p>The AND operation in that figure is not a teaching toy — it is <em>literally the computation</em> your
+operating system performs on every packet it sends (section 8) and every router performs on every packet it
+forwards (section 9). Networking is bitwise AND all the way down.</p>
+
+<h3>6.2 Reading a block: network address, broadcast address, usable range</h3>
+
+<p>A CIDR block like <code>192.168.1.128/26</code> defines a contiguous range of addresses. Two of them are
+reserved: the <strong>network address</strong> (all host bits 0 — the name of the block itself, used in
+routing tables) and the <strong>broadcast address</strong> (all host bits 1 — addresses every host in the
+block at once, section 11). Everything between is usable for hosts. Let's compute one by hand — given the
+address <code>192.168.1.130/26</code>, what block is it in?</p>
+
+<div class="figure-title">Fig 3.8 — Hand-computing the block of 192.168.1.130/26</div>
+<pre class="diagram">
+   /26 mask:  11111111.11111111.11111111.11000000  = 255.255.255.192
+                                          └┬┘└─┬──┘
+                            2 network bits ┘   └ 6 host bits (in last octet)
+
+   last octet of address:    130  =  1 0 0 0 0 0 1 0
+   last octet of mask:       192  =  1 1 0 0 0 0 0 0
+   bitwise AND:                      1 0 0 0 0 0 0 0   =  128
+
+   NETWORK address  = 192.168.1.128      (host bits all 0)
+   BROADCAST        = 192.168.1.191      (host bits all 1: 10 111111 = 191)
+   usable hosts     = 192.168.1.129 … 192.168.1.190
+   count            = 2^6 − 2 = 62 usable addresses
+</pre>
+
+<p>The general formula: a /N block contains 2^(32−N) addresses, of which <strong>2^(32−N) − 2</strong> are
+usable for hosts (minus network and broadcast). The table interviewers expect you to reproduce:</p>
+
+<table>
+  <tr><th>CIDR</th><th>Subnet mask</th><th>Total addresses</th><th>Usable hosts</th><th>Typical use</th></tr>
+  <tr><td>/8</td><td>255.0.0.0</td><td>16,777,216</td><td>16,777,214</td><td>The whole 10.0.0.0/8 private space</td></tr>
+  <tr><td>/16</td><td>255.255.0.0</td><td>65,536</td><td>65,534</td><td>A whole VPC or campus</td></tr>
+  <tr><td>/20</td><td>255.255.240.0</td><td>4,096</td><td>4,094</td><td>AWS's default subnet size inside a VPC</td></tr>
+  <tr><td>/24</td><td>255.255.255.0</td><td>256</td><td>254</td><td>The classic subnet: one office floor, one app tier, your home LAN</td></tr>
+  <tr><td>/26</td><td>255.255.255.192</td><td>64</td><td>62</td><td>Small dedicated segments (a database tier)</td></tr>
+  <tr><td>/28</td><td>255.255.255.240</td><td>16</td><td>14</td><td>Tiny segments: a NAT gateway's subnet, firewall interconnects</td></tr>
+  <tr><td>/32</td><td>255.255.255.255</td><td>1</td><td>—</td><td>Exactly one address — "this specific host" in route and firewall rules</td></tr>
+</table>
+
+<p>Note the rhythm: every step of N halves the block. A /24 is two /25s, four /26s, eight /27s. Subnetting
+(next section) is just choosing how to cut the cake. One caveat for the cloud-bound: AWS reserves five
+addresses per subnet rather than two (network, broadcast, plus three for its own router/DNS/future use), so
+an AWS /24 yields 251 usable — a detail that has broken many a capacity plan (Part 11).</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — CIDR is postal-code granularity</div>
+  <p>Think of a CIDR prefix as a postal code of adjustable precision. "Germany" (a /8: huge, vague) contains
+  "Frankfurt" (a /16) contains "Kaiserstraße" (a /24) contains "Kaiserstraße 17" (a /32: one exact house).
+  Mail sorting works because a sorting center in Mumbai needs only the coarse prefix ("Germany → that
+  plane"), while the Frankfurt office uses finer prefixes ("this district → that truck"). Routing tables
+  (section 9) work identically: far-away routers store coarse prefixes covering millions of addresses, and
+  the closer a packet gets, the finer the prefixes become — which is exactly why hierarchical addressing
+  keeps routing tables small, the problem that opened this chapter.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p><code>/24</code> after an address says "the first 24 bits name the network; the rest name the machine."
+    The subnet mask (<code>255.255.255.0</code>) says the same thing in mask form. A /24 network holds 254
+    machines; each extra bit of network halves the room. Two addresses per block are reserved: the lowest
+    (the network's name) and the highest (the broadcast address).</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>network = address AND mask; broadcast = network OR (NOT mask); usable = 2^(32−N) − 2. CIDR replaced
+    fixed classes (1993) so allocations match need and adjacent blocks aggregate into single routing entries.
+    Fluency drill: given any address/N, produce network, broadcast, and range in under a minute — it is the
+    networking equivalent of knowing your times tables.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Aggregation is CIDR's deeper purpose: an ISP announcing 198.51.100.0/24 and its neighbors as one
+    short prefix keeps the global routing table (~1 million routes today) from being 100× larger. The same
+    trick works in reverse as <em>longest-prefix match</em> (section 9): more-specific routes override
+    coarser ones, which is both a routing-policy tool and a hijacking vector — announcing a more-specific
+    prefix of someone else's block steals their traffic (BGP hijacks, Part 1's advanced note). Inside your
+    infrastructure, the same idea appears in security groups and Kubernetes NetworkPolicies: rules are
+    written against CIDR blocks, so your address plan IS your security topology.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="subnetting">7. Subnetting by hand — carving 10.0.0.0/16 into tiers</h2>
+
+<p>Subnetting sounds like an exam topic, but it is something you will genuinely do the first week you touch
+cloud infrastructure: every VPC begins life as one CIDR block that <em>you must slice into subnets</em>.
+Let's do the canonical exercise — the exact plan you will later build for real in AWS (Part 11 reuses this
+layout line for line).</p>
+
+<p><strong>Given:</strong> one block, <code>10.0.0.0/16</code> — 65,536 addresses.
+<strong>Wanted:</strong> separate subnets for a public tier (load balancers), an application tier (Spring
+Boot services), and a database tier (PostgreSQL, Redis) — duplicated across two availability zones for
+redundancy.</p>
+
+<p>Choosing /24 for each subnet gives 254 hosts apiece (plenty per tier) and has a priceless side effect:
+because the split falls exactly on the third octet, <strong>the subnet is readable by eye</strong> —
+<code>10.0.<strong>X</strong>.y</code> means subnet X. Since the host part of the /16 gave us bits 17–32 and
+we now fix bits 17–24 per subnet, we can mint 2⁸ = 256 such /24 subnets: <code>10.0.0.0/24</code>,
+<code>10.0.1.0/24</code>, … <code>10.0.255.0/24</code>.</p>
+
+<div class="figure-title">Fig 3.9 — One /16 carved into purpose-built /24 subnets</div>
+<pre class="diagram">
+   10.0.0.0/16  (the whole VPC: 10.0.0.0 – 10.0.255.255)
+   │
+   ├── AVAILABILITY ZONE A                 ├── AVAILABILITY ZONE B
+   │                                       │
+   ├─ 10.0.1.0/24   public tier            ├─ 10.0.2.0/24   public tier
+   │    └ load balancers                   │    └ load balancers
+   │      hosts .1 – .254                  │
+   │                                       │
+   ├─ 10.0.11.0/24  app tier               ├─ 10.0.12.0/24  app tier
+   │    └ Spring Boot / FastAPI            │    └ (same services, AZ B)
+   │      e.g. 10.0.11.42                  │
+   │                                       │
+   ├─ 10.0.21.0/24  db tier                ├─ 10.0.22.0/24  db tier
+   │    └ PostgreSQL 10.0.21.5             │    └ replica 10.0.22.5
+   │      Redis      10.0.21.6             │
+   │                                       │
+   └─ 10.0.3.0/24 … 10.0.255.0/24 unused — room to grow
+
+   naming convention at a glance:  10.0.TIER+AZ.host
+   third octet 1–2 = public, 11–12 = app, 21–22 = db
+</pre>
+
+<p>Why bother carving at all, instead of dumping everything into one flat /16? Three reasons that will echo
+through the rest of the course:</p>
+
+<ul>
+  <li><strong>Different routing per subnet.</strong> The public subnets get a route to the Internet; the app
+  and db subnets get none (or only outbound via a NAT gateway — section 13). A database that <em>cannot</em>
+  route to the Internet is safe from whole categories of attack and exfiltration by construction.</li>
+  <li><strong>Security boundaries follow subnet boundaries.</strong> Firewall rules like "the db tier accepts
+  port 5432 only from 10.0.11.0/24 and 10.0.12.0/24" are CIDR statements. Clean subnetting makes security
+  rules short and auditable.</li>
+  <li><strong>Blast radius.</strong> Broadcast storms, address exhaustion, a misbehaving DHCP server — many
+  failures stop at the subnet edge, because (as the next two sections show) the subnet is precisely the
+  boundary where direct delivery ends and routers take over.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A subnet is not paperwork — it is a <strong>behavioral boundary</strong>. Inside one subnet, machines
+  deliver to each other directly (one ARP, one frame, no router). Across subnets, every packet must pass
+  through a router, where it can be filtered, logged, NATed, or refused. "Same subnet or not?" is therefore
+  the first question the OS asks for every single packet — the next section is exactly how it asks it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="local-or-remote">8. The local-or-remote decision — the first hop is decided on your laptop</h2>
+
+<p>Your code calls <code>fetch("http://10.0.21.5:5432")</code> or opens a connection to
+<code>142.250.183.78</code>. Before anything touches a wire, the operating system must answer one question:
+<strong>can I deliver this directly, or do I need a router?</strong> The algorithm is three AND operations
+and a comparison:</p>
+
+<ol>
+  <li>Compute <strong>my network</strong>: my IP AND my mask.</li>
+  <li>Compute <strong>the destination's network as I would see it</strong>: destination IP AND my mask.</li>
+  <li>Equal? → destination is <strong>on my subnet</strong>: deliver directly (ARP for the destination's own
+  MAC, frame it, done). Not equal? → destination is <strong>remote</strong>: hand the packet to my
+  <strong>default gateway</strong> (ARP for the <em>gateway's</em> MAC instead — section 12 makes a big deal
+  of this distinction, because everyone gets it wrong).</li>
+</ol>
+
+<div class="figure-title">Fig 3.10 — The same laptop making both decisions (192.168.1.7/24)</div>
+<pre class="diagram">
+   CASE 1: ping 192.168.1.20 (the office printer)
+
+   my IP   AND mask:  192.168.1.7   AND 255.255.255.0  =  192.168.1.0
+   dest    AND mask:  192.168.1.20  AND 255.255.255.0  =  192.168.1.0
+                                                          ════════════
+                                              SAME network → LOCAL
+                  → ARP for 192.168.1.20's MAC, send frame directly
+                    (the packet never touches a router)
+
+   ───────────────────────────────────────────────────────────────────
+
+   CASE 2: GET https://google.com (142.250.183.78)
+
+   my IP   AND mask:  192.168.1.7    AND 255.255.255.0  =  192.168.1.0
+   dest    AND mask:  142.250.183.78 AND 255.255.255.0  =  142.250.183.0
+                                                           ═════════════
+                                            DIFFERENT → REMOTE
+                  → ARP for the GATEWAY 192.168.1.1's MAC,
+                    frame addressed to the gateway, IP addressed to Google
+</pre>
+
+<p>Notice what the laptop does <em>not</em> do: it does not know, or care, where <code>142.250.183.78</code>
+actually is, how many hops away, or which path leads there. Its entire worldview is binary — "mine" or "not
+mine, the gateway's problem." All the intelligence about the rest of the world lives in routers. This
+delegation is what lets a $300 laptop participate in a planet-scale network: it needs exactly one routing
+decision and one configured address (the gateway) to reach all 4.3 billion destinations.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the bug a wrong mask causes</div>
+  <p>Misconfigure the mask as <code>255.255.0.0</code> (/16) on a machine that is really on a /24, and the
+  machine believes <em>all of 192.168.x.x</em> is local. Packets to <code>192.168.2.9</code> (actually a
+  different subnet behind the router) are no longer sent to the gateway — the machine ARPs directly for
+  <code>192.168.2.9</code> on the local wire, nobody answers, and the connection times out. The symptom is
+  maddeningly selective: "I can reach some machines but not others, and ping to the Internet still works."
+  When you hit selective unreachability, check the mask before you check the cables.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="routing">9. Routers, routing tables, and gateways</h2>
+
+<span class="osi-badge">📍 OSI Layer 3 — Network</span>
+
+<p>So the laptop punted the packet to its gateway. The gateway is a <strong>router</strong> — a device whose
+whole job is Layer 3: receive a packet on one interface, look up the destination IP in a <strong>routing
+table</strong>, and forward it out another interface toward the next router. First, the recap table from
+Part 2, now with full vocabulary:</p>
+
+<table>
+  <tr><th></th><th>Switch</th><th>Router</th></tr>
+  <tr><td><strong>OSI layer</strong></td><td>Layer 2 — Data Link</td><td>Layer 3 — Network</td></tr>
+  <tr><td><strong>Looks at</strong></td><td>Destination MAC of each frame</td><td>Destination IP of each packet</td></tr>
+  <tr><td><strong>Its table</strong></td><td>MAC table: "MAC X is on port 3" — learned automatically from traffic</td><td>Routing table: "prefix 10.0.0.0/16 is via next-hop Y" — configured or learned via routing protocols</td></tr>
+  <tr><td><strong>Table entries are</strong></td><td>Individual flat addresses</td><td>Aggregated prefixes (CIDR — this is why hierarchy matters)</td></tr>
+  <tr><td><strong>Scope</strong></td><td>Inside one network</td><td>Between networks — joins subnets into internets</td></tr>
+  <tr><td><strong>On a frame/packet</strong></td><td>Forwards the frame unchanged</td><td>Rewrites the frame (new MACs), decrements TTL, recomputes header checksum</td></tr>
+</table>
+
+<h3>9.1 Reading a real routing table</h3>
+
+<p>Every machine — not just dedicated routers — has a routing table; your laptop consults its own for every
+packet (section 8 was actually its two simplest entries in action). Here is a realistic one from a developer
+laptop, via <code>ip route show</code> on Linux:</p>
+
+<pre class="code">$ ip route show
+default via 192.168.1.1 dev wlp3s0 proto dhcp metric 600
+10.8.0.0/16 via 10.8.0.1 dev tun0
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
+192.168.1.0/24 dev wlp3s0 proto kernel scope link src 192.168.1.7 metric 600
+
+annotated:
+─────────
+default via 192.168.1.1 …     ← 0.0.0.0/0: "anything I have no better
+                                 idea about → send to my home router";
+                                 installed by DHCP (section 10)
+10.8.0.0/16 via 10.8.0.1 …    ← corporate VPN: company addresses go
+                                 into the tunnel, not the home router
+172.17.0.0/16 dev docker0 …   ← Docker bridge: containers are reached
+                                 DIRECTLY on a virtual interface (no
+                                 "via" = directly attached) (Part 12)
+192.168.1.0/24 dev wlp3s0 …   ← my own subnet: deliver directly over
+                                 Wi-Fi (this line IS the "local" half
+                                 of section 8's decision)</pre>
+
+<p>Each entry is the same triple: <strong>a destination prefix</strong> (CIDR), <strong>how to reach it</strong>
+(either <code>via</code> a next-hop router's IP, or <code>dev</code> = directly attached, deliver yourself),
+and a <strong>metric</strong> — a tie-breaker cost: when two routes have the <em>same</em> prefix, the lower
+metric wins, which is how your OS prefers wired Ethernet (metric ~100) over Wi-Fi (metric ~600) when both
+are connected.</p>
+
+<h3>9.2 Longest-prefix match — the one rule of routing</h3>
+
+<p>What if a destination matches <em>several</em> entries? It usually does — <code>0.0.0.0/0</code> matches
+everything by definition. The rule, the only rule: <strong>the most specific match wins</strong> — the entry
+with the longest prefix. Work this example until it is reflex:</p>
+
+<div class="figure-title">Fig 3.11 — Longest-prefix match: three candidate routes, one winner</div>
+<pre class="diagram">
+   routing table:
+     ① 0.0.0.0/0      via 192.168.1.1     (default — matches EVERYTHING)
+     ② 10.0.0.0/16    via 10.8.0.1        (the whole VPC, via VPN)
+     ③ 10.0.1.0/24    via 10.8.0.7        (one special subnet, via a
+                                           different VPN concentrator)
+
+   packet to 10.0.1.55:
+     matches ① (everything matches /0)            prefix length  0
+     matches ② (10.0.1.55 is in 10.0.0.0/16)      prefix length 16
+     matches ③ (10.0.1.55 is in 10.0.1.0/24)      prefix length 24 ◄── WINS
+
+   packet to 10.0.7.9:
+     matches ① (0)    matches ② (16) ◄── WINS     ③ does not match
+
+   packet to 142.250.183.78:
+     matches ① only ◄── WINS (the default is the route of last resort)
+</pre>
+
+<p>Why most-specific? Because specificity is knowledge. A /24 route says "I know <em>exactly</em> where this
+small neighborhood is"; the default route says "I know nothing — send it upstream." Trusting precise
+information over vague is the only sane policy — postal sorting again: a parcel for Kaiserstraße 17 goes on
+the Kaiserstraße truck, not the generic "Germany somewhere" plane, even though both technically match. The
+<strong>default route <code>0.0.0.0/0</code></strong> is simply the zero-knowledge entry that matches
+everything. Your laptop has one (pointing at the home router); your home router has one (pointing at the
+ISP); small ISPs point at bigger carriers. Only the largest backbone networks run <em>default-free</em>:
+their routers hold a route for every announced prefix on Earth — about one million entries — and CIDR
+aggregation is the only reason that number is not a hundred million.</p>
+
+<h3>9.3 Gateways — and what your home "router" actually is</h3>
+
+<p>A <strong>gateway</strong> is just a router seen from inside a subnet: the local exit door. "Default
+gateway" = "the router interface on <em>my</em> subnet that my default route points at." It must be on your
+subnet — it is the one router you can reach directly with a frame, which is what section 8's algorithm
+depends on.</p>
+
+<p>And the beige box your ISP gave you, the thing everyone calls "the router"? It is at least six devices in
+a trench coat — worth unpacking once, because each function is a separate concept, and in any office, data
+center, or cloud they ARE separate components you will configure individually:</p>
+
+<div class="figure-title">Fig 3.12 — The home "router," unpacked</div>
+<pre class="diagram">
+   ┌─────────────────────── the beige box ──────────────────────────┐
+   │                                                                │
+   │  ┌─────────────┐  Wi-Fi radio — bridges wireless devices       │
+   │  │ ACCESS POINT│  onto the LAN (Layers 1–2)                    │
+   │  └─────────────┘                                               │
+   │  ┌─────────────┐  4 Ethernet ports + Wi-Fi = one switch:       │
+   │  │ SWITCH (L2) │  MAC table, forwards frames INSIDE the        │
+   │  └─────────────┘  192.168.1.0/24 LAN                           │
+   │  ┌─────────────┐  the actual router (L3): two interfaces —     │
+   │  │ ROUTER (L3) │  LAN side 192.168.1.1, WAN side 203.0.113.5;  │
+   │  └─────────────┘  routing table with ~2 entries                │
+   │  ┌─────────────┐  hands out 192.168.1.x leases to your         │
+   │  │ DHCP SERVER │  devices (section 10)                         │
+   │  └─────────────┘                                               │
+   │  ┌─────────────┐  forwards DNS queries to the ISP — why        │
+   │  │ DNS FORWARDR│  "DNS server: 192.168.1.1" (Part 6)           │
+   │  └─────────────┘                                               │
+   │  ┌─────────────┐  NAT (section 13) + "drop unsolicited         │
+   │  │ NAT+FIREWALL│  inbound" — why your laptop is invisible      │
+   │  └─────────────┘  from the Internet                            │
+   │                                                                │
+   └────────────────────────────────────────────────────────────────┘
+       LAN side: 192.168.1.1               WAN side: 203.0.113.5
+       (your private world)                (one public address)
+</pre>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A router connects networks and decides where each packet goes next using a routing table — rows of
+    "addresses like X → send that way." If several rows match, the most specific wins; the catch-all row
+    (the default route) sends everything unknown toward the wider Internet. Your gateway is simply the
+    nearest router — your network's exit door.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A route = prefix + next hop (or directly-attached interface) + metric. Lookup = longest-prefix match;
+    metric breaks ties between equal prefixes only. Hosts hold a handful of routes (local subnet, docker0,
+    VPN, default); core routers hold ~1M. Each forwarded packet gets new L2 framing, TTL−1, and a recomputed
+    header checksum; the IP endpoints are untouched. Routers learn remote prefixes from each other via
+    routing protocols — OSPF (Open Shortest Path First) inside an organization, BGP (Border Gateway
+    Protocol) between organizations (Part 1's advanced note).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Longest-prefix match is also a traffic-engineering and failover primitive: inject a more specific
+    route and you steal traffic from the covering prefix — used deliberately (VPN split tunneling; cloud
+    route tables sending 10.0.21.0/24 through a firewall appliance) and maliciously (BGP more-specific
+    hijacks). In AWS, every subnet is associated with a route table you write yourself — "0.0.0.0/0 →
+    internet gateway" is literally what makes a subnet public, and its absence is what makes one private
+    (Part 11). When a Kubernetes pod can't reach the Internet, the debugging skill is identical: walk the
+    route tables hop by hop and find who lacks a matching prefix or a return route.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="dhcp">10. DHCP — how your laptop got its address in the first place</h2>
+
+<span class="osi-badge">📍 An application-layer service (over UDP) that configures Layer 3 — the stack bootstrapping itself</span>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Sections 5–9 assumed your laptop somehow already knows four values: its IP, the subnet mask, the
+  default gateway, and a DNS server. Where did they come from? You never typed them. In the 1980s you
+  <em>did</em> type them — every machine was configured by hand from an office spreadsheet of who owns which
+  address. Hand-managed addressing fails exactly as you would predict: duplicate addresses (two machines
+  fighting — see the interview questions), typo'd gateways, stale spreadsheets, and zero support for devices
+  that <em>move</em> — a laptop carried from home to office needs entirely different values in each place.
+  <strong>DHCP</strong> (Dynamic Host Configuration Protocol, 1993, evolved from the older BOOTP) automates
+  it: plug in, broadcast "somebody configure me!", receive a time-limited <strong>lease</strong> on an
+  address plus all the settings, renew while you stay, release when you leave.</p>
+</div>
+
+<p>The exchange is four packets, remembered as <strong>DORA</strong> — Discover, Offer, Request, Acknowledge.
+Note the chicken-and-egg problem it solves: the laptop must send packets <em>in order to get an address</em>,
+while having none. The escape hatch is broadcast — source <code>0.0.0.0</code> ("I am nobody"), destination
+<code>255.255.255.255</code> ("everyone on this wire," section 11):</p>
+
+<div class="figure-title">Fig 3.13 — The DORA handshake</div>
+<pre class="diagram">
+   LAPTOP (no address yet)                    DHCP SERVER (in the router)
+        │                                               │
+        │ ① DISCOVER — broadcast                        │
+        │   src 0.0.0.0 → dst 255.255.255.255           │
+        │   "any DHCP server out there? — MAC 3c:7d:…"  │
+        │ ─────────────────────────────────────────────►│
+        │                                               │
+        │ ② OFFER                                       │
+        │   "I propose 192.168.1.7, mask /24,           │
+        │    gateway 192.168.1.1, DNS 192.168.1.1,      │
+        │    lease 24 hours"                            │
+        │ ◄─────────────────────────────────────────────│
+        │                                               │
+        │ ③ REQUEST — still broadcast!                  │
+        │   "I formally request 192.168.1.7             │
+        │    from server 192.168.1.1"                   │
+        │   (broadcast so any OTHER server that         │
+        │    also offered knows it was declined)        │
+        │ ─────────────────────────────────────────────►│
+        │                                               │
+        │ ④ ACK                                         │
+        │   "192.168.1.7 is yours until 09:14 tomorrow" │
+        │ ◄─────────────────────────────────────────────│
+        │                                               │
+        ▼ laptop configures itself; the lease timer
+          runs. at ~50% of the lease it renews quietly
+          (unicast — it has an address now). if NO
+          server ever answers ①: self-assign a random
+          169.254.x.x (APIPA, section 5) and limp along
+</pre>
+
+<p>DHCP is an application protocol — it rides inside UDP on ports 67/68 (ports get their full treatment in
+Part 5) — yet what it delivers is Layer-3 identity. That layering is worth noticing: the network stack is
+bootstrapped <em>by an application</em>, one of several places the tidy OSI tower bends in practice, like
+ARP just below it.</p>
+
+<p><strong>Static vs dynamic</strong> is an operational decision you will make constantly:
+<strong>servers get stable addresses</strong> — configured statically or, better, via a <em>DHCP
+reservation</em> (the server always hands the same address to that MAC) — because other machines must find
+them at a known address. <strong>Clients get dynamic addresses</strong>, because nobody connects <em>to</em>
+a laptop, and churn makes static bookkeeping absurd. The cloud repeats the pattern: EC2 instances get their
+private addresses from the VPC's own DHCP (Part 11), databases get fixed endpoints, and Kubernetes pods get
+deliberately ephemeral addresses because something else — Services, Part 12 — solves "known address" for
+them.</p>
+
+<!-- ============================================================ -->
+<h2 id="cast">11. One-to-one, one-to-all, one-to-some, one-to-nearest</h2>
+
+<p>Everything so far has been <strong>unicast</strong>: one sender, one specific destination address, one
+recipient. IP has three more delivery modes — and you have already met two of them today without the
+names:</p>
+
+<div class="figure-title">Fig 3.14 — The four delivery modes</div>
+<pre class="diagram">
+   UNICAST  (one → one)              BROADCAST  (one → ALL on the subnet)
+
+                                                     ┌──► B
+   A ────────────────► B             A ──────────────┼──► C
+                                     to 192.168.1.255┼──► D
+   the normal case: web,             or 255.255.255. └──► E
+   db, ssh, gRPC, Kafka…             255 — nobody can opt out
+
+
+   MULTICAST  (one → subscribers)    ANYCAST  (one → NEAREST copy)
+
+            ┌──► B (joined)                     ┌── server, Mumbai    ◄┐
+   A ───────┼──x C (not joined)                 │                      │ same
+            └──► D (joined)          A ─────────┤   server, Frankfurt  │ address
+                                     (routing   │                      │ announced
+   groups in 224.0.0.0/4;            picks      └── server, Virginia  ◄┘ from all
+   receivers opt in via IGMP         nearest)       three places
+</pre>
+
+<table>
+  <tr><th>Mode</th><th>Addressing</th><th>Who receives</th><th>Where you meet it</th></tr>
+  <tr><td><strong>Unicast</strong></td><td>A normal host address</td><td>Exactly one interface</td><td>Nearly all backend traffic: HTTP, SQL, Redis, gRPC</td></tr>
+  <tr><td><strong>Broadcast</strong></td><td><code>255.255.255.255</code> (this wire) or the subnet broadcast, e.g. <code>192.168.1.255</code> on a /24</td><td>Every host on the subnet, like it or not</td><td>ARP requests (section 12), DHCP Discover (section 10)</td></tr>
+  <tr><td><strong>Multicast</strong></td><td>Group addresses in <code>224.0.0.0/4</code></td><td>Only hosts that joined the group via IGMP (Internet Group Management Protocol)</td><td>Routing protocols (OSPF speaks to 224.0.0.5), IPTV, market-data feeds, mDNS discovery</td></tr>
+  <tr><td><strong>Anycast</strong></td><td>An ordinary unicast address — announced from many places at once</td><td>The topologically nearest instance</td><td>Public resolvers like 8.8.8.8, the DNS root servers (Part 6), CDN edges (Part 14)</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>Routers do not forward broadcasts.</strong> A broadcast reaches every host on its own subnet and
+  dies at the router — by design: if broadcasts crossed routers, one chattering NIC could cascade across the
+  entire Internet, billions of machines interrupted by every ARP request on Earth. The subnet is therefore
+  also called a <strong>broadcast domain</strong>, and this single rule quietly explains several things at
+  once: why ARP and DHCP (both broadcast-based) work only within the local subnet, why every subnet needs
+  its own DHCP server or relay, and why section 7's "blast radius" was not a metaphor. Anycast is the
+  opposite trick — not a packet type but a <em>routing arrangement</em>: announce the same prefix from
+  twenty cities, and longest-prefix matching automatically steers every client to the nearest copy, no
+  client code changed. The Internet itself becomes your load balancer. (IPv6, incidentally, abolished
+  broadcast entirely; multicast does the job more politely.)</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="arp">12. ARP — the glue between IP and MAC</h2>
+
+<span class="osi-badge">📍 Straddles OSI Layers 2–3 — resolves L3 addresses, but rides directly inside L2 frames</span>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Sections 8–9 keep saying "then ARP for the MAC." Here is the gap it fills. The routing decision produced
+  a <strong>next-hop IP</strong> — say, the gateway <code>192.168.1.1</code>. But Part 2 taught you that what
+  actually goes on the wire is an Ethernet <em>frame</em>, and frames are addressed by <strong>MAC</strong>.
+  The OS now holds an IP it must reach and needs the matching MAC — and nothing in an IP address encodes it;
+  the two namespaces are unrelated (postal address vs fingerprint). <strong>ARP</strong> (Address Resolution
+  Protocol, RFC 826, 1982) is the missing translation: shout the question to everyone on the wire, let the
+  owner answer. Without it you would have perfect routes and no way to take even one hop.</p>
+</div>
+
+<p>The exchange is one broadcast question and one unicast answer. Watch the frame addressing carefully:</p>
+
+<div class="figure-title">Fig 3.15 — ARP: one shouted question, one whispered answer</div>
+<pre class="diagram">
+   ① REQUEST — broadcast frame (everyone on the subnet must look)
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Ethernet dst MAC: ff:ff:ff:ff:ff:ff   (BROADCAST)           │
+   │ Ethernet src MAC: 3c:7d:0a:12:34:56   (laptop)              │
+   │ EtherType: 0x0806 = ARP — not 0x0800 = IP!  ARP is NOT an   │
+   │            IP packet; it rides bare inside Ethernet         │
+   │ payload:  "WHO HAS 192.168.1.1?  TELL 192.168.1.7"          │
+   └─────────────────────────────────────────────────────────────┘
+        │
+        ├──► printer  192.168.1.20:  not me → silently ignores
+        ├──► smart TV 192.168.1.31:  not me → silently ignores
+        └──► router   192.168.1.1:   that's me! → replies:
+
+   ② REPLY — unicast frame (only the asker needs it)
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Ethernet dst MAC: 3c:7d:0a:12:34:56   (straight back)       │
+   │ Ethernet src MAC: a4:91:b1:aa:bb:01   (the answer itself!)  │
+   │ payload:  "192.168.1.1 IS AT a4:91:b1:aa:bb:01"             │
+   └─────────────────────────────────────────────────────────────┘
+
+   laptop caches the mapping → the next packets skip the question
+</pre>
+
+<p>Shouting before every packet would be absurd, so answers are kept in the <strong>ARP cache</strong> (the
+"neighbor table") with short lifetimes — entries are trusted for seconds to a few minutes, then re-verified,
+so a device whose NIC was swapped (new MAC, same IP) is re-found quickly. Inspect yours right now:</p>
+
+<pre class="code">C:\&gt; arp -a                                 (Windows)
+
+Interface: 192.168.1.7 --- 0xc
+  Internet Address      Physical Address      Type
+  192.168.1.1           a4-91-b1-aa-bb-01     dynamic   ← my gateway (learned)
+  192.168.1.20          08-00-27-5e-12-9b     dynamic   ← the printer
+  192.168.1.255         ff-ff-ff-ff-ff-ff     static    ← broadcast, by definition
+
+$ ip neigh                                  (Linux — same data, with states)
+192.168.1.1  dev wlp3s0 lladdr a4:91:b1:aa:bb:01 REACHABLE  ← fresh, trusted
+192.168.1.20 dev wlp3s0 lladdr 08:00:27:5e:12:9b STALE      ← re-verify before
+                                                              next use</pre>
+
+<p>One relative worth a line: <strong>gratuitous ARP</strong> is an <em>unprompted</em> announcement —
+"nobody asked, but 192.168.1.50 is at this MAC" — used by machines joining a network to detect address
+conflicts, and crucially by high-availability failover: when a standby load balancer seizes a virtual IP
+from a dead primary, it gratuitously ARPs so every neighbor's cache flips to the new MAC instantly (Part 9
+will lean on this).</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — ARP only ever resolves the NEXT HOP</div>
+  <p>This is the single most-missed point in networking interviews, so read it twice. <strong>ARP never
+  crosses a router, and you never ARP for a remote machine.</strong> When your laptop sends to
+  <code>142.250.183.78</code>, it does NOT ask "who has 142.250.183.78?" — that broadcast would die at the
+  subnet edge (section 11), and Google is not on your wire to hear it. The local-or-remote decision
+  (section 8) already chose the next hop — the gateway — so the laptop ARPs for
+  <strong>192.168.1.1</strong> and builds a frame whose <strong>destination MAC is the router's</strong>
+  while the <strong>destination IP remains Google's</strong>. Every later hop repeats the same trick for
+  <em>its</em> next hop. MAC = this hop; IP = final destination. If you keep one sentence from this chapter
+  for interviews, keep this one.</p>
+</div>
+
+<p>And the badge above deserves its honesty note: people argue about ARP's layer because it genuinely
+straddles. Its <em>purpose</em> is Layer-3 bookkeeping (mapping IP addresses), but its <em>packets</em> are
+not IP packets — they are raw Ethernet payloads (EtherType <code>0x0806</code>), unroutable by construction.
+Call it "the L2/L3 glue" and any interviewer will nod. IPv6 replaced it with NDP (Neighbor Discovery
+Protocol), which does ride inside IPv6 itself using multicast instead of broadcast — same job, tidier
+layering.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>IP addresses plan the journey; MAC addresses move the frame one step. ARP converts one into the
+    other: "who has this IP? tell me your MAC," shouted to the local network and answered by the owner, with
+    answers remembered in a small cache. For anything beyond your own subnet, you ask for the
+    <em>router's</em> MAC — never the far machine's.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Request = broadcast frame (dst ff:ff:ff:ff:ff:ff, EtherType 0x0806) carrying sender IP+MAC and target
+    IP; reply = unicast carrying the mapping. Cached with short TTLs (REACHABLE → STALE → re-probe on
+    Linux). Gratuitous ARP announces or updates a mapping unprompted (conflict detection, virtual-IP
+    failover). Resolution is always next-hop-scoped: routing decides first, ARP resolves what routing chose,
+    never the reverse.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>ARP has no authentication — any host may answer any request or gratuitously claim any IP. That is
+    <strong>ARP spoofing</strong>: poison a victim's cache so "the gateway" resolves to your MAC and you
+    become a man-in-the-middle on the LAN, silently relaying and reading traffic. It is why coffee-shop
+    Wi-Fi is hostile territory, why TLS (Part 8) must protect you even from your own LAN, and why enterprise
+    switches ship Dynamic ARP Inspection. Clouds sidestep the whole class: an AWS VPC answers ARP from the
+    hypervisor and ignores guest spoofing — one of many ways cloud networking is software impersonating
+    Ethernet (Part 11).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="nat">13. NAT — how billions of machines hide behind millions of addresses</h2>
+
+<span class="osi-badge">📍 OSI Layer 3 — Network (with one foot in Layer 4, as Part 5 will make precise)</span>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Count your home: laptops, phones, TV, console, doorbell — a dozen devices, easily. Your ISP gave you
+  <strong>one</strong> public IPv4 address. Section 4's arithmetic (4.3 billion addresses, far more devices)
+  forced exactly this; most machines hold only private RFC 1918 addresses (section 5), which the public
+  Internet refuses to route. So how does <code>192.168.1.7</code> ever fetch google.com?
+  <strong>NAT</strong> (Network Address Translation, RFC 1631, 1994): the border router <em>rewrites</em>
+  each outgoing packet's source to its own public address, keeps a note of who the conversation really
+  belongs to, and reverses the rewrite on replies. Proposed as a short-term stopgap until IPv6 arrived;
+  thirty years later it is load-bearing infrastructure for most of the planet — the most consequential
+  "temporary" hack in networking history.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the office mailroom</div>
+  <p>A company's 500 employees all send letters with the return address "1 Corporate Plaza" — the building's
+  single public address. The mailroom keeps a ledger: "outgoing letter ref #30001 was really from desk
+  51234." When a reply arrives addressed "1 Corporate Plaza, ref #30001," the ledger routes it back to the
+  right desk. Outsiders never learn desk numbers, the company needs only one public address — and, crucially,
+  <strong>nobody outside can write to a desk first</strong>: a letter with no ledger entry has no desk to go
+  to, and lands in the bin. Every property of NAT, good and bad, is already in this picture.</p>
+</div>
+
+<p>The ledger is real — it is the <strong>NAT translation table</strong> in your router. The common form is
+technically <strong>PAT</strong> (Port Address Translation, a.k.a. NAT overload): it uses <em>port
+numbers</em> — per-conversation numbers you will study properly in Part 5; for now, think "an ID the router
+assigns each conversation" — to tell flows apart, which is what lets thousands of private machines share ONE
+public address simultaneously:</p>
+
+<div class="figure-title">Fig 3.16 — The NAT table: a ledger of conversations</div>
+<pre class="diagram">
+   INSIDE (private LAN)           ROUTER (public 203.0.113.5)        OUTSIDE
+
+   laptop 192.168.1.7  ─────►  ┌───────────────────────────────┐
+   phone  192.168.1.12 ─────►  │     NAT TRANSLATION TABLE     │ ─────► Internet
+                               ├───────────────────────────────┤
+       private side            │ public side │ remote endpoint │
+   ────────────────────────────┼─────────────┼─────────────────┤
+   192.168.1.7 :51234     ⇄    │   :30001    │ 142.250.183.78  │ laptop → google
+   192.168.1.7 :51235     ⇄    │   :30002    │ 198.51.100.9    │ laptop → github
+   192.168.1.12:49882     ⇄    │   :30003    │ 142.250.183.78  │ phone  → google
+   ────────────────────────────┴─────────────┴─────────────────┘
+
+   OUTGOING: src 192.168.1.7:51234 REWRITTEN to 203.0.113.5:30001
+             …google sees only 203.0.113.5 and replies there…
+   INCOMING: dst 203.0.113.5:30001 → ledger lookup → REWRITTEN
+             back to 192.168.1.7:51234 → delivered on the LAN
+
+   reply with NO matching row? ──────► DROPPED.
+   that one rule is your home firewall's default behavior.
+</pre>
+
+<h3>13.1 The consequences — NAT explains half your weird networking days</h3>
+
+<ul>
+  <li><strong>Inbound connections are dead by default.</strong> An unsolicited packet from the Internet
+  matches no table row and is dropped. This is why your laptop, running a perfectly good Spring Boot server
+  on port 8080, is unreachable from the Internet — and, given every unpatched smart bulb in the world, it is
+  also a blessing.</li>
+  <li><strong>Webhooks cannot reach you.</strong> Stripe or GitHub trying to POST to your dev machine hits
+  the NAT wall. Hence tunneling tools: <code>ngrok</code> works by having <em>your machine dial out</em> to
+  its public relay (outbound creates a ledger entry!) and then feeding inbound webhooks down that pre-opened
+  pipe. Part 1's "the client always initiates" rule, weaponized.</li>
+  <li><strong>P2P needs gymnastics.</strong> Two laptops, both behind NAT, neither able to accept inbound —
+  who calls whom? This is Part 1's peer-to-peer operability problem made concrete. WebRTC (Web Real-Time
+  Communication) video calls solve it with STUN and TURN servers (Session Traversal Utilities for NAT;
+  Traversal Using Relays around NAT), which help both sides discover their public mappings or, failing
+  that, relay the media outright.</li>
+  <li><strong>Servers see one address for a whole building.</strong> Rate-limit "by IP" and one enthusiastic
+  office — or an entire mobile carrier behind CGNAT (section 5) — becomes one "user." Per-IP quotas, abuse
+  detection, and analytics all inherit the blur.</li>
+  <li><strong>Port forwarding is the manual override:</strong> a permanent hand-written ledger row —
+  "anything arriving at 203.0.113.5:8080 → 192.168.1.7:8080" — how home servers get exposed, and what game
+  consoles are begging for when they complain about "NAT type."</li>
+  <li><strong>The end-to-end principle takes a dent.</strong> The address the server sees is not the address
+  the client holds, so protocols that embed IPs inside their payloads (classic FTP, SIP telephony) break
+  outright and need protocol-aware NAT helpers.</li>
+</ul>
+
+<p>Cloud postscript: AWS sells this exact machinery as a managed <strong>NAT Gateway</strong> — it is how
+instances in your private subnets (section 7) reach the Internet for <code>apt update</code> while remaining
+unreachable from it. You will wire one up in Part 11 already knowing precisely what it does.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>NAT lets your whole house share one public address. The router swaps each outgoing packet's private
+    return address for its own public one and keeps a ledger; replies are looked up and passed back to the
+    right device. Side effect: outsiders cannot start conversations with your machines — replies get in,
+    cold calls are dropped.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>PAT multiplexes many private (IP, port) pairs onto one public IP by allocating a distinct public port
+    per flow and rewriting headers in both directions (checksums recomputed). State is created only by
+    outbound traffic; inbound-without-state is dropped — a stateful firewall for free. Port forwarding
+    pre-seeds static entries. ngrok-style tunnels, STUN/TURN, and webhook relays all exist to route around
+    the no-inbound rule.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>NAT state is a capacity and failure dimension: tables overflow (CGNAT boxes juggle millions of
+    entries), idle entries expire (long-quiet TCP connections — database pools, Kafka consumers — die
+    mysteriously unless keepalives chirp; Part 4), and a rebooted NAT orphans every live conversation. NAT
+    also shaped modern architecture by accident: because inbound-to-clients is impossible, the industry
+    standardized on client-initiated everything — polling, WebSockets, push services — and public-facing
+    endpoints concentrated behind load balancers holding real public IPs (Part 9). IPv6 removes the
+    scarcity that justified NAT, yet the drop-unsolicited-inbound behavior survives as explicit firewall
+    policy, because by now the whole ecosystem assumes it.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="journey">14. The centerpiece — how my laptop finds google.com</h2>
+
+<p>Time to cash every cheque this chapter has written. One ordinary act — you type <code>google.com</code>
+and press Enter — narrated at packet level, using every section above. The cast:</p>
+
+<table>
+  <tr><th>Actor</th><th>IP address(es)</th><th>MAC (where it matters)</th></tr>
+  <tr><td>Laptop (Wi-Fi)</td><td>192.168.1.7/24 — private, leased via DHCP</td><td>3c:7d:0a:12:34:56</td></tr>
+  <tr><td>Home router, LAN side (the default gateway)</td><td>192.168.1.1</td><td>a4:91:b1:aa:bb:01</td></tr>
+  <tr><td>Home router, WAN side</td><td>203.0.113.5 — public, from the ISP</td><td>a4:91:b1:aa:bb:02</td></tr>
+  <tr><td>ISP edge router</td><td>203.0.113.1</td><td>00:1a:2b:3c:4d:5e</td></tr>
+  <tr><td>Backbone routers (several)</td><td>198.51.100.x, 192.0.2.x …</td><td>new pair per link</td></tr>
+  <tr><td>google.com front door</td><td>142.250.183.78</td><td>unknown to us — and irrelevant (section 12)</td></tr>
+</table>
+
+<div class="figure-title">Fig 3.17 — The terrain</div>
+<pre class="diagram">
+ ┌────────── your LAN: 192.168.1.0/24 ──────────┐ ┌──── the public Internet ─────┐
+ │                                              │ │                              │
+ │  laptop                home router           │ │  ISP edge      backbone      │
+ │  192.168.1.7           LAN 192.168.1.1       │ │  203.0.113.1   routers…      │
+ │  3c:7d:0a:… ──Wi-Fi──► a4:91:b1:aa:bb:01     │ │     │             │          │
+ │                            │                 │ │     │             ▼          │
+ │                        ┌──NAT──┐             │ │     │      Google's network  │
+ │                        WAN 203.0.113.5 ──────┼─┼─────┘      142.250.183.78    │
+ │                        a4:91:b1:aa:bb:02     │ │                              │
+ └──────────────────────────────────────────────┘ └──────────────────────────────┘
+</pre>
+
+<h3>Step 1 — Configuration is already in place (DHCP, this morning)</h3>
+<p>At 09:14, when the laptop joined the Wi-Fi, DORA ran (section 10). Since then the laptop has held: IP
+<code>192.168.1.7</code>, mask <code>255.255.255.0</code>, gateway <code>192.168.1.1</code>, DNS server
+<code>192.168.1.1</code>, lease 24 h. Without this, nothing below can begin — a machine with no address
+cannot converse.</p>
+
+<h3>Step 2 — Name to number (DNS, the one-paragraph preview)</h3>
+<p><code>google.com</code> is a name; IP routes numbers. The laptop asks its configured DNS (Domain Name
+System) server — the home router, which forwards to the ISP's resolver — "what is the address of
+google.com?" and receives <code>142.250.183.78</code>. Note the pleasing recursion: that DNS query is
+<em>itself a packet</em> that travels steps 3–8 below to reach the resolver. How the resolver finds the
+answer — root servers, TLDs, authoritative servers, caches — is deliberately deferred: <strong>Part 6 tells
+the full DNS story</strong>. Today, accept the number.</p>
+
+<h3>Step 3 — Local or remote? (section 8)</h3>
+<pre class="code">my network:    192.168.1.7    AND 255.255.255.0  =  192.168.1.0
+dest network:  142.250.183.78 AND 255.255.255.0  =  142.250.183.0
+                                                    ─────────────
+different  →  REMOTE  →  next hop = default gateway 192.168.1.1</pre>
+
+<h3>Step 4 — ARP for the gateway (section 12)</h3>
+<p>The laptop checks its ARP cache for <code>192.168.1.1</code>. Miss (the entry went stale): it broadcasts
+<em>"who has 192.168.1.1? tell 192.168.1.7"</em>; the router answers <em>"192.168.1.1 is at
+a4:91:b1:aa:bb:01."</em> Cached. Notice what was <strong>not</strong> asked: nobody ARPed for
+142.250.183.78. Google is not on this wire; the gateway is.</p>
+
+<h3>Step 5 — Build the frame: two addresses, two meanings</h3>
+<p>The laptop assembles the outgoing unit — and this table is the entire chapter in four rows. Look at the
+mismatch, and love it:</p>
+
+<table>
+  <tr><th>Field (hop 1: laptop → home router)</th><th>Value</th><th>Meaning</th></tr>
+  <tr><td>Ethernet <strong>destination MAC</strong></td><td>a4:91:b1:aa:bb:01</td><td>"Next hop: my gateway" — L2, valid on this wire only</td></tr>
+  <tr><td>Ethernet <strong>source MAC</strong></td><td>3c:7d:0a:12:34:56</td><td>"From me, on this wire"</td></tr>
+  <tr><td>IP <strong>destination address</strong></td><td>142.250.183.78</td><td>"Final destination: Google" — L3, end-to-end</td></tr>
+  <tr><td>IP <strong>source address</strong> (TTL 64)</td><td>192.168.1.7</td><td>"Reply to me" — private, for now…</td></tr>
+</table>
+
+<p>The frame is addressed to the router; the packet inside it is addressed to Google. The switch half of the
+beige box (Fig 3.12) reads the destination MAC and hands the frame to its router half.</p>
+
+<h3>Step 6 — The home router NATs and forwards (sections 9 and 13)</h3>
+<p>The router unwraps the frame, reads the IP destination, and runs its own longest-prefix match:
+<code>142.250.183.78</code> matches only <code>0.0.0.0/0 via 203.0.113.1</code> — upstream. Before
+forwarding, two rewrites:</p>
+<ul>
+  <li><strong>NAT:</strong> source <code>192.168.1.7:51234</code> becomes <code>203.0.113.5:30001</code>;
+  the ledger row from Fig 3.16 is written. From here on, the Internet believes this conversation belongs to
+  203.0.113.5.</li>
+  <li><strong>TTL:</strong> 64 → 63; header checksum recomputed.</li>
+</ul>
+<p>Then the router does exactly what the laptop did one hop earlier: it ARPs on its <em>WAN</em> segment for
+its own next hop (<code>203.0.113.1</code> → <code>00:1a:2b:3c:4d:5e</code>) and wraps the packet in a
+brand-new frame. The old frame no longer exists — frames live for exactly one hop.</p>
+
+<h3>Step 7 — Hop by hop across the ISP and backbone</h3>
+<p>Every router on the path now repeats one identical loop: <em>unwrap frame → longest-prefix match on
+142.250.183.78 → TTL−1 → new frame toward the next hop</em>. As the packet nears Google, the matching
+prefixes grow more specific — the parcel moving from "that plane" to "that truck" to "that street." Here is
+the whole journey as a table; read the columns <em>vertically</em> and Part 2's key point becomes
+physical:</p>
+
+<table>
+  <tr><th>Hop (link)</th><th>src MAC → dst MAC</th><th>src IP → dst IP</th><th>TTL on wire</th></tr>
+  <tr><td>1. laptop → home router</td><td>3c:7d:0a:12:34:56 → a4:91:b1:aa:bb:01</td><td>192.168.1.7 → 142.250.183.78</td><td>64</td></tr>
+  <tr><td>2. home router → ISP edge <em>(NAT happened here)</em></td><td>a4:91:b1:aa:bb:02 → 00:1a:2b:3c:4d:5e</td><td><strong>203.0.113.5</strong> → 142.250.183.78</td><td>63</td></tr>
+  <tr><td>3. ISP edge → ISP core</td><td>00:1a:2b:3c:4d:5f → 58:97:bd:00:11:22</td><td>203.0.113.5 → 142.250.183.78</td><td>62</td></tr>
+  <tr><td>4. ISP core → IXP → Google edge</td><td>58:97:bd:00:11:23 → f4:0f:24:9a:00:01</td><td>203.0.113.5 → 142.250.183.78</td><td>61</td></tr>
+  <tr><td>5. Google edge → 142.250.183.78</td><td>(Google's internal fabric)</td><td>203.0.113.5 → 142.250.183.78</td><td>60</td></tr>
+</table>
+
+<p>Every row: <strong>new MACs</strong>, each pair meaningful only on its own link (some backbone links are
+not Ethernet at all and have no MACs — the principle holds: L2 addressing is per-link). <strong>Stable
+IPs</strong> after the single NAT rewrite at the border. <strong>TTL ticking down</strong> — the hop
+odometer. Part 2's "frames are per-hop, packets are end-to-end" is no longer a slogan; it is five rows of
+evidence.</p>
+
+<h3>Step 8 — Arrival, response, and the ledger lookup home</h3>
+<p>The packet reaches 142.250.183.78 — which, Part 9 will reveal, is not "a server" but a load balancer
+fronting thousands; today the distinction doesn't matter. Google's machine builds a response with the
+addresses mirrored — src <code>142.250.183.78:443</code>, dst <code>203.0.113.5:30001</code>, a fresh TTL of
+its own — and the response makes its own hop-by-hop journey back, possibly along a <em>different</em> route
+(IP promises nothing about symmetry). At your home router, the inbound packet's destination
+<code>:30001</code> hits the NAT ledger: row found → destination rewritten to
+<code>192.168.1.7:51234</code> → the ARP cache already knows the laptop's MAC → one last frame crosses the
+LAN → the laptop's OS hands the payload up to the waiting browser. (Had no ledger row existed — a stranger
+probing 203.0.113.5 cold — the packet would have died at this exact point. Your firewall, in one
+sentence.)</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the whole chapter in one breath</div>
+  <p>DHCP gave identity → DNS gave the number → the mask-AND said "remote" → ARP found the gateway's MAC →
+  frame to the gateway, packet to Google → NAT swapped private for public and wrote the ledger → routers
+  longest-prefix-matched it hop by hop, burning TTL and re-framing every link → the reply retraced, the
+  ledger un-swapped, the LAN delivered. Ten technologies, one keystroke, roughly 25 ms. And notice what is
+  <em>still missing</em>: nothing yet guarantees all the bytes arrived, in order, exactly once — and nothing
+  yet says which <em>program</em> on the machine gets them. Those are Parts 4 and 5.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Your laptop looks up Google's number, sees it is far away, and hands the packet to the home router
+    using the router's MAC address. The router swaps your private address for its public one and sends the
+    packet upstream, where routers pass it along like postal sorting centers, each reading only the
+    destination. The reply comes back; the router's ledger remembers it was for you; your browser gets the
+    bytes.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Sequence: DHCP-provided config → DNS resolution → subnet comparison (IP AND mask) → ARP for the next
+    hop → L2 frame to the gateway carrying the L3 packet to the destination → PAT rewrite plus state entry
+    at the border → per-hop longest-prefix match, TTL decrement, re-framing → possibly asymmetric return →
+    NAT state lookup → local delivery. MACs change per link; IPs change only at NAT; TTL decrements at every
+    router.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Run this narrative as a debugging checklist and most "the network is broken" tickets fall out of it:
+    no DHCP (169.254.x.x?), DNS resolves but route missing (name lookup works, ping fails), wrong mask
+    (selective reachability, section 8), dead gateway (everything off-subnet fails), NAT table exhaustion
+    (new connections fail under load while old ones live), TTL anomalies (routing loops — traceroute shows
+    ping-ponging hops), asymmetric returns dropped by stateful firewalls. Wireshark on hop 1 plus traceroute
+    outward localizes most connectivity faults to a layer and a device — which is the actual professional
+    value of being able to tell this story unprompted.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="commands">15. Commands corner — see all of it on your own machine</h2>
+
+<p>Five minutes, three commands, every concept in this chapter made visible. First, your configuration —
+Windows:</p>
+
+<pre class="code">C:\&gt; ipconfig /all
+
+Wireless LAN adapter Wi-Fi:
+   Description . . . . . . . . . : Intel(R) Wi-Fi 6 AX201 160MHz
+   Physical Address. . . . . . . : 3C-7D-0A-12-34-56    ← MAC (L2, Part 2)
+   DHCP Enabled. . . . . . . . . : Yes                  ← leased, not static (§10)
+   IPv4 Address. . . . . . . . . : 192.168.1.7          ← private, RFC 1918 (§5)
+   Subnet Mask . . . . . . . . . : 255.255.255.0        ← /24 (§6)
+   Lease Obtained. . . . . . . . : Thursday, 12 June 2026 09:14:02
+   Lease Expires . . . . . . . . : Friday, 13 June 2026 09:14:02
+   Default Gateway . . . . . . . : 192.168.1.1          ← the exit door (§9)
+   DHCP Server . . . . . . . . . : 192.168.1.1          ← same beige box (Fig 3.12)
+   DNS Servers . . . . . . . . . : 192.168.1.1          ← forwarder (Part 6)</pre>
+
+<p>The same story on Linux — and note the <em>multiple</em> interfaces: "an IP identifies an interface,"
+demonstrated.</p>
+
+<pre class="code">$ ip addr
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536
+    inet 127.0.0.1/8 scope host lo            ← loopback: localhost lives here (§5)
+2: wlp3s0: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500
+    link/ether 3c:7d:0a:12:34:56              ← MAC
+    inet 192.168.1.7/24 brd 192.168.1.255 scope global dynamic wlp3s0
+         │              └ subnet broadcast (§11)       └ "dynamic" = DHCP lease
+         └ address and mask in CIDR form (§6)
+       valid_lft 84919sec                     ← lease time remaining
+3: docker0: &lt;NO-CARRIER,BROADCAST,MULTICAST,UP&gt; mtu 1500
+    inet 172.17.0.1/16 scope global docker0   ← Docker's RFC 1918 bridge (§5, Part 12)</pre>
+
+<p>Second, liveness: <code>ping</code> sends ICMP Echo Request packets (protocol 1 in the IP header, §3) and
+times the replies:</p>
+
+<pre class="code">C:\&gt; ping 142.250.183.78
+
+Pinging 142.250.183.78 with 32 bytes of data:
+Reply from 142.250.183.78: bytes=32 time=24ms TTL=116
+Reply from 142.250.183.78: bytes=32 time=23ms TTL=116
+Reply from 142.250.183.78: bytes=32 time=25ms TTL=116
+Reply from 142.250.183.78: bytes=32 time=24ms TTL=116
+
+time=24ms ← round-trip time: Part 1's latency, measured
+TTL=116   ← the reply LEFT Google with TTL 128 and crossed
+            128 − 116 = 12 routers on the way back. TTL forensics!</pre>
+
+<p>Third, the path itself — <code>tracert</code> on Windows, <code>traceroute</code> on Linux/macOS — which
+is section 3's TTL trick running live. Each line is one TTL value; three timed probes per line:</p>
+
+<pre class="code">C:\&gt; tracert google.com
+
+Tracing route to google.com [142.250.183.78] over a maximum of 30 hops:
+
+  1     2 ms     1 ms     2 ms  192.168.1.1    ← TTL=1 died at my own router
+  2    13 ms    12 ms    14 ms  100.72.18.1    ← TTL=2: an ISP box — and note
+                                                 100.64/10: I am behind CGNAT (§5)
+  3    14 ms    13 ms    13 ms  203.0.113.1    ← ISP edge router
+  4    18 ms    17 ms    19 ms  198.51.100.42  ← ISP core / exchange point
+  5     *        *        *     Request timed out.
+                                               ← a router that declines to send
+                                                 ICMP Time Exceeded (policy, not
+                                                 failure — traffic still flows)
+  6    24 ms    23 ms    24 ms  192.0.2.77     ← entering Google's network
+  7    24 ms    24 ms    23 ms  142.250.183.78 ← the destination answered: done
+
+reading it: line N = "the router that killed my TTL=N packet."
+latency jumps between lines ≈ physical distance between routers (Part 1).</pre>
+
+<p>Run all three against your own network now — five minutes of real output welds this chapter into place
+better than any rereading.</p>
+
+<!-- ============================================================ -->
+<h2 id="interview">16. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>Why do we need both MAC and IP addresses? Isn't one unique identifier enough?</summary>
+    <p>They answer different questions at different scopes. MAC addresses are flat, manufacturer-assigned
+    identifiers — perfect for "which device on this wire" but carrying no location information, so they
+    cannot be aggregated: routing the Internet by MAC would require every router to track every device on
+    Earth individually. IP addresses are hierarchical and assigned by network location, so routers can
+    summarize millions of machines behind one prefix — that aggregation is the only reason routing tables
+    fit in memory. Mechanically, IP plans the end-to-end journey while MAC executes each single hop: frames
+    and their MACs are rewritten at every router, while the packet's IPs stay constant end to end. ARP
+    converts the next-hop IP into a MAC at each link. One system flat and local, one hierarchical and
+    global — both necessary, glued by ARP.</p>
+  </details>
+
+  <details><summary>Subnet math: a host is 10.0.5.130/26. Give the network address, broadcast address, and usable range.</summary>
+    <p>A /26 leaves 6 host bits → blocks of 64 addresses, so the last octet partitions into 0–63, 64–127,
+    128–191, 192–255. The value 130 falls in the 128–191 block. Verify with the AND: 130 = 10000010, mask
+    last octet 192 = 11000000, AND = 10000000 = 128. Therefore: network address <strong>10.0.5.128</strong>,
+    broadcast <strong>10.0.5.191</strong> (all host bits set), usable hosts <strong>10.0.5.129 through
+    10.0.5.190</strong> — 2⁶ − 2 = 62 of them. A strong answer narrates the block-size shortcut (256 − 192 =
+    64, so blocks step by 64) instead of grinding pure binary, and remembers the −2 is the network and
+    broadcast addresses.</p>
+  </details>
+
+  <details><summary>What happens if two devices on the same network have the same IP address?</summary>
+    <p>Chaos, mediated by ARP. Both devices answer ARP requests for the address, so neighbors' caches flap
+    between two MACs depending on who answered last; traffic is delivered to whichever device most recently
+    won. The symptom is intermittent connectivity that "fixes itself" and breaks again — connections
+    resetting as frames alternate targets mid-conversation. Modern operating systems probe at configuration
+    time (gratuitous ARP: announce the address, listen for an objection) and log "IP address conflict."
+    DHCP prevents most cases by leasing from a single pool; real-world conflicts usually come from a static
+    assignment colliding with the DHCP range. In clouds the hypervisor controls ARP answers, making the
+    disease nearly impossible — one of several LAN problems virtualization simply deleted.</p>
+  </details>
+
+  <details><summary>Explain NAT. Why does it exist, and what are its downsides?</summary>
+    <p>NAT (Network Address Translation) lets many privately-addressed machines share few public IPv4
+    addresses — the practical response to address exhaustion. The border router rewrites each outbound
+    packet's source (private IP and port → its public IP and an allocated port), records the mapping in a
+    translation table, and reverses the rewrite on replies; the common many-to-one form is PAT (Port
+    Address Translation). Downsides: unsolicited inbound is impossible (no table entry → drop), breaking
+    home servers, webhooks, and peer-to-peer — hence ngrok-style tunnels and STUN/TURN for WebRTC; it
+    breaks the end-to-end principle, so protocols embedding addresses in payloads (FTP, SIP) need special
+    helpers; it blurs identity (an office or a whole carrier appears as one IP, wrecking per-IP rate limits
+    and analytics); the state table can exhaust under load and is lost on reboot, killing live connections;
+    and idle long-lived connections die when entries expire — why database pools need keepalives. Its one
+    beloved side effect: dropping unsolicited inbound makes it an accidental firewall.</p>
+  </details>
+
+  <details><summary>What does the TTL field in the IP header actually do?</summary>
+    <p>TTL (Time To Live) is an 8-bit hop budget preventing packets from looping forever. The sender sets it
+    (commonly 64 or 128); every router decrements it by one; a router decrementing it to zero drops the
+    packet and returns an ICMP Time Exceeded to the source. Despite the name, it counts router hops, not
+    seconds — the name is a fossil from an early design. Two practical uses: traceroute maps paths by
+    sending probes with TTL = 1, 2, 3… and collecting the Time Exceeded senders; and observed reply TTLs
+    reveal hop counts (a reply arriving at TTL 116 likely left a 128-default host twelve hops away). Don't
+    confuse it with DNS TTL, which genuinely is seconds — same name, unrelated mechanism.</p>
+  </details>
+
+  <details><summary>Your laptop (192.168.1.7/24) sends a request to a server on another continent. Whose MAC goes in the frame, and why?</summary>
+    <p>The default gateway's — never the remote server's. The laptop ANDs both its own address and the
+    destination with its subnet mask, sees different networks, and selects its gateway as the next hop. It
+    ARPs for the <em>gateway's</em> MAC (ARP is broadcast-based and cannot cross a router anyway) and emits
+    a frame whose destination MAC is the gateway's while the destination IP remains the remote server's.
+    Every subsequent router repeats the pattern toward its own next hop. MAC addresses are per-link; IP
+    addresses are end-to-end. Interviewers use this exact question to separate people who memorized layer
+    names from people who understand what the layers do.</p>
+  </details>
+
+  <details><summary>What are the RFC 1918 private ranges, and what makes an address "private"?</summary>
+    <p>10.0.0.0/8 (16.7 million addresses), 172.16.0.0/12 (about a million — includes Docker's default
+    172.17.0.0/16), and 192.168.0.0/16 (65,536 — home networks). "Private" means Internet routers will not
+    carry these prefixes: anyone may use them internally without registration, and millions of networks
+    reuse them simultaneously without collision because they never meet — until VPNs, VPC peering, or
+    company mergers make them meet, which is why address planning matters. Private hosts reach the Internet
+    only through NAT. Worth volunteering as a bonus: 127.0.0.0/8 loopback, 169.254.0.0/16 link-local/APIPA
+    ("DHCP failed"), 100.64.0.0/10 carrier-grade NAT, and 0.0.0.0 as the all-interfaces bind wildcard.</p>
+  </details>
+
+  <details><summary>What is a default gateway, and what exactly breaks if it's missing or wrong?</summary>
+    <p>The default gateway is the router interface on your own subnet that your default route (0.0.0.0/0)
+    points at — the next hop for every destination lacking a more specific route. It must be on your subnet,
+    because it is the one router you can reach directly at Layer 2. If it is missing or wrong, the failure
+    signature is surgical: everything on the local subnet keeps working (direct delivery needs no router)
+    while everything beyond fails — no Internet, no other subnets. DNS often appears broken too, if the
+    resolver is off-subnet, which lures people into debugging the wrong layer. "Local works, remote
+    doesn't" should send you straight to the gateway setting, then to ARP for the gateway.</p>
+  </details>
+
+  <details><summary>A router has routes 0.0.0.0/0 via A, 10.0.0.0/16 via B, and 10.0.1.0/24 via C. Where does a packet for 10.0.1.99 go, and why?</summary>
+    <p>Via C. All three routes match 10.0.1.99 — the default matches everything, and 10.0.1.99 lies inside
+    both 10.0.0.0/16 and 10.0.1.0/24 — and IP forwarding always selects the longest matching prefix: /24
+    beats /16 beats /0. The rationale: specificity is knowledge — a route covering 256 addresses carries
+    more precise information about the destination than one covering 65,536 or the entire Internet.
+    Follow-ups to expect: 10.0.7.9 goes via B (now /16 is the longest match), 8.8.8.8 via A (only the
+    default matches), and metrics break ties only between routes of <em>equal</em> prefix length.</p>
+  </details>
+
+  <details><summary>Walk through DHCP. What happens if no DHCP server responds?</summary>
+    <p>DORA. The client broadcasts a <strong>Discover</strong> from source 0.0.0.0 to 255.255.255.255 — it
+    has no address yet, so broadcast is its only option. Each available server replies with an
+    <strong>Offer</strong>: proposed IP, mask, gateway, DNS, lease duration. The client broadcasts a
+    <strong>Request</strong> formally accepting one offer — broadcast so losing servers can reclaim theirs —
+    and the chosen server confirms with an <strong>Acknowledge</strong>. The client self-configures and
+    renews quietly (unicast) at about half the lease. If no server ever answers, the OS self-assigns a
+    random link-local address in 169.254.0.0/16 (APIPA), allowing same-subnet traffic only — which is why a
+    169.254.x.x in <code>ipconfig</code> is the canonical "DHCP failed" diagnostic. And because Discover is
+    a broadcast, which routers do not forward, every subnet needs its own DHCP server or a relay agent.</p>
+  </details>
+
+  <details><summary>Compare broadcast, multicast, and anycast. Why don't routers forward broadcasts?</summary>
+    <p>Broadcast delivers to every host on the local subnet (255.255.255.255, or the subnet broadcast such
+    as 192.168.1.255), wanted or not — ARP and DHCP depend on it. Multicast (224.0.0.0/4) delivers only to
+    hosts that joined a group via IGMP — routing protocols, IPTV, market data. Anycast is not a packet type
+    but a routing arrangement: the same ordinary unicast prefix is announced from many locations, and
+    longest-prefix routing carries each client to the nearest instance — 8.8.8.8, the DNS root servers, and
+    CDNs run this way. Routers drop broadcasts because forwarding them would let any host interrupt every
+    machine on Earth; local noise must stay local (the subnet = the broadcast domain), and LAN-scale
+    broadcast storms are destructive enough without global reach. IPv6 removed broadcast entirely in favor
+    of multicast.</p>
+  </details>
+
+  <details><summary>What is the difference between binding a server to 127.0.0.1 and to 0.0.0.0?</summary>
+    <p>Binding selects which interfaces accept connections. 127.0.0.1 binds only loopback — packets that
+    never leave the OS — so only same-machine clients can connect: right for local-only tools. 0.0.0.0 is
+    the wildcard: listen on every interface the machine has (Wi-Fi, Ethernet, docker0…) — required for
+    anything reachable from outside. The classic Docker bug: an app inside a container binds 127.0.0.1, the
+    published port forwards traffic to the container's <em>other</em> interface, and every external request
+    is refused while <code>curl localhost</code> inside the container works perfectly. Bind 0.0.0.0 inside
+    containers; bind 127.0.0.1 on your laptop when you'd rather the coffee-shop LAN not browse your dev
+    server. Ports and sockets get their full treatment in Part 5.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">17. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "An IP address identifies a machine."</strong><br>
+  ✅ It identifies an <em>interface</em>. One machine has several — loopback, Wi-Fi, Ethernet, docker0, VPN
+  tunnels — each with its own address; and thanks to NAT, one public address can front hundreds of machines.
+  "What is this machine's IP?" is often a malformed question; "which interface, seen from where?" is the
+  real one.</p>
+
+  <p><strong>❌ "192.168.x.x is my address on the Internet."</strong><br>
+  ✅ RFC 1918 addresses never appear on the public Internet — millions of homes are using yours right now.
+  The world sees only your router's public address (or your ISP's CGNAT address above that). This is exactly
+  why <code>ipconfig</code> and "what is my IP" websites disagree: one shows the private interface address,
+  the other shows the post-NAT public source that actually reached the website.</p>
+
+  <p><strong>❌ "TTL is measured in seconds."</strong><br>
+  ✅ In the IP header it counts router hops: minus one per router, dropped at zero. The name is a fossil of
+  an abandoned design. Confusingly, <em>DNS</em> TTL (Part 6) really is seconds — establishing which TTL a
+  colleague means is half the conversation.</p>
+
+  <p><strong>❌ "ARP finds the MAC address of the destination server, wherever it is."</strong><br>
+  ✅ ARP is broadcast-based, and broadcasts die at the router: it can only resolve addresses on your own
+  subnet. For any remote destination you ARP for your <em>gateway's</em> MAC and frame the packet to it,
+  with the IP inside still addressed to the far machine. You will never know google.com's MAC address — and
+  nothing about your request needs it.</p>
+
+  <p><strong>❌ "IPv6 is just IPv4 with longer addresses."</strong><br>
+  ✅ Length is the headline, not the story: IPv6 also abolishes broadcast (multicast replaces it), replaces
+  ARP with NDP, lets hosts autoconfigure without DHCP (SLAAC), simplifies the header (no in-network
+  fragmentation, no hop-by-hop checksum), and — by ending scarcity — removes the need for NAT, restoring
+  end-to-end addressing. Treating it as "the same network with wider numbers" is how dual-stack deployments
+  end up with IPv6 paths nobody remembered to firewall.</p>
+
+  <p><strong>❌ "The subnet mask hides or secures part of my network."</strong><br>
+  ✅ The mask is pure arithmetic: it tells hosts and routers where the network/host split falls so the
+  local-or-remote decision can be made. It hides nothing and blocks nothing — isolation comes from routing
+  policy and firewalls. The mask just draws the map those tools enforce.</p>
+
+  <p><strong>❌ "The IP header checksum protects my data."</strong><br>
+  ✅ It covers the 20-byte header only — and is recomputed at every hop anyway, since TTL changes. Payload
+  integrity belongs to the transport layer (TCP/UDP checksums, Part 4), and real end-to-end assurance to TLS
+  (Part 8). IP promises best-effort delivery of a possibly-lost, possibly-duplicated, possibly-reordered
+  datagram — by deliberate design.</p>
+
+  <p><strong>❌ "My machine has one IP address."</strong><br>
+  ✅ Run <code>ip addr</code> and count: loopback 127.0.0.1, the LAN address, Docker's bridge at 172.17.0.1,
+  an IPv6 link-local per interface, maybe a VPN tunnel. A developer laptop routinely holds five or more, and
+  which one a given connection uses depends on the routing table — why "works from my machine" sometimes
+  literally depends on which interface the OS picked.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p><strong>Looking back:</strong> Part 2 gave you the layer map and the promise that frames are hop-scoped
+  while packets travel end-to-end; this part built the entire Layer 3 machinery that makes the promise
+  real — hierarchical addresses (because Part 2's flat MACs cannot aggregate), subnets and CIDR, routers and
+  longest-prefix match, ARP as the L2/L3 glue, and NAT at the border. <strong>Looking ahead:</strong> your
+  packet now reaches the right machine anywhere on Earth — but IP is best-effort: packets can vanish,
+  duplicate, or arrive shuffled, and nothing yet says which <em>application</em> on the machine should
+  receive them. Both gaps belong to Layer 4: <a href="part04.html"><strong>Part 4 — TCP &amp; UDP</strong></a>
+  builds reliability (and the famous three-way handshake) on top of today's unreliable datagrams, and Part 5
+  finishes delivery with ports — the numbers NAT's ledger was already quietly using.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part02.html"><span class="dir">← Previous</span><span class="t">Part 2: The OSI Model</span></a>
+  <a href="part04.html"><span class="dir">Next →</span><span class="t">Part 4: TCP &amp; UDP</span></a>
+</div>
+
+</main>
+</body>
+</html>

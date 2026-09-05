@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 5: Ports &amp; Sockets — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html" class="active"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 5 of 15</p>
+<h1>Ports &amp; Sockets — Many Apps, One Address</h1>
+<p class="lede">Part 3 got your packet to the right machine. Part 4 made the delivery reliable. But the machine
+is running Spring Boot, PostgreSQL, Redis, a Kafka consumer, and an SSH (Secure Shell) session —
+<em>simultaneously</em>. When bytes arrive at the network card, which program gets them? This part answers that
+with two of the most-used, least-understood words in backend engineering: <strong>ports</strong> and
+<strong>sockets</strong>. By the end, <code>server.port=8080</code>, <code>:5432</code> in a JDBC (Java Database
+Connectivity) URL, and "address already in use" will all be transparent to you.</p>
+
+<span class="osi-badge">📍 OSI Layer 4 — Transport</span>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why-ports">Why ports exist</a></li>
+    <li><a href="#mechanics">A 16-bit number and its three kingdoms</a></li>
+    <li><a href="#sockets">Sockets and the 5-tuple</a></li>
+    <li><a href="#lifecycle">Listening vs connection sockets</a></li>
+    <li><a href="#client-vs-server">Client ports vs server ports</a></li>
+    <li><a href="#binding">Binding addresses — the gotcha factory</a></li>
+    <li><a href="#well-known">The well-known ports</a></li>
+    <li><a href="#stack">Your stack, port by port</a></li>
+    <li><a href="#urls">URLs and implied ports</a></li>
+    <li><a href="#firewalls">Firewalls and "opening a port"</a></li>
+    <li><a href="#toolbox">The inspection toolbox</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-ports">1. Why ports exist — problem #6 finally gets its answer</h2>
+
+<p>Recall the ten problems from Part 1. Problem #6 was <strong>the "which app?" problem</strong>: a machine runs
+many programs at once — when data arrives at the machine, which program should receive it? Parts 3 and 4 gave us
+everything <em>except</em> that answer. An IP (Internet Protocol) address identifies a <em>machine</em>. Routing
+gets the packet to that machine. TCP (Transmission Control Protocol) guarantees the bytes arrive complete and in
+order. And then… the operating system is holding a handful of bytes addressed to <code>192.168.1.7</code> — a
+machine that is currently running a Spring Boot server, a PostgreSQL database, a Redis cache, a browser with
+forty tabs, and Spotify. Deliver the bytes to whom?</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why ports exist</div>
+  <p>An IP address is <strong>machine-grained</strong>, but communication is <strong>program-grained</strong>.
+  Something must subdivide one machine address into many program-level addresses. That something is the
+  <strong>port number</strong>: a 16-bit number carried in every TCP and UDP (User Datagram Protocol) segment
+  that tells the receiving operating system <em>which program's mailbox</em> the data belongs in. IP gets the
+  data to the right <strong>building</strong>; the port gets it to the right <strong>apartment</strong>.</p>
+</div>
+
+<p>It is worth pausing on what the world would look like <em>without</em> ports, because it makes the design
+obvious in retrospect. There are only two alternatives, and both are terrible:</p>
+
+<ul>
+  <li><strong>One network program per machine.</strong> If the only address is the machine address, then only one
+  program can "own" the network. Want to run a web server <em>and</em> a database? Buy a second computer. Your
+  laptop could run the React dev server or the Spring Boot API — never both.</li>
+  <li><strong>Every program sees all traffic.</strong> Alternatively, the OS (operating system) hands every
+  arriving byte to every running program and lets them fight over it. Now every application must parse all
+  traffic, discard what isn't theirs (how would they even know?), and trust every other app not to read its
+  data. It is a privacy, performance, and correctness disaster.</li>
+</ul>
+
+<p>Ports solve this with sixteen bits. The OS keeps a table — port number → program — and when a TCP segment
+arrives saying "destination port 5432," the kernel walks the table and delivers the payload to exactly one
+process: PostgreSQL. This act of sorting one inbound stream into many program-level streams is called
+<strong>demultiplexing</strong>, and the reverse (many programs sharing one network interface on the way out) is
+<strong>multiplexing</strong>.</p>
+
+<div class="figure-title">Fig 5.1 — One IP address, many programs: the port demultiplexes</div>
+<pre class="diagram">
+                            packets arriving for 192.168.1.7
+                                       │
+                                       ▼
+   ┌───────────────────────────────────────────────────────────────────┐
+   │  YOUR MACHINE  (one IP address: 192.168.1.7)                      │
+   │                                                                   │
+   │              ┌──────────────────────────────┐                     │
+   │              │  OS kernel — port table      │                     │
+   │              │  "dst port → which process?" │                     │
+   │              └──┬───────┬───────┬───────┬───┘                     │
+   │      dst 8080   │       │       │       │   dst 22                │
+   │                 ▼       ▼       ▼       ▼                         │
+   │           ┌────────┐ ┌──────┐ ┌──────┐ ┌──────┐                   │
+   │           │ Spring │ │ Post │ │Redis │ │ sshd │                   │
+   │           │ Boot   │ │ gres │ │      │ │      │                   │
+   │           │ :8080  │ │:5432 │ │:6379 │ │ :22  │                   │
+   │           └────────┘ └──────┘ └──────┘ └──────┘                   │
+   │                                                                   │
+   │   one building address outside; apartment numbers inside          │
+   └───────────────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — building address vs apartment number</div>
+  <p>Extend the postal analogy that has carried us since Part 1. The IP address is the <strong>street address of
+  an apartment building</strong>: it gets the courier van (routing, Part 3) to the right front door anywhere on
+  Earth. But "delivered to the building" is not "delivered." The envelope also carries an <strong>apartment
+  number</strong> — the port — and the building's mailroom (the OS kernel) drops the letter into exactly one
+  mailbox. Apartment 8080 is where the Spring Boot family lives; apartment 5432 is the PostgreSQL family;
+  apartment 22 only opens for couriers with SSH (Secure Shell) credentials. Crucially, the courier company
+  (IP, Layer 3) never reads apartment numbers — sorting mail <em>inside</em> the building is the building's
+  own job (transport layer, Layer 4).</p>
+</div>
+
+<h3>1.1 Why ports live at Layer 4, not Layer 3</h3>
+
+<p>This is a precision point that separates "memorized the OSI (Open Systems Interconnection) model" from
+"understood it" — and interviewers know that. Recall the division of labor from Parts 2 and 4:</p>
+
+<ul>
+  <li><strong>Layer 3 (Network — IP)</strong> moves packets <em>between machines across networks</em>. Its job
+  ends the moment the packet arrives at the destination host. The IP header contains source and destination
+  IP addresses — and <strong>no port numbers at all</strong>. Routers, which are Layer 3 devices, forward
+  billions of packets without ever knowing which application they belong to.</li>
+  <li><strong>Layer 4 (Transport — TCP/UDP)</strong> delivers data <em>between processes</em>. It picks up where
+  IP stops: at the front door of the host. The very first fields of both the TCP and UDP headers are source
+  port and destination port, because process-level addressing is precisely the transport layer's mandate.</li>
+</ul>
+
+<p>So "IP address + port" is not one address split in two for convenience — it is two addresses from two
+different layers, doing two different jobs: Layer 3 finds the <strong>host</strong>; Layer 4 demultiplexes
+<strong>within the host</strong>. This is also why a router can route your Spring-Boot-to-PostgreSQL traffic
+without understanding JDBC, and why NAT (Network Address Translation) devices — which <em>do</em> rewrite
+ports — are technically reaching up into Layer 4, a layer violation we flagged in Part 3.</p>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>Ports are older than TCP itself. The ARPANET's (Advanced Research Projects Agency Network) original
+  protocol, NCP (Network Control Program, 1970), already used numbered "sockets" to separate conversations on
+  one host. When TCP/IP replaced NCP in 1983 (Part 1's "flag day"), the idea carried over as the 16-bit port.
+  The early port assignments were literally a text file maintained by one man — Jon Postel, who for decades
+  edited the "Assigned Numbers" RFC (Request for Comments) by hand. If you wanted a port for your new protocol,
+  you emailed Jon. That informal list grew into today's registry run by IANA (Internet Assigned Numbers
+  Authority), the same body that coordinates IP address allocation. The historical fingerprints are still
+  visible: port 25 (SMTP — Simple Mail Transfer Protocol) was assigned in 1982, port 80 (HTTP — HyperText
+  Transfer Protocol) in 1991 when a CERN physicist named Tim Berners-Lee asked for one. PostgreSQL's 5432 and
+  Redis's 6379 are simply later entries in the very same ledger.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>An IP address finds the right computer; a port number finds the right program on that computer. It is an
+    apartment number written next to the building address. Without ports, one computer could only run one
+    network program at a time.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Ports are 16-bit fields in the TCP/UDP header (Layer 4), not the IP header (Layer 3). The kernel keeps a
+    mapping of (protocol, local IP, local port) → socket → process, and demultiplexes inbound segments by
+    destination port. Routers never look at ports (except NAT middleboxes, which rewrite them — a deliberate
+    layer violation).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"Which app gets the bytes" is resolved by a kernel lookup against bound sockets, with most-specific-wins
+    semantics: a socket bound to a specific IP beats one bound to the wildcard address, and an established
+    connection's full 4-tuple match beats any listener. That lookup order is the formal version of everything in
+    sections 3–6 — and modern kernels add programmable steps to it (e.g. <code>SO_REUSEPORT</code> hashing across
+    multiple listeners, eBPF socket-lookup hooks) that load balancers and service meshes (Parts 9, 13) exploit.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mechanics">2. The mechanics — a 16-bit number and its three kingdoms</h2>
+
+<p>A port is not an object, a wire, or a process — it is literally just a number: an unsigned 16-bit integer,
+so <strong>0 through 65,535</strong>. It exists in exactly one place: a field inside every TCP segment and UDP
+datagram. You met these headers in Part 4; zoom in on the first four bytes, which are the same for both
+protocols:</p>
+
+<div class="figure-title">Fig 5.2 — Where ports physically live: the first 4 bytes of every TCP/UDP header</div>
+<pre class="diagram">
+   the TCP segment your Spring Boot app sends to PostgreSQL:
+
+   byte 0          byte 2          byte 4 …
+   ┌───────────────┬───────────────┬──────────────────────────────┐
+   │  SOURCE PORT  │   DEST PORT   │  seq number, flags, window…  │
+   │    51234      │     5432      │  (the rest of Part 4's       │
+   │   (16 bits)   │   (16 bits)   │   TCP header)                │
+   ├───────────────┴───────────────┴──────────────────────────────┤
+   │  payload: the Postgres wire-protocol bytes (the SQL query)   │
+   └──────────────────────────────────────────────────────────────┘
+
+   the IP header wrapped around this (Part 2's encapsulation) has
+   src/dst IP addresses — and NO ports. ports are Layer 4 property.
+</pre>
+
+<p>Sixteen bits, 65,536 possible values per protocol per machine — and note <em>per protocol</em>: TCP port 53
+and UDP port 53 are different mailboxes that just share a number (DNS — Domain Name System — famously uses
+both, as we saw in Part 4). IANA divides the number line into three ranges, and each range has a personality
+you will recognize from daily work:</p>
+
+<table>
+  <tr><th>Range</th><th>Name</th><th>Who uses it</th><th>What you see in practice</th></tr>
+  <tr><td><strong>0 – 1023</strong></td><td>Well-known / system ports</td><td>Standardized server software: HTTP 80, HTTPS 443, SSH 22, SMTP 25, DNS 53</td><td><strong>Privileged:</strong> on Linux/macOS, binding requires root (or <code>CAP_NET_BIND_SERVICE</code>). This is THE reason your dev servers default to 8080/8000/3000 — they are the "no sudo required" echoes of 80.</td></tr>
+  <tr><td><strong>1024 – 49151</strong></td><td>Registered ports</td><td>Vendor/application defaults registered with IANA: PostgreSQL 5432, MySQL 3306, Redis 6379, Kafka 9092, MongoDB 27017</td><td>Anyone may bind them without privileges; registration just prevents two products claiming the same default. Your whole backend stack lives here.</td></tr>
+  <tr><td><strong>49152 – 65535</strong></td><td>Dynamic / ephemeral ports</td><td>Operating systems, automatically, for the <em>client</em> side of connections</td><td>You never configure these; the OS hands them out and reclaims them. Section 5 is all about them.</td></tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — your OS's actual ephemeral range</div>
+  <p>The IANA ephemeral range is a recommendation; operating systems choose their own. Linux famously uses a
+  wider one, and you can read it right now:</p>
+  <pre class="code">$ sysctl net.ipv4.ip_local_port_range
+net.ipv4.ip_local_port_range = 32768	60999
+
+$ cat /proc/sys/net/ipv4/ip_local_port_range
+32768	60999</pre>
+  <p>So a Linux box can source roughly <strong>28,232</strong> simultaneous outbound connections <em>to one
+  destination IP+port</em> before exhausting client ports — a real ceiling that bites connection-hungry services
+  (and one reason connection pools and keep-alive exist, Part 7). Windows since Vista uses 49152–65535, matching
+  IANA.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 Why 1024 is the magic boundary</div>
+  <p>The privileged/unprivileged split at 1024 dates to 1980s multi-user Unix machines. On a shared university
+  computer, dozens of users ran programs side by side. If any student could bind port 25, they could impersonate
+  the mail server and read everyone's email. The fix: ports below 1024 may only be bound by root, so a
+  connection to a low port "must" be talking to software the administrator blessed. The guarantee
+  means little on your single-user laptop, but the rule survives — which is why
+  <code>mvn spring-boot:run</code> with <code>server.port=80</code> throws an access error on Linux while 8080
+  works, and why production setups put a load balancer or reverse proxy (Parts 9–10) on 80/443 and run your app
+  on a high port behind it.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A port is <strong>just a 16-bit number in the Layer 4 header</strong> plus <strong>a kernel table entry</strong>
+  saying which process claimed it. Nothing physical, nothing global — the same port number exists independently
+  on every machine (and separately for TCP and UDP). "Port 8080" alone names nothing; <code>192.168.1.7:8080/TCP</code>
+  names exactly one mailbox in the universe.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sockets">3. Sockets and the 5-tuple — the great demolition</h2>
+
+<p>Now the centerpiece of this part — two definitions that engineers blur constantly:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — socket vs connection</div>
+  <p>A <strong>socket</strong> is one <em>endpoint</em> of communication: the combination
+  <strong>(IP address, port, protocol)</strong>, materialized inside a program as a file-descriptor-like handle
+  the OS gives you. A <strong>connection</strong> is a <em>pair</em> of endpoints in conversation, uniquely
+  identified by the <strong>5-tuple</strong>: <code>{protocol, source IP, source port, destination IP,
+  destination port}</code>. The socket is one phone; the connection is the call — and the call is identified by
+  <em>both</em> phone numbers, not one.</p>
+</div>
+
+<p>That last clause is the demolition charge. Place it carefully and ask the question every backend engineer
+eventually asks:</p>
+
+<p style="font-size:1.08rem"><strong>"My server listens on exactly one port — 443. How can it possibly hold
+10,000 simultaneous client connections? Don't they collide?"</strong></p>
+
+<p>They never collide, because the kernel does not identify a connection by the server port. It identifies it
+by the <em>entire 5-tuple</em>. The server-side IP and port may be identical across all 10,000 connections —
+as long as each client brings a different source IP or source port, every tuple is unique, and the kernel can
+demultiplex perfectly. Watch three clients hit the same API server:</p>
+
+<div class="figure-title">Fig 5.3 — Three clients, one server port, zero collisions</div>
+<pre class="diagram">
+   CLIENT A: laptop on home Wi-Fi              SERVER: api.example.com
+   192.168.1.7:51234 ───────────────────┐      203.0.113.10:443
+                                        │
+   CLIENT B: phone on 4G                ├────► ┌──────────────────────────┐
+   198.51.100.23:49801 ─────────────────┤      │  ONE listening port: 443 │
+                                        │      │                          │
+   CLIENT C: another app on the laptop  │      │  but THREE distinct      │
+   192.168.1.7:51235 ───────────────────┘      │  connections, told apart │
+                                               │  by the full 5-tuple     │
+                                               └──────────────────────────┘
+
+   note client C: SAME IP as client A — a different source port
+   (51235 vs 51234) is enough to make the tuple unique
+</pre>
+
+<p>The kernel's view of those three conversations — three rows, all sharing the right-hand side, each row
+unique as a whole:</p>
+
+<table>
+  <tr><th>#</th><th>Protocol</th><th>Source IP</th><th>Source port</th><th>Destination IP</th><th>Destination port</th><th>Unique?</th></tr>
+  <tr><td>A</td><td>TCP</td><td>192.168.1.7</td><td>51234</td><td>203.0.113.10</td><td>443</td><td>✅ yes</td></tr>
+  <tr><td>B</td><td>TCP</td><td>198.51.100.23</td><td>49801</td><td>203.0.113.10</td><td>443</td><td>✅ yes (different source IP)</td></tr>
+  <tr><td>C</td><td>TCP</td><td>192.168.1.7</td><td>51235</td><td>203.0.113.10</td><td>443</td><td>✅ yes (same IP as A, different source port)</td></tr>
+</table>
+
+<p>When a segment arrives at the server, the kernel reads all four address fields (the protocol is implicit in
+the header type), looks up the exact tuple, and hands the bytes to the right connection's buffer. The server
+port being "shared" costs nothing — a call-center's single public number, with every caller still
+distinguishable.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a letter thread needs BOTH full addresses</div>
+  <p>In the postal analogy: a socket is <strong>one apartment door</strong> (building + apartment number). A
+  connection is <strong>an ongoing correspondence between two doors</strong> — and the mailroom files it under
+  the <em>pair</em> of addresses. The customer-service desk in apartment 443 of the api.example.com building can
+  run ten thousand simultaneous correspondences, because each incoming envelope carries a distinct return
+  address (sender's building + sender's apartment). Two letters from the same building are still distinguishable
+  — they come from apartments 51234 and 51235. Nobody ever needed the customer-service desk to move to a new
+  apartment per customer; they just file by the full return address.</p>
+</div>
+
+<h3>3.1 The corollary: the 65,535 "limit" is not where you think it is</h3>
+
+<p>Once the 5-tuple clicks, a famous myth collapses. People reason: "ports go up to 65,535, therefore a server
+maxes out at 65,535 connections." Wrong, and now you can see why: the server port is <em>fixed</em> across all
+connections, so it consumes nothing per client. The variability lives on the <em>client</em> side of the tuple.
+The real arithmetic:</p>
+
+<ul>
+  <li><strong>Per client-source-IP, per destination:</strong> one client IP talking to one server IP:port can
+  open at most ~65k connections (one per source port; ~28k with default Linux ephemeral range) — because only
+  then does the tuple run out of room. This limit is about the <em>client</em>, not the server.</li>
+  <li><strong>For the server:</strong> with clients spread across the Internet, the tuple space is effectively
+  unbounded (every distinct client IP brings its own 65k source ports). Servers routinely hold
+  <strong>millions</strong> of concurrent connections.</li>
+  <li><strong>The real server limits</strong> are resources: every connection is a socket, every socket is a
+  <strong>file descriptor</strong> (check <code>ulimit -n</code>, often a meager 1024 by default), plus kernel
+  memory for buffers, plus whatever your application allocates per connection (a thread? 1 MB of stack? — this
+  is why thread-per-connection Tomcat and event-loop Netty/Node scale so differently, next section).</li>
+</ul>
+
+<pre class="code"># the actual ceilings on a Linux server, none of which is 65535:
+$ ulimit -n                          # file descriptors per process
+1024
+$ sysctl fs.file-max                 # file descriptors, system-wide
+fs.file-max = 9223372036854775807
+$ sysctl net.core.somaxconn          # accept-queue depth cap (Part 4!)
+net.core.somaxconn = 4096</pre>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A socket is one end of a conversation (an address + apartment number). A connection is identified by both
+    ends together. That is why one server port can talk to thousands of clients at once — each client comes from
+    a different address, so every conversation still looks different to the server.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Connection identity = 5-tuple {proto, src IP, src port, dst IP, dst port}. Inbound segments are matched
+    against established tuples first, then against listeners. The 65,535 ceiling applies per {src IP → dst
+    IP:port} pair (source-port exhaustion, a client-side problem); server capacity is bounded by file
+    descriptors, memory, and per-connection application cost instead.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Source-port exhaustion is a real production incident pattern — but it strikes <em>middleboxes and
+    clients</em>: a NAT gateway, an egress proxy, or a service making frantic short-lived connections to one
+    upstream (each connection then burning a tuple slot for 60 s of TIME_WAIT, Part 4). Mitigations: connection
+    pooling/keep-alive, widening <code>ip_local_port_range</code>, multiple source IPs, or
+    <code>SO_REUSEADDR</code>/timestamp-based TIME_WAIT reuse. Interviewers love "what actually limits concurrent
+    connections?" precisely because the naive 65k answer is one tuple-field wide of the truth.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="lifecycle">4. Two kinds of socket: the listener and the worker</h2>
+
+<p>Here is the subtlety hiding inside every server you have ever started: a server does not use <em>one</em>
+socket — it uses <strong>one listening socket plus one connection socket per client</strong>. The lifecycle is
+a fixed three-step ritual that every server on Earth performs, whether it is Tomcat, PostgreSQL, Redis, or
+a Kafka broker:</p>
+
+<ol>
+  <li><strong>bind</strong> — the process claims a local (IP, port): "I am taking 0.0.0.0:8080." The kernel
+  checks nobody else holds it (this is where <code>BindException</code> is born, section 6).</li>
+  <li><strong>listen</strong> — the socket is switched into passive mode: it will never send data; its only job
+  is to receive connection attempts (TCP SYN — synchronize — segments, Part 4) and queue completed handshakes
+  in the <strong>accept queue</strong> (the backlog you met in Part 4).</li>
+  <li><strong>accept</strong> — the application pulls one completed connection off the queue, and the kernel
+  hands it a <strong>brand-new socket</strong> dedicated to that one client. The listening socket is untouched
+  and keeps listening. Repeat forever.</li>
+</ol>
+
+<div class="figure-title">Fig 5.4 — bind → listen → accept: every accept() mints a new socket</div>
+<pre class="diagram">
+   SERVER PROCESS (Tomcat inside your Spring Boot app)
+
+   step 1+2: bind + listen                      kernel state
+   ┌─────────────────────────┐          ┌────────────────────────────┐
+   │ listening socket        │ ◄──────► │ LISTEN  0.0.0.0:8080       │
+   │ "0.0.0.0:8080"          │          │   accept queue: ░░░        │
+   └────────────┬────────────┘          └────────────────────────────┘
+                │
+                │ client 192.168.1.7:51234 completes handshake (Part 4)
+                ▼
+   step 3: accept() returns a NEW socket
+   ┌─────────────────────────┐          ┌────────────────────────────┐
+   │ connection socket #1    │ ◄──────► │ ESTAB 192.168.1.7:51234    │
+   │ talks ONLY to :51234    │          │       ◄──► 0.0.0.0:8080    │
+   └─────────────────────────┘          └────────────────────────────┘
+                │
+                │ another client connects… accept() again
+                ▼
+   ┌─────────────────────────┐
+   │ connection socket #2    │   …and the LISTENING socket still
+   │ talks ONLY to :49801    │   exists, still queueing newcomers.
+   └─────────────────────────┘   1 listener + N workers, all "port 8080"
+</pre>
+
+<p>This is why <code>ss</code> (socket statistics, the modern Linux tool) shows a server twice — once in
+<code>LISTEN</code> state and once per client in <code>ESTAB</code> — all on the same port. They are different sockets: new SYNs go to the
+listener; data for existing conversations goes straight to the right worker socket.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the restaurant host stand</div>
+  <p>The listening socket is the <strong>host stand at a restaurant's front door</strong>. The host never serves
+  food. When guests arrive (SYN), the host checks them in (handshake), and if no table is free yet they wait in
+  the entryway (the accept queue / backlog — and if the entryway fills, newcomers are turned away at the door,
+  which is exactly the connection-refused-under-load behavior from Part 4). <code>accept()</code> is the moment
+  a waiter seats the party at <strong>their own table</strong> (a new connection socket) and serves only them.
+  One host stand, many tables — one listener on 8080, many established sockets on 8080.</p>
+</div>
+
+<h3>4.1 How your frameworks actually do this</h3>
+
+<ul>
+  <li><strong>Tomcat (your Spring Boot default)</strong> — a dedicated <em>acceptor thread</em> sits in an
+  <code>accept()</code> loop on the listener; each new connection socket is handed to a <em>worker pool</em>
+  (default <code>server.tomcat.threads.max=200</code>). Two hundred workers ⇒ roughly two hundred requests in
+  flight; when a service "hangs under load," suspect an exhausted worker pool or a full accept queue, never a
+  "full port."</li>
+  <li><strong>Netty / Node.js / FastAPI(uvicorn)</strong> — the <em>event-loop</em> family. One or a few threads
+  watch <em>thousands</em> of connection sockets at once using readiness notification (<code>epoll</code> on
+  Linux): "wake me when any of these sockets has data." Many sockets, few threads — how one Node process on
+  port 3000 holds 50,000 idle WebSocket connections.</li>
+  <li><strong>PostgreSQL</strong> — old-school and proud: the postmaster listens on 5432 and <em>forks a whole
+  process</em> per connection. Each Postgres connection costs megabytes of server memory — the networking-level
+  reason connection pools (HikariCP in Spring Boot, default 10) exist.</li>
+</ul>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A server has one special "front door" socket that only accepts new visitors, and it creates a private
+    socket for each visitor it lets in. The front door never closes and never talks — it just keeps letting
+    people in while the private conversations happen at their own tables.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>bind() claims (IP, port); listen() makes it passive with a backlog (accept queue); accept() dequeues a
+    completed handshake and returns a new connected socket bound to the same local port but a distinct remote
+    tuple. Frameworks differ in what happens next: thread-per-connection (Tomcat workers, Postgres fork) vs
+    event loop multiplexing thousands of sockets per thread (Netty, Node, uvicorn).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The accept path itself becomes a bottleneck at extreme connection-churn rates: a single acceptor thread
+    serializes all accepts. <code>SO_REUSEPORT</code> lets N processes each bind their own listener on the same
+    port and lets the kernel hash incoming handshakes across them — used by NGINX, Envoy, and HAProxy for
+    multi-core accept scaling and for zero-downtime reloads (start new workers, drain old ones, same port the
+    whole time). Distinguish this sharply from <code>SO_REUSEADDR</code>, which merely permits rebinding a port
+    still occupied by TIME_WAIT ghosts (Part 4) — the thing that makes "restart the app immediately" work.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="client-vs-server">5. Client ports vs server ports — fixed meets ephemeral</h2>
+
+<p>Every connection has two ports, and they are chosen by completely different logic:</p>
+
+<ul>
+  <li><strong>The server port is fixed and famous.</strong> A server must be <em>discoverable</em>: clients have
+  to know where to knock before any communication exists. So servers bind well-known, configured, documented
+  ports — 443, 5432, 6379, 9092 — published in config files, connection strings, and IANA's registry. A server
+  on a random port is a doorbell with no label.</li>
+  <li><strong>The client port is ephemeral and anonymous.</strong> The client needs <em>some</em> port — the
+  reply has to land somewhere — but nobody needs to know it in advance; it travels inside every segment the
+  client sends (the source-port field), so the server just reads it. The OS auto-assigns one from the ephemeral
+  range at connect time and reclaims it after the connection dies.</li>
+</ul>
+
+<p>Follow one real outbound request end to end — your laptop's browser hitting your deployed API — and note
+who chose every number and when:</p>
+
+<div class="figure-title">Fig 5.5 — Anatomy of one outbound request: who picked each number</div>
+<pre class="diagram">
+   YOUR LAPTOP                                        THE SERVER
+   192.168.1.7                                        203.0.113.10
+
+   ① you (or DHCP, Part 3) got      ④ ops team configured 443 in
+      the laptop its IP                the load balancer, long ago
+   ② the OS picks a free            ③ DNS gave you the IP (Part 6
+      ephemeral port NOW:              tells that story)
+      51234  — at connect() time
+
+        192.168.1.7 : 51234  ────────────────►  203.0.113.10 : 443
+        └────┬─────┘ └──┬──┘                    └─────┬─────┘ └─┬─┘
+             │          │                             │         │
+        chosen by   chosen by OS                 chosen by   chosen by
+        the network at the moment                DNS lookup  CONVENTION +
+        (Part 3)    of connection                            server config
+
+   …and every reply simply swaps the pairs:
+        203.0.113.10 : 443  ────────────────►  192.168.1.7 : 51234
+</pre>
+
+<p>The reply direction is the elegant part: the server does zero bookkeeping to "find" the client — it copies
+the incoming segment's source IP:port into the outgoing segment's destination IP:port. The return address was
+on the envelope all along.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — watch your own ephemeral ports right now</div>
+  <pre class="code"># Linux/macOS: who is my browser talking to, from which source ports?
+$ ss -tn state established dport = :443 | head -5
+Recv-Q  Send-Q  Local Address:Port      Peer Address:Port
+0       0       192.168.1.7:51234       142.250.183.78:443
+0       0       192.168.1.7:51240       140.82.114.26:443
+0       0       192.168.1.7:51247       13.107.42.14:443
+
+# Windows (PowerShell):
+PS&gt; Get-NetTCPConnection -State Established -RemotePort 443 |
+      Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort -First 3</pre>
+  <p>Every row's local port is one your OS invented seconds-to-minutes ago. Refresh a page and run it again — new numbers.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the return address, and the concierge who rewrites it</div>
+  <p>The server's port is a <strong>storefront address printed on every ad</strong> — fixed, public, memorable.
+  Your ephemeral port is the <strong>return address scribbled on your envelope</strong> — it only needs to be
+  valid for the duration of the correspondence, and the post office (your OS) assigns you a temporary PO box
+  for it. Now the Part 3 callback: your home router's NAT is a <strong>concierge</strong> who, for mail leaving
+  the building, may cross out your return address and substitute the building's public one — including a
+  <em>different</em> apartment number it chose, noting the substitution in its ledger. So the server may see
+  <code>49.36.181.40:30412</code> when your laptop sent from <code>192.168.1.7:51234</code>. Replies hit the
+  concierge, the ledger translates back, and your laptop never knows.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Fixed server ports answer "where do I knock?" (<strong>discoverability</strong>); ephemeral client ports
+  answer "where do replies land?" (<strong>return addressing</strong>) — and the OS automates the second
+  completely. When you write <code>spring.data.redis.port=6379</code> you are configuring the <em>destination</em>;
+  the source port of every connection in your Redis pool was picked by the kernel.</p>
+  </div>
+
+<!-- ============================================================ -->
+<h2 id="binding">6. Binding addresses — the gotcha factory</h2>
+
+<p>When a server binds, it claims a port <em>on one or more IP addresses</em> — and that second half is the
+most underrated source of "it doesn't work" in backend development. Your machine has several IP addresses
+(Part 3): at minimum the loopback <code>127.0.0.1</code> and a LAN (Local Area Network) address like
+<code>192.168.1.7</code>; servers add more. Binding decides <strong>which doors the listener actually watches</strong>:</p>
+
+<table>
+  <tr><th>Bind address</th><th>Meaning</th><th>Who can connect</th><th>Typical use</th></tr>
+  <tr><td><code>127.0.0.1</code></td><td>Loopback interface only</td><td>Processes on this same machine, nobody else</td><td>Local-only dev tools, databases that must never face the network</td></tr>
+  <tr><td><code>0.0.0.0</code></td><td>"All IPv4 interfaces this machine has, now and later"</td><td>Anyone who can reach <em>any</em> of the machine's addresses (subject to firewalls, section 10)</td><td>Real servers; anything in a container (Part 12 will hammer this)</td></tr>
+  <tr><td><code>192.168.1.7</code> (a specific address)</td><td>Exactly that one interface</td><td>Only traffic arriving via that interface</td><td>Multi-homed servers: internal admin API on the internal NIC (network interface card) only</td></tr>
+</table>
+
+<div class="figure-title">Fig 5.6 — Same port, three bind choices, three different audiences</div>
+<pre class="diagram">
+   YOUR MACHINE — interfaces: lo (127.0.0.1)  and  eth0 (192.168.1.7)
+
+   bind 127.0.0.1:8080            bind 0.0.0.0:8080
+   ┌──────────────────────┐       ┌──────────────────────┐
+   │      ┌────────┐      │       │      ┌────────┐      │
+   │  ┌──►│ app    │      │       │  ┌──►│ app    │◄──┐  │
+   │  │   └────────┘      │       │  │   └────────┘   │  │
+   │  │ lo          eth0  │       │  │ lo        eth0 │  │
+   └──┼───────────────┼───┘       └──┼──────────────┼─┼──┘
+      │               │              │              │ │
+   curl localhost   teammate's    curl localhost    │ teammate's
+   :8080 ✅ works   laptop ──►X   :8080 ✅ works ───┘ laptop ──► ✅
+                    REFUSED                           works too
+</pre>
+
+<p>Where you set this in your stack — note every framework has the knob, with different defaults:</p>
+
+<pre class="code"># Spring Boot — application.properties (default address is 0.0.0.0)
+server.port=8080
+server.address=127.0.0.1        # lock to loopback for local-only tools
+
+# FastAPI — uvicorn binds 127.0.0.1 BY DEFAULT (opposite default!)
+$ uvicorn main:app --host 0.0.0.0 --port 8000
+
+# Node.js — host is the 2nd arg; default is all interfaces
+server.listen(3000, '127.0.0.1');
+
+# PostgreSQL — postgresql.conf (default: localhost only!)
+listen_addresses = '*'          # the #1 'cannot connect to postgres' fix
+port = 5432
+
+# Redis — redis.conf ships bound to loopback, on purpose
+bind 127.0.0.1 ::1</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the "works on my machine, dies in Docker" flag</div>
+  <p>Plant this flag for Part 12: when an app inside a container binds <code>127.0.0.1</code>, "this machine"
+  means <em>the container</em> — its private loopback, unreachable even from your own laptop one layer outside.
+  The app works when you run it directly (you and it share a loopback) and goes dark in Docker (you no longer
+  do). Uvicorn's loopback default makes FastAPI the classic victim:
+  <code>docker run -p 8000:8000 myapi</code> + connection reset = check the <code>--host</code>. The full
+  mechanics of Docker's network namespaces and port publishing arrive in Part 12; until then, the rule of thumb
+  is absolute: <strong>in a container, bind 0.0.0.0</strong>.</p>
+</div>
+
+<p>One more rule the kernel enforces at bind time: <strong>one port, one owner</strong> (per protocol, per
+address). If anything already holds 8080, your bind fails instantly — Java's <code>BindException</code>, C's
+<code>EADDRINUSE</code> ("error: address in use"). You have seen it; now debug it like a professional on both
+operating systems:</p>
+
+<pre class="code"># ── Windows ──  who owns port 8080?
+PS&gt; netstat -ano | findstr :8080
+  TCP    0.0.0.0:8080    0.0.0.0:0    LISTENING    18472
+PS&gt; tasklist /FI "PID eq 18472"
+  java.exe    18472    Console    1    812,344 K
+PS&gt; taskkill /PID 18472 /F        # forcibly free the port
+
+# ── Linux/macOS ──  same investigation
+$ ss -tlnp | grep :8080
+LISTEN 0 100  *:8080  *:*  users:(("java",pid=31337,fd=42))
+$ lsof -i :8080                   # alternative view (lists open files/sockets)
+COMMAND   PID  USER  FD   TYPE  NODE NAME
+java    31337  prem  42u  IPv6  TCP  *:8080 (LISTEN)
+$ kill 31337</pre>
+
+
+<!-- ============================================================ -->
+<h2 id="well-known">7. The well-known ports — a field guide</h2>
+
+<p>Port numbers are pure convention — but conventions this old become load-bearing. These nine you should know
+the way you know HTTP status codes: instantly, with a story attached.</p>
+
+<table>
+  <tr><th>Port</th><th>Protocol (expanded)</th><th>Transport</th><th>Who talks to it</th><th>Where you meet it</th></tr>
+  <tr><td><strong>80</strong></td><td>HTTP — HyperText Transfer Protocol</td><td>TCP</td><td>Browsers, curl, health checkers, load balancers</td><td>Every plain URL; redirects to 443</td></tr>
+  <tr><td><strong>443</strong></td><td>HTTPS — HTTP over TLS (Transport Layer Security)</td><td>TCP</td><td>Browsers, every API client library</td><td>Effectively the entire public web</td></tr>
+  <tr><td><strong>22</strong></td><td>SSH — Secure Shell</td><td>TCP</td><td>Terminals, scp/sftp, Git, Ansible, CI runners</td><td><code>ssh deploy@server</code>, <code>git push</code></td></tr>
+  <tr><td><strong>25</strong></td><td>SMTP — Simple Mail Transfer Protocol</td><td>TCP</td><td>Mail servers talking to each other</td><td>Email delivery; blocked on most home ISPs</td></tr>
+  <tr><td><strong>53</strong></td><td>DNS — Domain Name System</td><td>UDP <em>and</em> TCP</td><td>Every networked program, constantly</td><td>Every name lookup (Part 6 is all about it)</td></tr>
+  <tr><td><strong>3306</strong></td><td>MySQL wire protocol</td><td>TCP</td><td>JDBC and ORM (Object-Relational Mapper) clients, the mysql shell</td><td>The "other" relational default</td></tr>
+  <tr><td><strong>5432</strong></td><td>PostgreSQL wire protocol</td><td>TCP</td><td>JDBC/psycopg/HikariCP pools, psql</td><td>Your <code>spring.datasource.url</code></td></tr>
+  <tr><td><strong>6379</strong></td><td>RESP — REdis Serialization Protocol</td><td>TCP</td><td>Lettuce/Jedis clients, redis-cli</td><td>Your cache and session store</td></tr>
+  <tr><td><strong>9092</strong></td><td>Kafka wire protocol</td><td>TCP</td><td>Producers, consumers, Kafka Streams, brokers</td><td><code>bootstrap.servers</code></td></tr>
+</table>
+
+<p><strong>80 — HTTP.</strong> The port Tim Berners-Lee registered for the web. Today it is mostly a polite
+greeter: production sites keep 80 open only to answer <code>301 Moved Permanently → https://…</code>. When a
+load balancer health-checks your pod with a plain HTTP probe, this is the world it lives in. Part 7 dissects
+the protocol itself.</p>
+
+<p><strong>443 — HTTPS.</strong> Same HTTP conversation, wrapped in TLS encryption first. Hold this thought:
+<em>nothing about the number 443 encrypts anything</em> —
+encryption comes from the TLS handshake (Part 8); 443 is merely the agreed meeting point where clients expect
+TLS to be spoken. You could serve TLS on 8443 (Tomcat's classic alternative) or plaintext on 443; convention,
+not physics.</p>
+
+<p><strong>22 — SSH.</strong> Your remote terminal, but also more of your daily life than you think:
+<code>git push origin main</code> over an SSH remote is a TCP connection to port 22 of GitHub
+(<code>git@github.com</code>), authenticated by your SSH key. <code>scp</code>, <code>sftp</code>, Ansible,
+and most CI (Continuous Integration) deploy steps ride the same port.</p>
+
+<p><strong>25 — SMTP.</strong> The protocol mail <em>servers</em> use to hand mail to each other. Spammers
+abused home machines as mail cannons so thoroughly that most consumer ISPs (Internet Service Providers) block
+outbound port 25 entirely — which is why your Spring Boot app sends mail via an email API over 443, or via
+SMTP <em>submission</em> on port <strong>587</strong> (STARTTLS upgrade) or <strong>465</strong> (implicit TLS
+from the first byte) with authentication. Three ports, one protocol family: 25 = server↔server transfer,
+587/465 = authenticated client submission.</p>
+
+<p><strong>53 — DNS.</strong> The port your machine queries hundreds of times an hour to turn names into IP
+addresses. Part 4's UDP-vs-TCP discussion plays out here in miniature: small queries ride UDP (one packet out,
+one back, no handshake tax); large responses and zone transfers fall back to TCP on the very same port number.
+How those lookups actually resolve is the entire subject of Part 6 — next door.</p>
+
+<p><strong>3306 — MySQL</strong> and <strong>5432 — PostgreSQL.</strong> The two relational defaults. Nothing
+magical happened at registration time — these are just the numbers the projects asked IANA for (5432 was
+chosen at Berkeley partly because it was free and partly because it riffs on "PGSQL" phone-keypad lore). Every
+JDBC URL you have ever written embeds one of them, and section 8 dissects one character by character.</p>
+
+<p><strong>6379 — Redis.</strong> Famously derived from the keypad spelling of "MERZ" — an Italian-TV in-joke
+by Redis's author. The protocol behind it (RESP) is so simple it doubles as this course's first complete
+Layer 7 protocol demo, in section 8.</p>
+
+<p><strong>9092 — Kafka.</strong> The broker's client port — and uniquely among these nine, connecting to it is
+only step one of a two-step dance involving <em>metadata and redirection</em> that confuses every engineer's
+first Docker compose file. Section 8 gives it the full treatment.</p>
+
+<h3>7.1 The dev-life table — ports you type before lunch</h3>
+
+<table>
+  <tr><th>Port</th><th>What lives there</th><th>Why that number</th></tr>
+  <tr><td><strong>8080</strong></td><td>Tomcat → Spring Boot default; generic "HTTP, but unprivileged"</td><td>"80, shifted past 1024" — the classic alt-HTTP port</td></tr>
+  <tr><td><strong>3000</strong></td><td>React dev server (Create React App), Express's conventional default, Grafana</td><td>Node-ecosystem habit; low, memorable, unprivileged</td></tr>
+  <tr><td><strong>8000</strong></td><td>FastAPI/uvicorn, Django runserver, <code>python -m http.server</code></td><td>Python-ecosystem habit; same "echo of 80" logic</td></tr>
+  <tr><td><strong>5173</strong></td><td>Vite dev server</td><td>Leetspeak: 5173 ≈ "SITE"</td></tr>
+  <tr><td><strong>9090</strong></td><td>Prometheus</td><td>8080's metrics-flavored cousin</td></tr>
+  <tr><td><strong>5672 / 15672</strong></td><td>RabbitMQ: AMQP (Advanced Message Queuing Protocol) / management UI</td><td>One product, two listeners — data plane vs admin plane on separate ports</td></tr>
+  <tr><td><strong>27017</strong></td><td>MongoDB</td><td>Registered default of the wire protocol</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Defaults below 1024 belong to the standardized Internet (80, 443, 22, 25, 53) and need privileges to bind;
+  your backend stack's defaults (5432, 6379, 9092, 8080…) live in the registered range precisely so an ordinary
+  process can claim them. When two services on one box both want their default — two Spring Boot apps, two
+  Postgres instances — <em>someone</em> must move, because one port has one owner. Every
+  <code>docker run -p 5433:5432</code> you have ever typed is this sentence in command form.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="stack">8. Your stack, port by port — four walkthroughs</h2>
+
+<p>Theory done. Now run the four pillars of your actual stack through everything this part built: Spring Boot
+serving, PostgreSQL answering queries, Redis caching, Kafka streaming. For each: the config you write, and
+precisely what happens at startup.</p>
+
+<h3>8.1 Spring Boot — what <code>server.port=8080</code> actually does</h3>
+
+<pre class="code"># application.properties
+server.port=8080
+# (implicitly: server.address=0.0.0.0 — all interfaces)</pre>
+
+<p>At startup, Spring Boot's embedded Tomcat performs exactly the ritual from section 4: it asks the kernel to
+<strong>bind</strong> <code>0.0.0.0:8080</code>, switches the socket to <strong>listen</strong> with an accept
+queue (default backlog 100, knob: <code>server.tomcat.accept-count</code>), starts its acceptor thread, and
+logs the line you have read a thousand times without seeing it:</p>
+
+<pre class="code">2026-06-12T10:14:03.118  INFO 31337 --- [main] o.s.b.w.embedded.tomcat.TomcatWebServer :
+    Tomcat initialized with port(s): 8080 (http)
+2026-06-12T10:14:05.842  INFO 31337 --- [main] o.s.b.w.embedded.tomcat.TomcatWebServer :
+    Tomcat started on port(s): 8080 (http) with context path ''</pre>
+
+<p>From that moment, <code>ss -tlnp</code> shows a <code>LISTEN</code> row owned by your JVM (Java Virtual
+Machine), and every request from your React app mints a new connection socket served by a worker thread.
+Changing the port is one property (<code>server.port=8081</code>), a flag
+(<code>--server.port=8081</code>), or an environment variable (<code>SERVER_PORT=8081</code>) — and
+<code>server.port=0</code> asks the OS for any free port, which is exactly what
+<code>@SpringBootTest(webEnvironment = RANDOM_PORT)</code> uses so parallel CI test suites never collide.</p>
+
+<p>Now start a <em>second</em> instance while the first is running, and section 6's one-owner rule fires as the
+most readable error message Spring ever produced:</p>
+
+<pre class="code">***************************
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Web server failed to start. Port 8080 was already in use.
+
+Action:
+
+Identify and stop the process that's listening on port 8080 or configure this
+application to listen on another port.</pre>
+
+<p>So two instances need two ports (<code>8080</code>, <code>8081</code>) — and immediately a new problem is
+born: clients knew <em>one</em> address. Who tells them about the second? Spreading clients across many
+instances behind one stable address is precisely what a <strong>load balancer</strong> does, and that is
+Part 9's opening scene.</p>
+
+<h3>8.2 PostgreSQL — dissecting the JDBC URL you paste without reading</h3>
+
+<pre class="code"># application.properties
+spring.datasource.url=jdbc:postgresql://db.internal.example.com:5432/orders?sslmode=require
+spring.datasource.username=orders_svc
+spring.datasource.password=${DB_PASSWORD}</pre>
+
+<p>Read that URL the way the driver does, left to right:</p>
+
+<table>
+  <tr><th>Piece</th><th>What it tells the driver</th><th>Layer</th></tr>
+  <tr><td><code>jdbc:postgresql://</code></td><td>"Use the PostgreSQL driver and its wire protocol" — pure client-side dispatch, never sent on the network</td><td>app plumbing</td></tr>
+  <tr><td><code>db.internal.example.com</code></td><td>The host — a <em>name</em>, which must first become an IP address. How? That is Part 6's whole story (DNS)</td><td>L3 target via L7 lookup</td></tr>
+  <tr><td><code>:5432</code></td><td>The destination port — which mailbox on that host. Omittable only because the driver knows the registered default</td><td><strong>L4 — this part</strong></td></tr>
+  <tr><td><code>/orders</code></td><td>Which database <em>inside</em> Postgres — sent in the protocol's startup message, after the connection exists. Postgres demultiplexes this itself; the kernel is done by then</td><td>L7</td></tr>
+  <tr><td><code>?sslmode=require</code></td><td>Encrypt the connection with TLS before talking (Part 8 explains the handshake)</td><td>L5/6</td></tr>
+</table>
+
+<p>So one config line spans five layers of this course. When HikariCP (Spring Boot's default pool) opens its
+ten connections at startup, each one is: DNS lookup → TCP three-way handshake to <code>10.0.4.21:5432</code>
+(Part 4) → TLS negotiation → Postgres startup message ("user orders_svc, database orders"). The connection is
+<strong>plain TCP carrying the Postgres wire protocol</strong> — a Layer 7 protocol that is not HTTP, your
+day-job proof of Part 2's claim that the application layer is bigger than the web. And on the server side,
+the two knobs that section 6 predicted:</p>
+
+<pre class="code"># postgresql.conf — the two lines every "cannot connect" ticket comes down to
+listen_addresses = '*'        # default 'localhost' = loopback-only bind!
+port = 5432</pre>
+
+<h3>8.3 Redis — the simplest Layer 7 protocol you will ever read</h3>
+
+<pre class="code"># application.properties
+spring.data.redis.host=cache.internal.example.com
+spring.data.redis.port=6379</pre>
+
+<p>Same shape as Postgres: name + port → DNS → TCP handshake → speak the protocol. But Redis's protocol (RESP)
+is so human-readable that you can perform the whole stack by hand and watch every layer of Parts 1–5 cooperate
+in two lines:</p>
+
+<pre class="code">$ redis-cli -h cache.internal.example.com -p 6379 PING
+PONG
+
+$ redis-cli -h cache.internal.example.com -p 6379 SET user:42:session "abc123" EX 1800
+OK</pre>
+
+<p>That <code>PING</code>/<code>PONG</code> is the entire round trip: name resolved, TCP connection to port
+6379 established, four bytes of application protocol sent, four bytes returned. When your Spring Boot service
+feels slow and you suspect the cache, this one-liner is the fastest possible "is Redis up, reachable, and
+answering?" probe — it tests DNS, routing, the port, the bind address, the firewall, and the server process in
+a single command.</p>
+
+<h3>8.4 Kafka — bootstrap is only the introduction</h3>
+
+<p>Kafka looks like the others for exactly one config line — then takes a turn:</p>
+
+<pre class="code"># application.properties
+spring.kafka.bootstrap-servers=broker1.internal.example.com:9092</pre>
+
+<p>Here is the twist: <strong>bootstrap servers are not "the" connection — they are the introduction.</strong>
+A Kafka cluster has many brokers, and your topic's partitions are spread across them with one broker leading
+each partition. A producer must talk <em>directly</em> to each partition's leader. So the client's first
+connection to <code>broker1:9092</code> exists mainly to ask one question: <em>"who is in this cluster, and
+where do I reach them?"</em> The broker answers with cluster <strong>metadata</strong> — a list of every
+broker's advertised address — and the client then opens <strong>new, direct connections</strong> to whichever
+brokers it actually needs:</p>
+
+<div class="figure-title">Fig 5.7 — Kafka's two-step: bootstrap, then direct connections from metadata</div>
+<pre class="diagram">
+   YOUR SPRING BOOT PRODUCER                    KAFKA CLUSTER
+        │
+        │  ① TCP connect: broker1:9092          ┌─────────────────┐
+        ├──────────────────────────────────────►│ broker1  :9092  │
+        │  ② "metadata, please"                 └────────┬────────┘
+        │  ③ reply — the cluster roster:                 │
+        │     broker1.internal.example.com:9092          │ (what each broker
+        │     broker2.internal.example.com:9092          │  ADVERTISES is
+        │     broker3.internal.example.com:9092          │  configured, not
+        │ ◄───────────────────────────────────           │  discovered!)
+        │
+        │  ④ NEW direct connections to the partition leaders it needs:
+        ├──────────────────────────────────────► broker2:9092
+        └──────────────────────────────────────► broker3:9092
+
+   the addresses in step ③ come from each broker's advertised.listeners
+   config — the broker tells clients where it THINKS it is reachable
+</pre>
+
+<p>The addresses in step ③ are not detected — each broker simply repeats its configured
+<code>advertised.listeners</code> value. The broker is telling clients where it <em>believes</em> it can be
+reached, and if that belief is wrong, clients fail in a maddeningly specific way: bootstrap works, metadata
+arrives, and then the follow-up connections dial a wrong number.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the legendary Docker gotcha</div>
+  <p>You run a broker in a container with
+  <code>advertised.listeners=PLAINTEXT://localhost:9092</code> (or leave a default that resolves that way).
+  From your laptop: bootstrap to <code>localhost:9092</code> succeeds (the port is published), metadata returns
+  "reach me at <code>localhost:9092</code>" — and by luck that string is also correct <em>from the laptop's
+  perspective</em>, so everything works. Now your Spring Boot app runs in <em>its own container</em>: it
+  bootstraps fine via the compose-network name <code>kafka:9092</code>… receives metadata saying
+  "<code>localhost:9092</code>"… and obediently connects to <strong>its own container's loopback</strong>, where
+  no broker lives. Connection refused, forever, despite bootstrap visibly succeeding. The fix is conceptually
+  one line — advertise an address <em>clients</em> can resolve and reach
+  (<code>advertised.listeners=PLAINTEXT://kafka:9092</code>) — and the full multi-listener pattern
+  (INTERNAL/EXTERNAL listeners on separate ports) gets its complete resolution in Part 12, where Docker
+  networking finally makes the whole failure obvious.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the switchboard that reads you the staff directory</div>
+  <p>Bootstrapping Kafka is calling a company's <strong>front desk</strong>: one published number (the bootstrap
+  address), and the receptionist's only real job is reading you the directory — "Sales is extension 9092 at the
+  Pune building, Engineering is 9092 at the Mumbai building." From then on you dial people <strong>directly</strong>.
+  Now the gotcha in analogy form: the directory entries are <em>self-reported</em>. If the Mumbai engineer wrote
+  "reach me at: my desk" in the directory, that works for someone standing at his desk and strands everyone
+  else. <code>advertised.listeners</code> is the broker's directory entry — it must be written from the
+  <em>caller's</em> point of view, not the broker's.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="urls">9. URLs and implied ports — why you never type :443</h2>
+
+<p>You have never typed <code>https://github.com:443</code>, yet that connection went to port 443. Every URL
+(Uniform Resource Locator) scheme carries a <strong>default port</strong>, and clients silently fill it in when
+you omit one. That is the entire trick — the port is always there; conventions just let it go without saying:</p>
+
+<table>
+  <tr><th>Scheme</th><th>Default port</th><th>So this URL…</th><th>…actually means</th></tr>
+  <tr><td><code>http://</code></td><td>80</td><td><code>http://example.com/api</code></td><td><code>example.com:80</code></td></tr>
+  <tr><td><code>https://</code></td><td>443</td><td><code>https://api.github.com/repos</code></td><td><code>api.github.com:443</code></td></tr>
+  <tr><td><code>postgres://</code> (and <code>jdbc:postgresql://</code>)</td><td>5432</td><td><code>postgres://db.internal/orders</code></td><td><code>db.internal:5432</code></td></tr>
+  <tr><td><code>redis://</code></td><td>6379</td><td><code>redis://cache.internal</code></td><td><code>cache.internal:6379</code></td></tr>
+  <tr><td><code>ssh://</code> (and <code>git@host:</code> remotes)</td><td>22</td><td><code>git@github.com:you/repo.git</code></td><td><code>github.com:22</code></td></tr>
+</table>
+
+<p>Dev URLs spell the port out — <code>http://localhost:8080/actuator/health</code>,
+<code>http://localhost:3000</code>, <code>http://localhost:5173</code> — for exactly the reason section 2
+gave: your dev servers sit on unprivileged stand-ins for 80, so the default would point at the wrong door.
+Deploy behind a load balancer terminating 443 (Parts 8–9) and the explicit port disappears again — you moved to
+the address the scheme assumes. One more everyday sighting: a React dev setup proxying <code>/api</code> to
+<code>http://localhost:8080</code> is just two implied-vs-explicit URLs glued together — browser → :3000
+(explicit, unprivileged), proxy → :8080 (explicit), production → :443 (implied).</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>"No port in the URL" never means "no port in the connection." Every TCP connection in existence has both
+  ports filled in (the header fields are not optional, Fig 5.2). Schemes are a lookup table from protocol name
+  to default destination port — clients consult it; the network never sees the scheme at all.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="firewalls">10. Firewalls and what "opening a port" really means</h2>
+
+<p>Ops says "we opened port 8080 for you." Nothing was opened — no hatch, no valve. A <strong>firewall</strong>
+is a packet filter: it inspects each packet's addresses and ports against a rule list and either forwards or
+drops it. "Opening port 8080" means adding a rule: <em>allow inbound TCP segments whose destination port is
+8080 (in particular the SYN that starts a handshake — Part 4) to reach the host</em>. "Closed" means such
+packets are dropped (silence — the client times out) or rejected (an active refusal — the client gets
+"connection refused" instantly). The distinction matters when debugging: instant refusal usually means
+<em>reachable host, nobody listening (or a reject rule)</em>; a long hang usually means <em>a drop rule or no
+route</em>.</p>
+
+<div class="figure-title">Fig 5.8 — Two fences between the client and your listener</div>
+<pre class="diagram">
+   client                NETWORK FIREWALL              HOST           your app
+   anywhere              (cloud security group,        OS FIREWALL    LISTEN
+      │                   office perimeter)            (ufw/Windows)  0.0.0.0:8080
+      │                        │                            │              │
+      │  SYN dst :8080         │                            │              │
+      ├───────────────────────►│  rule: allow tcp/8080      │              │
+      │                        ├───────────────────────────►│ rule: allow  │
+      │                        │                            ├─────────────►│ ✅
+      │                        │                            │              │
+      │  SYN dst :5432         │                            │              │
+      ├───────────────────────►│  no rule for 5432          │              │
+      │                        │  ✖ DROPPED (client just    │              │
+      │                          waits… then times out)     │              │
+
+   a packet must pass EVERY fence; any one of them can be "the bug"
+</pre>
+
+<p>Note the layering of defenses — both fences exist independently:</p>
+
+<ul>
+  <li><strong>OS / host firewall</strong> — rules enforced by the machine itself: <code>ufw</code>/nftables on
+  Linux, Windows Defender Firewall (the dialog that pops up the first time <code>java.exe</code> listens on a
+  new port — that prompt is literally asking permission to add an allow rule).</li>
+  <li><strong>Network firewall</strong> — rules enforced <em>before</em> traffic reaches the machine: your office
+  perimeter, your home router (which, via NAT, drops unsolicited inbound by default — Part 3), and in the cloud,
+  <strong>AWS Security Groups</strong> (Amazon Web Services), which are per-instance allow lists. Part 11 builds
+  on this with the canonical production pattern: <em>allow TCP 8080 only from the load balancer's security
+  group, allow 5432 only from the app tier</em> — port rules as architecture.</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the gate guard with a visitor list</div>
+  <p>Back to the apartment building: the firewall is the <strong>compound's gate guard</strong>. "Opening
+  apartment 8080 to visitors" does not unlock the apartment — it adds a line to the guard's clipboard:
+  <em>visitors for apartment 8080 may enter the compound</em>. The apartment door still needs someone home (a
+  listening process) and the building mailroom (the OS) still routes by apartment number. Three independent
+  reasons a visitor fails: turned away at the gate (firewall), wrong building (IP/routing), nobody answers the
+  door (no listener). Debugging connectivity is figuring out <em>which</em> of the three happened — and the
+  toolbox below is how.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="toolbox">11. The inspection toolbox — see every claim in this part</h2>
+
+<p>Everything above is observable on the machine in front of you. Four moves cover 90% of port debugging.</p>
+
+<h3>11.1 Who is listening? — <code>ss -tlnp</code></h3>
+
+<pre class="code">$ ss -tlnp        # t=TCP  l=listening  n=numeric  p=process
+State    Recv-Q  Send-Q   Local Address:Port    Peer Address:Port   Process
+LISTEN   0       4096         127.0.0.1:6379         0.0.0.0:*      users:(("redis-server",pid=812,fd=6))
+LISTEN   0       244            0.0.0.0:5432         0.0.0.0:*      users:(("postgres",pid=655,fd=5))
+LISTEN   0       100                  *:8080               *:*      users:(("java",pid=31337,fd=42))
+LISTEN   0       50       [::ffff:0.0.0.0]:9092           *:*      users:(("java",pid=2204,fd=120))</pre>
+
+<p>Read each line with this part's vocabulary: Redis bound to <strong>loopback only</strong> (127.0.0.1:6379 —
+unreachable from other machines, by design); Postgres on <strong>all interfaces</strong> (0.0.0.0:5432 —
+someone set <code>listen_addresses='*'</code>); your Spring Boot JVM on 8080 with its backlog of 100
+(<code>Send-Q</code> on a LISTEN row shows the accept-queue limit — Part 4's queue, measurable!); a second JVM
+that is the Kafka broker on 9092 — two javas, told apart by PID (process identifier). (On Windows:
+<code>netstat -ano</code> as in section 6.)</p>
+
+<h3>11.2 Who is connected? — counting established tuples</h3>
+
+<pre class="code">$ ss -tan state established | head -6
+Recv-Q  Send-Q     Local Address:Port      Peer Address:Port
+0       0             10.0.4.7:8080        10.0.9.33:49812
+0       0             10.0.4.7:8080        10.0.9.33:49814
+0       0             10.0.4.7:8080        10.0.2.18:51990
+0       0             10.0.4.7:46122       10.0.4.21:5432
+0       0             10.0.4.7:46130       10.0.4.21:5432
+
+# how many connections per peer? (capacity checks, pool-leak hunts)
+$ ss -tan state established | awk 'NR&gt;1 {print $4}' | sort | uniq -c | sort -rn
+     10   10.0.4.21:5432      ◄── HikariCP's 10 pooled connections, visible!
+      3   10.0.9.33:6379</pre>
+
+<p>The first listing is Fig 5.3 made flesh: inbound rows share local port 8080 and differ by peer tuple;
+outbound rows to Postgres show <em>ephemeral local ports</em> (46122, 46130…) and the fixed remote 5432 —
+your app being server and client simultaneously, exactly as Part 1 promised. The count-by-peer one-liner is
+how you catch a leaking connection pool before the database does.</p>
+
+<h3>11.3 Is the service answering? — speak its protocol</h3>
+
+<pre class="code">$ curl http://localhost:8080/actuator/health
+{"status":"UP"}</pre>
+
+<p>This proves the whole ladder at once: listener up, bind reachable from where you stand, firewall passing,
+application thread pool alive, app healthy. When it fails, you step <em>down</em> the ladder — which brings us
+to the most underrated debugging move in backend engineering:</p>
+
+<h3>11.4 Is the port even open? — the connectivity ladder, step one</h3>
+
+<pre class="code"># Linux/macOS — netcat: just attempt a TCP handshake, nothing more
+$ nc -zv db.internal.example.com 5432
+Connection to db.internal.example.com (10.0.4.21) 5432 port [tcp/postgresql] succeeded!
+
+# Windows — PowerShell's built-in equivalent
+PS&gt; Test-NetConnection db.internal.example.com -Port 5432
+ComputerName     : db.internal.example.com
+RemoteAddress    : 10.0.4.21
+RemotePort       : 5432
+TcpTestSucceeded : True</pre>
+
+<p><strong>Before</strong> you blame Hibernate, the driver, credentials, or TLS — ask the only question Layer 4
+can answer: <em>does a bare TCP handshake to that host:port succeed?</em> If this fails, no amount of
+application configuration will help (it is DNS, routing, the bind address, the firewall, or no listener). If it
+succeeds, the problem lives above Layer 4. One command bisects the entire stack.</p>
+
+<table>
+  <tr><th>Question</th><th>Linux/macOS</th><th>Windows</th></tr>
+  <tr><td>What is listening, owned by whom?</td><td><code>ss -tlnp</code>, <code>lsof -i :8080</code></td><td><code>netstat -ano</code> + <code>tasklist /FI "PID eq …"</code></td></tr>
+  <tr><td>Who is connected right now?</td><td><code>ss -tan state established</code></td><td><code>Get-NetTCPConnection -State Established</code></td></tr>
+  <tr><td>Is host:port reachable at all?</td><td><code>nc -zv host 5432</code></td><td><code>Test-NetConnection host -Port 5432</code></td></tr>
+  <tr><td>Is the app actually healthy?</td><td colspan="2"><code>curl http://localhost:8080/actuator/health</code> · <code>redis-cli PING</code> · <code>psql -h host -p 5432</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="interview">12. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>A server listens on a single port. How can it serve thousands of simultaneous connections?</summary>
+    <p>Because connections are identified by the full 5-tuple {protocol, source IP, source port, destination IP,
+    destination port}, not by the server port alone. Each client arrives from a distinct source IP:port, so
+    every tuple is unique even though the destination side is identical across all of them; the kernel
+    demultiplexes inbound segments by exact tuple match. Strong answers add the mechanism: the listening socket
+    accepts handshakes, and each <code>accept()</code> returns a new connected socket sharing the same local
+    port — so it is one listener plus N connection sockets, bounded by file descriptors and memory, not by port
+    arithmetic.</p>
+  </details>
+
+  <details><summary>Why can't two processes bind the same port? Are there exceptions?</summary>
+    <p>Binding registers (protocol, local address, port) exclusively in the kernel, because inbound demultiplexing
+    needs a single unambiguous owner — two owners of TCP 0.0.0.0:8080 would make "who gets this SYN?"
+    undefined. Hence <code>EADDRINUSE</code>/<code>BindException</code>. Nuances that mark a senior answer:
+    TCP 8080 and UDP 8080 coexist (different protocols); <code>SO_REUSEADDR</code> permits rebinding over
+    TIME_WAIT remnants;
+    and <code>SO_REUSEPORT</code> deliberately allows multiple sockets on the identical address:port, with the
+    kernel load-balancing incoming connections across them — used by NGINX/Envoy for multi-core accept scaling
+    and zero-downtime reloads.</p>
+  </details>
+
+  <details><summary>What is an ephemeral port, who assigns it, and when?</summary>
+    <p>The temporary source port the operating system auto-assigns to the client side of a connection at
+    <code>connect()</code> time, from a configured range (IANA suggests 49152–65535; Linux defaults to
+    32768–60999 via <code>net.ipv4.ip_local_port_range</code>). It exists so replies have a return address; it
+    needs no pre-agreement because it travels in every segment's source-port field. It is released when the
+    connection closes (after TIME_WAIT). Consequence worth volunteering: ~28–65k concurrent
+    connections per client IP to one destination — source-port exhaustion.</p>
+  </details>
+
+  <details><summary>What is the difference between binding to 0.0.0.0 and 127.0.0.1?</summary>
+    <p>The bind address selects which interfaces the listener accepts traffic from. <code>127.0.0.1</code> binds
+    only the loopback — reachable solely by processes on the same host (or same container; in Docker "the host"
+    means the container's own namespace). <code>0.0.0.0</code> is the wildcard: all current and future IPv4
+    interfaces, so anyone who can route to any of the machine's addresses can connect, subject to firewalls.
+    Production framing: loopback binds are blast-radius reduction for local-only services; wildcard binds are
+    for anything that must serve others — and inside containers you essentially always bind 0.0.0.0, because the
+    container's loopback is invisible from outside.</p>
+  </details>
+
+  <details><summary>Walk me through exactly what happens when Spring Boot starts on port 8080.</summary>
+    <p>Embedded Tomcat asks the kernel to bind TCP 0.0.0.0:8080 (configurable via <code>server.port</code> /
+    <code>server.address</code>); if another process owns it, startup aborts with "Port 8080 was already in
+    use." On success it calls listen with a backlog (<code>server.tomcat.accept-count</code>, default 100),
+    creating the accept queue, and logs "Tomcat started on port(s): 8080." An acceptor thread loops on
+    <code>accept()</code>; each completed three-way handshake yields a new connection socket, which is handed to
+    a worker thread from the pool (default max 200) that parses HTTP and invokes your controllers. So at steady
+    state: one LISTEN socket plus one ESTABLISHED socket per in-flight client, all showing port 8080 in
+    <code>ss</code>.</p>
+  </details>
+
+  <details><summary>Why does Kafka need advertised listeners? Why isn't bootstrap.servers enough?</summary>
+    <p>Because the bootstrap connection is only used to fetch cluster metadata; real traffic flows over direct
+    connections from the client to each relevant broker (each partition has a leader broker the client must
+    reach). The metadata contains addresses the brokers <em>advertise</em> — the configured
+    <code>advertised.listeners</code> — not addresses clients discovered. If a broker advertises an address
+    unresolvable or unreachable from the client's network position (the classic: <code>localhost:9092</code>
+    from inside Docker), bootstrap succeeds yet all subsequent connections fail. It also explains why a plain
+    TCP load balancer in front of Kafka brokers breaks the protocol: clients need to reach specific brokers,
+    not "any broker."</p>
+  </details>
+
+  <details><summary>Socket vs port vs connection — define all three precisely.</summary>
+    <p>A port is a 16-bit number in the TCP/UDP header identifying a program-level mailbox on a host. A socket
+    is one communication endpoint — (IP, port, protocol) — materialized as a file descriptor a process reads
+    and writes. A connection is a pair of endpoints in conversation, identified by the 5-tuple; on a server it
+    corresponds to a connected socket distinct from the listening socket. The hierarchy: ports are names,
+    sockets are objects holding those names, connections are relationships between two sockets.</p>
+  </details>
+
+  <details><summary>Is the number of connections a server can handle limited to 65,535?</summary>
+    <p>No. 65,535 is the port-number space, and the server's port is fixed across all its connections — it
+    consumes no per-client resource. The tuple space allows ~65k connections per <em>client source IP</em> to
+    one destination, so the aggregate across many clients is effectively unbounded. Real server limits: file
+    descriptors (<code>ulimit -n</code>), kernel and application memory per connection, accept-queue depth, and
+    the concurrency model (thread-per-connection vs event loop). Production systems hold millions of concurrent
+    connections per machine.</p>
+  </details>
+
+  <details><summary>What does "opening port 8080 on the firewall" technically do?</summary>
+    <p>It adds a filter rule permitting inbound packets with destination TCP port 8080 — crucially the SYN
+    segments that initiate handshakes — to pass; without it they are dropped (timeout) or rejected (instant
+    refusal). It does not start a listener or change the host: a packet must still pass the host firewall and
+    find a bound socket. In AWS terms it is a security-group ingress rule — production rules also scope the
+    source (allow 8080 only from the load balancer's security group).</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">13. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "Each new client connection consumes another port on the server."</strong><br>
+  ✅ All connections to a server share its one listening port; uniqueness comes from the client side of the
+  5-tuple. A new connection costs the server a socket (a file descriptor + memory), never a port number. The
+  ephemeral-port meter runs on the <em>client</em>.</p>
+
+  <p><strong>❌ "Ports are physical things on the machine."</strong><br>
+  ✅ The RJ45 jack on a switch is a physical port; a TCP port is not. It is a 16-bit field in a header plus a
+  kernel table entry mapping the number to a process. Nothing exists at "port 8080" until a process binds it,
+  and the same number exists independently on every machine, separately for TCP and UDP.</p>
+
+  <p><strong>❌ "Port 443 traffic is encrypted because it's port 443."</strong><br>
+  ✅ Numbers encrypt nothing. Encryption comes from TLS, negotiated by the endpoints (Part 8); 443 is merely the
+  conventional meeting place where clients <em>expect</em> TLS. You can serve TLS on 8443 or plaintext on 443.
+  Likewise an "open port 22" is only as secure as the SSH daemon behind it.</p>
+
+  <p><strong>❌ "A server can have at most 65,535 connections."</strong><br>
+  ✅ That number is the port space, and the server's port is shared by all connections. The ~65k ceiling applies
+  per client-source-IP to one destination (source-port exhaustion). Server capacity is governed by file
+  descriptors, memory, and the concurrency model — millions of concurrent connections per box is routine.</p>
+
+  <p><strong>❌ "We bound it to 127.0.0.1, so it's secured."</strong><br>
+  ✅ Loopback binding is <em>reachability</em> control, not authentication. Every process and user on that host
+  (and anything sharing the network namespace) connects freely, no password asked. It shrinks exposure — good!
+  — but a Redis with no AUTH on 127.0.0.1 is still wide open to everything local. Security needs authentication,
+  authorization, and encryption on top.</p>
+
+  <p><strong>❌ "EXPOSE 8080 in the Dockerfile opens the port."</strong><br>
+  ✅ <code>EXPOSE</code> is documentation — metadata declaring intent. It neither binds, publishes, nor opens
+  anything. Reaching a container from outside requires publishing (<code>-p 8080:8080</code>) <em>and</em> the
+  app binding 0.0.0.0 inside. Part 12 untangles the full chain (namespace → publish → host firewall).</p>
+
+  <p><strong>❌ "IP routes packets to the right application."</strong><br>
+  ✅ IP's contract ends at the host (Layer 3); it carries no port fields at all. Application delivery is the
+  transport layer demultiplexing by port <em>inside</em> the host (Layer 4). That split is why routers never
+  know which app traffic belongs to — and why NAT, which rewrites ports, is a celebrated layer violation.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p><strong>Looking back:</strong> Part 4 gave you TCP's reliable byte pipe between two machines; this part
+  finished the delivery — ports demultiplex that pipe to the right <em>process</em>, sockets are the endpoints
+  your code holds, and the 5-tuple is why one port serves thousands of clients. You can now read every field of
+  <code>192.168.1.7:51234 → 203.0.113.10:443</code> and say who chose it and when. <strong>Looking forward:</strong>
+  one mystery remains in every connection string you have seen today: <code>db.internal.example.com</code>,
+  <code>cache.internal</code>, <code>broker1:9092</code> — <em>names</em>, not addresses. Before any handshake
+  in this part could begin, something translated those names into IPs, billions of times a day, in
+  milliseconds, without a central server melting down. That something is the Internet's phone book — and how
+  names become IPs is <a href="part06.html"><strong>Part 6 — DNS</strong></a>.</p>
+</div>
+
+
+
+<div class="page-nav">
+  <a href="part04.html"><span class="dir">← Previous</span><span class="t">Part 4: TCP &amp; UDP</span></a>
+  <a href="part06.html"><span class="dir">Next →</span><span class="t">Part 6: DNS</span></a>
+</div>
+
+</main>
+</body>
+</html>

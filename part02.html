@@ -1,0 +1,1837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 2: The OSI Model — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html" class="active"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 2 of 15</p>
+<h1>The OSI Model — The Master Map of Networking</h1>
+<p class="lede">Part 1 left you with ten problems and a pile of technologies that solve them. This part gives you
+the map that organizes all of it: seven layers, each with one job, each consuming the layer below and serving
+the layer above. Learn this model properly — not as exam trivia, but as a working tool — and every protocol,
+every device, and every 2 a.m. production incident acquires a precise address. "Is it the code or the network?"
+stops being a coin flip and becomes a checklist.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why-osi">Why the OSI model was created</a></li>
+    <li><a href="#why-layers">Why layering works</a></li>
+    <li><a href="#osi-vs-tcpip">OSI vs TCP/IP</a></li>
+    <li><a href="#layer1">Layer 1 — Physical</a></li>
+    <li><a href="#layer2">Layer 2 — Data Link</a></li>
+    <li><a href="#layer3">Layer 3 — Network</a></li>
+    <li><a href="#layer4">Layer 4 — Transport</a></li>
+    <li><a href="#layer5">Layer 5 — Session</a></li>
+    <li><a href="#layer6">Layer 6 — Presentation</a></li>
+    <li><a href="#layer7">Layer 7 — Application</a></li>
+    <li><a href="#devices">Devices, layer by layer</a></li>
+    <li><a href="#encapsulation">Encapsulation</a></li>
+    <li><a href="#decapsulation">Decapsulation</a></li>
+    <li><a href="#journey">The packet journey</a></li>
+    <li><a href="#worked-example">A worked packet example</a></li>
+    <li><a href="#wireshark">Seeing the layers in Wireshark</a></li>
+    <li><a href="#debugging">Debugging by walking the stack</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-osi">1. Why the OSI model was created</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>In the late 1970s, networking worked — but only inside one vendor's walled garden. IBM (International
+  Business Machines) sold <strong>SNA</strong> (Systems Network Architecture, 1974): a complete, proprietary
+  stack — its own cables, its own addressing, its own error handling, its own application protocols. DEC
+  (Digital Equipment Corporation) sold <strong>DECnet</strong>. Xerox had XNS (Xerox Network Systems); Honeywell
+  and Burroughs had their own. Each stack was internally coherent and <em>totally incompatible</em> with every
+  other. If your company bought IBM mainframes and then acquired a company running DEC minicomputers, the two
+  fleets could not exchange a single byte without expensive, custom, fragile gateway hardware that translated
+  one vendor's entire protocol universe into another's. Networking was not a market; it was a set of
+  mutually unintelligible empires. Buying a vendor's computer meant marrying their network forever —
+  <strong>vendor lock-in</strong> enforced by physics and protocol.</p>
+</div>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>The <strong>ISO</strong> (International Organization for Standardization) started work in 1977 — joined by
+  the international telecom standards body CCITT, today's ITU — on a vendor-neutral blueprint: the
+  <strong>OSI</strong> (Open Systems Interconnection) reference model, published as the standard ISO 7498 in
+  1984. "Open" was the political payload of the name: any vendor's "open system" should interconnect with any
+  other's. The core move was to <strong>divide network communication into seven layers</strong>, each with a
+  defined job and a defined interface to its neighbors, so that vendors could compete <em>within</em> a layer
+  while interoperating <em>across</em> layers.</p>
+  <p>What would happen without layered standards? Recall Part 1's full-mesh cable math: n machines need
+  n×(n−1)/2 cables. The same explosion applies to protocol translation — every pair of incompatible vendor
+  stacks needs its own custom gateway. Ten vendor stacks means 45 distinct translators, each one a product,
+  each one a failure point, each rebuilt whenever any vendor changes anything. Layering replaces "translate
+  between every pair of universes" with "everyone implements the same per-layer contracts once." It is the
+  difference between hiring interpreters for every pair of languages at the UN and agreeing on a shared
+  working language.</p>
+</div>
+
+<p>Here is the model itself. Read it bottom-up — that is the order in which raw signals become meaning, and the
+order this chapter walks through it:</p>
+
+<div class="figure-title">Fig 2.1 — The OSI reference model: seven layers, one job each</div>
+<pre class="diagram">
+  ┌───┬──────────────┬─────────────────────────────────────┬──────────────┐
+  │ # │ LAYER        │ ONE-LINE JOB                        │ DATA UNIT    │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 7 │ Application  │ protocols with app semantics        │ data/message │
+  │   │              │ (HTTP, DNS, SMTP, gRPC…)            │              │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 6 │ Presentation │ representation: encoding, formats,  │ data         │
+  │   │              │ compression, (encryption)           │              │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 5 │ Session      │ dialogs: open, checkpoint, resume,  │ data         │
+  │   │              │ close long conversations            │              │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 4 │ Transport    │ process-to-process delivery;        │ segment /    │
+  │   │              │ reliability, ordering, ports        │ datagram     │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 3 │ Network      │ host-to-host delivery ACROSS        │ packet       │
+  │   │              │ networks; IP addresses, routing     │              │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 2 │ Data Link    │ neighbor-to-neighbor delivery on    │ frame        │
+  │   │              │ ONE network; MAC addresses, frames  │              │
+  ├───┼──────────────┼─────────────────────────────────────┼──────────────┤
+  │ 1 │ Physical     │ move raw bits as signals over a     │ bit / symbol │
+  │   │              │ medium: voltage, light, radio       │              │
+  └───┴──────────────┴─────────────────────────────────────┴──────────────┘
+       upper layers (5–7): about MEANING        ── the "what"
+       lower layers (1–4): about DELIVERY       ── the "how it gets there"
+</pre>
+
+<p>One historical twist you should know, because interviewers love it: <strong>ISO did not just write the
+reference model — it also built actual OSI protocols</strong> (X.400 for email, FTAM for file transfer, CLNP as
+an IP rival). Those protocols <em>lost</em>. They arrived late, designed by committee, complex to implement and
+expensive to license — while TCP/IP (Transmission Control Protocol / Internet Protocol, the family from Part 1's
+ARPANET story) was already running, free, in BSD Unix, with working code anyone could copy. The Internet's
+culture of "rough consensus and running code" beat the committee. But the seven-layer <em>vocabulary</em> was so
+useful that it outlived its own protocols. We will make this precise in section 3.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The OSI model is a <strong>reference model</strong> — a way to name and organize what networks do — not a
+  description of the software actually running on your machines (that is TCP/IP). You are learning it because it
+  is the industry's shared coordinate system: "that's an L2 problem," "we need an L7 load balancer," "the L4
+  handshake succeeds but L7 times out." Every one of those sentences will be precise to you by the end of this
+  part.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-layers">2. Why layering works — separation of concerns, in your bones</h2>
+
+<p>Why did "divide it into layers" win so decisively that even TCP/IP — OSI's killer — is itself layered? Because
+layering buys four things that any large system needs, and you already rely on all four every day in your own
+code:</p>
+
+<ol>
+  <li><strong>Separation of concerns.</strong> Each layer solves exactly one of Part 1's ten problems and ignores
+  the rest. The layer that moves bits over copper does not know what an address is. The layer that routes between
+  networks does not know what a retransmission is. The layer that formats an HTTP request does not know whether
+  the bits will travel by fiber or by Wi-Fi. Small, single-purpose contracts are designable, testable, and
+  replaceable; one giant "do networking" blob is none of those.</li>
+  <li><strong>Substitutability.</strong> Because each layer only consumes the <em>service</em> of the layer
+  below — never its implementation — you can swap implementations freely. Walk from your office desk (Ethernet)
+  to a meeting room (Wi-Fi): Layers 1–2 are completely replaced, live, and your Spring Boot session, your TCP
+  connections, your HTTPS — everything above — neither knows nor cares.</li>
+  <li><strong>Independent evolution.</strong> Ethernet went from 10 megabits per second in 1983 to 800 gigabits
+  per second today without HTTP changing one character. HTTP went from version 1.0 to 3 — even swapping its
+  transport underneath (Part 7) — without Ethernet changing. Neither asked the other's permission. Unlayered
+  systems can only evolve by total replacement.</li>
+  <li><strong>Interoperability.</strong> A Samsung phone, on a Cisco Wi-Fi access point, through a Juniper
+  router, over Tata's fiber, to an AWS (Amazon Web Services) data center running your FastAPI app — five vendors,
+  zero coordination meetings. Each implemented public per-layer contracts. This is the anti-SNA world the OSI
+  effort was created to produce.</li>
+</ol>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — you already build layered systems: controller → service → repository</div>
+  <p>Look at any Spring Boot codebase. The <code>OrderController</code> calls <code>OrderService</code>, which
+  calls <code>OrderRepository</code>. The controller knows <em>nothing</em> about SQL; it consumes the service's
+  interface. The service knows nothing about HTTP; it consumes the repository's interface. Swap the repository
+  from PostgreSQL to MongoDB and the controller does not change. Swap REST for gRPC at the controller and the
+  repository does not change. Each layer: (a) has one concern, (b) offers a clean interface upward, (c) hides its
+  implementation, (d) can be replaced independently. <strong>The OSI model is exactly this discipline applied to
+  communication</strong> — HTTP is a "controller" that consumes TCP's "service interface" (a reliable byte
+  stream) without knowing whether the bytes rode copper, glass, or radio. When you respect layer boundaries in
+  code, you are reinventing 1977.</p>
+</div>
+
+<p>One more idea completes the picture, and it is subtle enough to deserve its own diagram. Each layer is
+written <em>as if it were talking directly to the same layer on the other machine</em>. HTTP on your laptop is
+logically conversing with HTTP on the server; TCP on your laptop converses with TCP on the server. But no wire
+connects them at those layers — the only real movement is <strong>down</strong> the stack on the sender,
+<strong>across</strong> at Layer 1, and <strong>up</strong> the stack on the receiver:</p>
+
+<div class="figure-title">Fig 2.2 — Peers talk horizontally (logically); data moves vertically (actually)</div>
+<pre class="diagram">
+        YOUR LAPTOP                                    THE SERVER
+
+  ┌──────────────────┐    "GET /api/orders"      ┌──────────────────┐
+  │ L7  HTTP         │◄─────────────────────────►│ L7  HTTP         │
+  ├──────────────────┤   logical conversation    ├──────────────────┤
+  │ L4  TCP          │◄─────────────────────────►│ L4  TCP          │
+  ├──────────────────┤   "seq 184101, ack…"      ├──────────────────┤
+  │ L3  IP           │◄─────────────────────────►│ L3  IP           │
+  ├──────────────────┤   "to 203.0.113.50"       ├──────────────────┤
+  │ L2  Ethernet     │◄────────────────────────► │ L2  Ethernet     │
+  ├──────────────────┤   (rewritten every hop)   ├──────────────────┤
+  │ L1  signals      │                           │ L1  signals      │
+  └────────┬─────────┘                           └────────▲─────────┘
+           │                                              │
+           └───────────► the only REAL path ──────────────┘
+                    down the stack, across the wire(s),
+                          up the other stack
+</pre>
+
+<p>Each horizontal conversation has its own language — its <strong>protocol</strong> — and its own vocabulary
+written into a <strong>header</strong> (section 12). The genius of the scheme: every layer believes it has a
+direct line to its peer, and every layer below conspires to maintain that illusion. Your code believes it sent
+"a JSON response to a client"; in reality it handed bytes downward and three other layers did the traveling.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Networking is split into seven layers, like departments in a company. Each department does one job, uses
+    the department below it, and serves the one above it. Because the jobs are separate, you can replace one
+    department (switch Wi-Fi for a cable) without retraining the others. Matching departments on the two
+    computers "talk" to each other in their own language.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Each layer N offers a <em>service</em> to layer N+1 and consumes the service of layer N−1; peers at the
+    same layer on different hosts communicate via a protocol whose state travels in that layer's header. The
+    interfaces between layers are the substitution points: any L1/L2 pair that delivers frames satisfies IP; any
+    transport that delivers a byte stream satisfies HTTP. This is interface-based design — Spring's
+    controller/service/repository discipline applied to communication.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Layering has costs, and modern networking is full of deliberate layer <em>violations</em> made for
+    performance or pragmatism: TCP checksums cover parts of the IP header (a "layering violation" baked into the
+    standard); NAT (Network Address Translation) devices rewrite L3/L4 fields mid-path; load balancers and
+    firewalls ("middleboxes") inspect layers they architecturally shouldn't; QUIC collapses transport, security,
+    and parts of the session story into one protocol over UDP (User Datagram Protocol) partly <em>because</em>
+    middleboxes ossified TCP. Experts treat the model as a map of responsibilities, not a law of nature — and
+    can name exactly which violation they are committing and why.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="osi-vs-tcpip">3. OSI vs TCP/IP — the map and the territory</h2>
+
+<p>So if TCP/IP won, what does the actual Internet stack look like, and how does it line up with the seven-layer
+vocabulary? The TCP/IP model (also called the Internet model, defined in RFC 1122 — RFC stands for Request for
+Comments, the Internet's standards documents) has four layers; many textbooks teach a five-layer hybrid that
+splits the bottom one. Here is the alignment:</p>
+
+<div class="figure-title">Fig 2.3 — Seven layers of vocabulary, four layers of reality</div>
+<pre class="diagram">
+        OSI (the map)                TCP/IP (the territory)
+  ┌───────────────────────┐      ┌──────────────────────────┐
+  │ 7  Application        │      │                          │
+  ├───────────────────────┤      │      APPLICATION         │
+  │ 6  Presentation       │ ───► │  HTTP, DNS, TLS, gRPC,   │
+  ├───────────────────────┤      │  SMTP, Kafka protocol…   │
+  │ 5  Session            │      │                          │
+  ├───────────────────────┤      ├──────────────────────────┤
+  │ 4  Transport          │ ───► │ TRANSPORT   TCP, UDP     │
+  ├───────────────────────┤      ├──────────────────────────┤
+  │ 3  Network            │ ───► │ INTERNET    IP, ICMP     │
+  ├───────────────────────┤      ├──────────────────────────┤
+  │ 2  Data Link          │      │ LINK        Ethernet,    │
+  ├───────────────────────┤ ───► │ (a.k.a.     Wi-Fi, ARP   │
+  │ 1  Physical           │      │  network    + the wires  │
+  └───────────────────────┘      │  access)                 │
+                                 └──────────────────────────┘
+   the 5-layer "hybrid" model splits LINK back into
+   physical + data link — best of both, common in courses
+</pre>
+
+<table>
+  <tr><th>OSI layer</th><th>TCP/IP layer</th><th>Lives in practice in…</th><th>Examples</th></tr>
+  <tr><td>7 Application</td><td rowspan="3">Application</td><td rowspan="3">Your process + its libraries (JVM, Node.js runtime, OpenSSL, Jackson…)</td><td>HTTP, DNS, SMTP, gRPC, PostgreSQL wire protocol</td></tr>
+  <tr><td>6 Presentation</td><td>JSON/protobuf encoding, UTF-8, gzip, TLS record encryption</td></tr>
+  <tr><td>5 Session</td><td>TLS handshake/resumption, WebSocket lifetimes, gRPC channels</td></tr>
+  <tr><td>4 Transport</td><td>Transport</td><td>The OS kernel</td><td>TCP, UDP (QUIC: in userspace, over UDP)</td></tr>
+  <tr><td>3 Network</td><td>Internet</td><td>The OS kernel + every router</td><td>IP (IPv4/IPv6), ICMP</td></tr>
+  <tr><td>2 Data Link</td><td rowspan="2">Link</td><td rowspan="2">NIC hardware + driver + switches/access points</td><td>Ethernet, Wi-Fi (802.11), ARP, VLANs</td></tr>
+  <tr><td>1 Physical</td><td>Cat6 copper, fiber, radio</td></tr>
+</table>
+
+<p>Notice the most important row-merge: <strong>in real stacks, Layers 5 and 6 fold into Layer 7</strong>. There
+is no "session daemon" or "presentation library" in Linux; everything above TCP ships inside your application
+process and its libraries, and the wire just sees "application data." That is why job postings say "L7 load
+balancer" and never "L6 load balancer." Sections 8 and 9 give L5 and L6 their honest treatment: the layers
+barely exist as software, but their <em>ideas</em> are everywhere.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the map is not the territory</div>
+  <p><strong>OSI lost as an implementation but won as a vocabulary.</strong> The protocols on your machine are
+  TCP/IP protocols; the words in your incident channel are OSI words. When an SRE (Site Reliability Engineer)
+  says "it's an L4 issue," they mean "the TCP layer of the TCP/IP stack, which OSI numbering calls 4." Everyone
+  fluently mixes the two, and now so will you. Use OSI to <em>talk and reason</em>; expect TCP/IP when you
+  <em>look at actual packets</em>.</p>
+</div>
+
+<p>Two classic mnemonics for the layer order — pick whichever sticks:</p>
+
+<ul>
+  <li>Bottom-up (1→7): <strong>P</strong>lease <strong>D</strong>o <strong>N</strong>ot <strong>T</strong>hrow
+  <strong>S</strong>ausage <strong>P</strong>izza <strong>A</strong>way — Physical, Data Link, Network,
+  Transport, Session, Presentation, Application.</li>
+  <li>Top-down (7→1): <strong>A</strong>ll <strong>P</strong>eople <strong>S</strong>eem <strong>T</strong>o
+  <strong>N</strong>eed <strong>D</strong>ata <strong>P</strong>rocessing — Application, Presentation, Session,
+  Transport, Network, Data Link, Physical.</li>
+</ul>
+
+<p>Now the tour: seven sections, one per layer, bottom-up. Each follows the same shape — purpose,
+responsibilities, an at-a-glance table, the analogy, where it shows up in your stack, and a couple of
+interview-style checks before moving on.</p>
+
+<!-- ============================================================ -->
+<h2 id="layer1">4. Layer 1 — Physical: bits become signals</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 1 — Physical</span></p>
+
+<p><strong>Purpose:</strong> transmit and receive raw bits over a physical medium. Layer 1 answers Part 1's
+physics problem: how does an abstract <code>1</code> or <code>0</code> become something that exists in the
+world — a voltage on copper, a light pulse in glass fiber, a modulated radio wave — and how does the far end
+read it back reliably? You saw the essence in Part 1 (Fig 1.4, bits as voltage): both sides must agree on
+signal levels, timing, and encodings that keep their clocks synchronized.</p>
+
+<p><strong>Responsibilities:</strong> defining connectors and pinouts (the RJ45 plug on an Ethernet cable),
+voltages and light wavelengths, bit timing and clock recovery, maximum cable lengths, and the modulation scheme.
+On fast modern links, one signal change (a <strong>symbol</strong>) encodes <em>multiple</em> bits — e.g.,
+PAM4 signaling uses four voltage levels so each symbol carries two bits. That is how engineers keep multiplying
+speed over the same physics. None of this is "just a cable": Layer 1 is a deep electrical-engineering
+discipline; backend engineers need only its service guarantee — "I move bits to the other end of this link,
+mostly intact."</p>
+
+<table>
+  <tr><th>Layer 1 at a glance</th><th></th></tr>
+  <tr><td><strong>Data unit</strong></td><td>bit (and symbol)</td></tr>
+  <tr><td><strong>Addressing</strong></td><td>none — signals go where the medium goes</td></tr>
+  <tr><td><strong>Header added</strong></td><td>none (only sync patterns like Ethernet's 8-byte preamble)</td></tr>
+  <tr><td><strong>Standards</strong></td><td>Ethernet physical specs (e.g., 1000BASE-T), fiber optics (SFP modules, wavelengths), the radio portions of Wi-Fi 802.11 and 4G/5G</td></tr>
+  <tr><td><strong>Devices</strong></td><td>cables, connectors, repeaters, hubs, media converters, the PHY (physical-layer chip) of every NIC (Network Interface Card)</td></tr>
+  <tr><td><strong>Failure smells like</strong></td><td>no link light, "cable unplugged", Wi-Fi signal at one bar, interface flapping up/down</td></tr>
+</table>
+
+<p><strong>Devices.</strong> A <strong>repeater</strong> regenerates a weakening signal so it can travel farther
+(copper Ethernet degrades after ~100 m). A <strong>hub</strong> is a multiport repeater from the 1990s: whatever
+signal enters one port is blindly re-broadcast out <em>every</em> other port. The hub has no concept of
+addresses — it cannot, because addresses are a Layer 2 idea and a hub is a Layer 1 device:</p>
+
+<div class="figure-title">Fig 2.4 — A hub repeats blindly; it does not know what an address is</div>
+<pre class="diagram">
+              ┌───────────────┐
+     A ───────┤               ├─────── B
+              │      HUB      │
+     C ───────┤  (L1 device)  ├─────── D
+              └───────────────┘
+
+   A transmits a message meant for B.
+   The hub re-broadcasts the SIGNAL out every port:
+   B, C and D all receive it; C and D must discard it.
+   Only one machine may talk at a time — simultaneous
+   transmissions collide and corrupt each other.
+   This is why hubs are museum pieces (switches, next
+   section, fixed this by reading L2 addresses).
+</pre>
+
+<p>The NIC straddles Layers 1 and 2: its PHY side does signaling (Layer 1), its MAC side does framing and
+addressing (Layer 2). When you check link state, you are interrogating Layer 1:</p>
+
+<pre class="code">$ ethtool eth0
+Settings for eth0:
+        Supported link modes:  100baseT/Full 1000baseT/Full
+        Speed: 1000Mb/s
+        Duplex: Full
+        Link detected: yes        ← Layer 1 says: signals are flowing
+
+$ ip -br link show
+lo     UP   00:00:00:00:00:00
+eth0   UP   f4:5c:89:b2:7d:11
+wlan0  DOWN f8:e4:e3:9d:12:55     ← Wi-Fi radio off: a Layer 1 failure</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — roads and trucks, not addresses</div>
+  <p>In the postal system, Layer 1 is the roads, rails, planes, and trucks. Infrastructure that physically moves
+  things from place to place — and that is <em>all</em> it does. A road does not read envelopes; a truck does not
+  care whether it carries love letters or invoices. Likewise, fiber does not know IP addresses exist. When a
+  backhoe cuts a fiber line (a depressingly common real outage cause), that is a pure Layer 1 failure: the road
+  is gone, and no cleverness at the upper layers can move bits across a cut cable — only rerouting around it
+  (Layer 3's job) can.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — Layer 1 in a cloud-native life</div>
+  <p>You will almost never touch Layer 1 directly in AWS — that is precisely the product: Amazon owns the
+  fibers, optics, and racks. But Layer 1 still governs your architecture. Availability Zones are separate
+  buildings linked by AWS-owned metro fiber (that is why cross-AZ latency is ~0.5–1 ms and cross-AZ traffic is
+  billed). "AWS Direct Connect" is literally buying a Layer 1/2 circuit into Amazon's network. And on-prem, the
+  classic war story persists: a Kubernetes node going NotReady because someone's knee unplugged a cable —
+  always check Layer 1 first (section 17).</p>
+</div>
+
+<details><summary>Interview check: what is the data unit at Layer 1, and what does a repeater do?</summary>
+  <p>The unit is the bit (transmitted as symbols — signal states that may encode several bits each). A repeater
+  regenerates and retimes the signal so it can travel beyond the medium's distance limit; it understands no
+  addresses and makes no forwarding decisions — it is pure signal restoration.</p>
+</details>
+<details><summary>Interview check: why can't a hub prevent collisions?</summary>
+  <p>Because collision avoidance requires knowing who is transmitting and for whom a transmission is intended —
+  concepts that require addressing and framing, which live at Layer 2. A hub operates at Layer 1 and sees only
+  signals, so it can only repeat them everywhere, creating one shared collision domain. Switches solved this by
+  reading Layer 2 frames and forwarding selectively.</p>
+</details>
+<details><summary>Interview check: is Wi-Fi a Layer 1 or Layer 2 technology?</summary>
+  <p>Both. The 802.11 standards define radio modulation, channels, and signaling (Layer 1) <em>and</em> framing,
+  addressing, and medium access (Layer 2). The same is true of Ethernet — "Ethernet" names a family of L1
+  specifications plus an L2 framing standard. Saying "Wi-Fi replaces Ethernet's Layers 1 and 2" is exactly
+  right.</p>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="layer2">5. Layer 2 — Data Link: frames between neighbors</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 2 — Data Link</span></p>
+
+<p><strong>Purpose:</strong> deliver data between two devices on the <em>same</em> network — Part 1's
+neighborhood problem. Layer 1 gives you a torrent of raw bits with no structure; Layer 2 imposes structure
+(<strong>framing</strong>: where does a message start and end?), local addressing (<strong>MAC</strong> — Media
+Access Control — addresses: which neighbor is this for?), error detection (did the bits survive the trip?), and
+medium access (on shared media like radio: whose turn is it to talk?). Its scope is strictly local: one LAN
+(Local Area Network), one link, one hop. Layer 2 has no concept of "other networks" — that is Layer 3's job.</p>
+
+<table>
+  <tr><th>Layer 2 at a glance</th><th></th></tr>
+  <tr><td><strong>Data unit</strong></td><td>frame</td></tr>
+  <tr><td><strong>Addressing</strong></td><td>MAC addresses — 48-bit, flat, e.g. <code>f4:5c:89:b2:7d:11</code></td></tr>
+  <tr><td><strong>Header added</strong></td><td>Ethernet header (14 bytes) + FCS trailer (4 bytes)</td></tr>
+  <tr><td><strong>Key protocols</strong></td><td>Ethernet (802.3), Wi-Fi (802.11), VLANs (802.1Q), ARP (Address Resolution Protocol — teased here, full story in Part 3)</td></tr>
+  <tr><td><strong>Devices</strong></td><td>switches, bridges, Wi-Fi access points, the MAC side of every NIC</td></tr>
+  <tr><td><strong>Failure smells like</strong></td><td>can reach the Internet but not the printer next to you, ARP timeouts, duplicate-MAC chaos, switch port down</td></tr>
+</table>
+
+<h3>5.1 MAC addresses — the flat serial numbers of networking</h3>
+
+<p>Every NIC has a <strong>MAC address</strong>: 48 bits, written as six hex bytes —
+<code>f4:5c:89:b2:7d:11</code>. The first three bytes are the <strong>OUI</strong> (Organizationally Unique
+Identifier), a vendor prefix purchased from the IEEE (Institute of Electrical and Electronics Engineers): look
+up an OUI and you learn who made the card — which is why your router's admin page can label devices "Apple"
+or "Samsung" without asking them. The last three bytes are assigned by the vendor, uniquely per card.</p>
+
+<p>Traditionally the address was <strong>burned in</strong> at the factory ("BIA — burned-in address"). Today
+"burned-in" is a polite fiction in backend land: virtual machines get MACs generated by the hypervisor, every
+Docker container gets one synthesized by the Docker engine, and phones <em>randomize</em> MACs per Wi-Fi network
+for privacy. One bit in the first byte marks an address as "locally administered" (made up, not vendor-assigned)
+— which is why Docker MACs start with <code>02:</code>:</p>
+
+<pre class="code">$ docker run -d --name api myapp
+$ docker exec api cat /sys/class/net/eth0/address
+02:42:ac:11:00:02      ← 02 = locally administered (synthetic), not a factory OUI
+
+$ ip neigh                                  # your machine's ARP cache: IP→MAC mappings
+192.168.1.1   dev wlan0 lladdr 3c:fd:fe:9e:a1:b0 REACHABLE   ← the home router
+192.168.1.41  dev wlan0 lladdr dc:a6:32:07:1b:9e STALE       ← a Raspberry Pi</pre>
+
+<p>Crucially, MAC addressing is <strong>flat</strong>: an address tells you <em>which card</em>, not <em>where
+it is</em>. Like a device serial number, <code>f4:5c:89:b2:7d:11</code> is the same in Mumbai or Berlin, and
+nothing about it helps you find it across the planet. That flatness is exactly why Layer 3's hierarchical IP
+addresses must exist (section 6) — hold that thought, because "why do we need both MAC and IP?" is a top-five
+interview question.</p>
+
+<h3>5.2 The Ethernet frame — your first real header layout</h3>
+
+<div class="figure-title">Fig 2.5 — Ethernet II frame layout (the L2 envelope), with field sizes</div>
+<pre class="diagram">
+ (L1: preamble + SFD, 8 bytes of 10101010… so receivers can lock their clocks)
+┌─────────────┬─────────────┬───────────┬─────────────────────────┬─────────┐
+│  dst MAC    │  src MAC    │ EtherType │        payload          │   FCS   │
+│  6 bytes    │  6 bytes    │  2 bytes  │     46 – 1500 bytes     │ 4 bytes │
+├─────────────┼─────────────┼───────────┼─────────────────────────┼─────────┤
+│ who on this │ who sent it │ what's    │ usually an IP packet    │ CRC for │
+│ LAN gets it │             │ inside:   │ (the L3 layer's whole   │ error   │
+│             │             │ 0x0800 =  │ packet rides in here)   │ detect  │
+│             │             │ IPv4      │                         │         │
+│             │             │ 0x86DD =  │ max payload = MTU       │         │
+│             │             │ IPv6      │ = 1500 bytes            │         │
+│             │             │ 0x0806 =  │                         │         │
+│             │             │ ARP       │                         │         │
+└─────────────┴─────────────┴───────────┴─────────────────────────┴─────────┘
+        14 bytes of header           +          4 bytes of trailer
+                    = 18 bytes of L2 overhead per frame
+</pre>
+
+<p>Three fields deserve special attention:</p>
+
+<ul>
+  <li><strong>EtherType</strong> tells the receiver which Layer 3 protocol to hand the payload to —
+  <code>0x0800</code> means "an IPv4 packet is inside." Every layer needs a field like this ("what is in my
+  payload?"); you will meet its siblings (IP's protocol number, TCP's port) shortly. It is how decapsulation
+  (section 13) knows where to deliver upward.</li>
+  <li><strong>FCS</strong> (Frame Check Sequence) is a 4-byte <strong>CRC</strong> (Cyclic Redundancy Check) —
+  a checksum computed over the frame. The receiving NIC recomputes it; on mismatch the frame is <em>silently
+  dropped</em>. No apology, no notification — detecting and repairing loss is deliberately left to upper layers
+  (TCP, Part 4). This division of labor is the layered design working as intended.</li>
+  <li><strong>The 1500-byte maximum payload</strong> is the famous <strong>MTU</strong> (Maximum Transmission
+  Unit) — the largest chunk a link will carry in one frame. The number is a 1980-vintage compromise between
+  memory costs and efficiency, and it is now fossilized into the Internet. Remember 1500: it explains IP
+  fragmentation (section 6), TCP's segment sizing (Part 4), and a whole genre of "VPN/Kubernetes overlay
+  mysteriously hangs" bugs where tunnel headers shrink the usable MTU (Part 12 tells those war stories).</li>
+</ul>
+
+<h3>5.3 Switches — flood, then learn</h3>
+
+<p>A <strong>switch</strong> is the box from Part 1's Fig 1.2, now with its secret revealed: it is a Layer 2
+device that reads frame headers and forwards intelligently. Inside, it keeps a <strong>MAC table</strong>
+(also called a CAM table) mapping MAC addresses to ports. The algorithm is beautifully simple — it has to be,
+because it runs in hardware at billions of frames per second:</p>
+
+<div class="figure-title">Fig 2.6 — How a switch learns: flood when unknown, then remember sources</div>
+<pre class="diagram">
+                        ┌────────────────────────┐
+                        │         SWITCH         │
+                        │  MAC table (empty)     │
+                        └──┬──────┬──────┬───────┘
+                      port 1  port 2  port 3
+                           │      │      │
+                       LAPTOP   PI     PRINTER
+                    f4:5c:89… dc:a6:32… 00:80:92…
+
+  STEP 1  laptop sends a frame to the printer (dst 00:80:92…)
+  STEP 2  switch reads SRC field, learns:  f4:5c:89… is on port 1
+  STEP 3  dst 00:80:92… not in table yet → FLOOD: copy out all
+          ports except port 1  (the Pi ignores it; printer accepts)
+  STEP 4  printer replies; switch learns 00:80:92… is on port 3
+  STEP 5  from now on, laptop↔printer frames flow ONLY between
+          ports 1 and 3 — the Pi never sees them again
+
+          MAC table after step 4:
+          ┌────────────────────┬──────┐
+          │ MAC                │ port │
+          ├────────────────────┼──────┤
+          │ f4:5c:89:b2:7d:11  │  1   │
+          │ 00:80:92:5e:21:c8  │  3   │
+          └────────────────────┴──────┘
+</pre>
+
+<p>This "flood-then-learn" design means a switch is plug-and-play: no configuration, no central registry — it
+learns the network's shape from traffic itself, and entries age out so machines can move ports. It also gives
+each port its own collision-free, full-duplex lane, which is what made hubs extinct. Two more Layer 2 ideas to
+file away:</p>
+
+<ul>
+  <li><strong>VLANs</strong> (Virtual LANs, 802.1Q): a 4-byte tag inserted into the frame header that lets one
+  physical switch behave as several isolated logical switches — finance on VLAN 10 cannot see engineering on
+  VLAN 20 even though they share hardware. This is the conceptual ancestor of cloud network segmentation: an AWS
+  VPC subnet or a Docker bridge network is "a VLAN-like isolation boundary, in software" (Parts 11–12).</li>
+  <li><strong>Wi-Fi (802.11)</strong> is Ethernet's wireless sibling at Layer 2: different frame format, plus
+  acknowledgment and retransmission <em>at Layer 2</em> — because radio is so lossy that waiting for TCP to
+  notice would be brutal — and CSMA/CA (Carrier Sense Multiple Access with Collision Avoidance) to share the
+  air politely. From Layer 3 upward, Ethernet and Wi-Fi are indistinguishable: substitutability, demonstrated.</li>
+  <li><strong>ARP</strong> (Address Resolution Protocol) answers "I know the neighbor's IP — what is its MAC?"
+  by shouting on the LAN ("who has 192.168.1.1?") and caching the answer (that is the <code>ip neigh</code>
+  table above). It is the glue between Layers 2 and 3, and Part 3 dissects it fully.</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the mail room, not the postal service</div>
+  <p>Layer 2 is your office building's internal mail room. The mail-room clerk (switch) knows every desk in
+  <em>this building</em> by name (MAC) — and learns new names simply by seeing who sends mail from where. Hand
+  the clerk an envelope for a colleague upstairs and it arrives perfectly. But ask the clerk to deliver to
+  another city and you get a blank stare: no concept of streets, cities, or routes — flat, local knowledge only.
+  For anything leaving the building, the clerk hands the mail to the post office on the corner: the router,
+  Layer 3.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — Layer 2 in your stack</div>
+  <ul>
+    <li><strong>Docker:</strong> <code>docker network create</code> builds a virtual switch (a Linux bridge);
+    each container gets a virtual NIC with a synthetic <code>02:42:…</code> MAC plugged into it. Run
+    <code>brctl show</code> or <code>ip link show type bridge</code> on a Docker host and you are looking at
+    Layer 2 infrastructure built from pure software.</li>
+    <li><strong>Kubernetes:</strong> CNI (Container Network Interface) plugins wire pods together with veth
+    pairs (virtual cables) and bridges or overlay tunnels — Layer 2 plumbing at industrial scale (Part 12).</li>
+    <li><strong>AWS:</strong> an ENI (Elastic Network Interface) — the thing you attach to an EC2 instance —
+    has a MAC address; the VPC fabric is, in effect, a giant distributed software switch with the flooding
+    removed (AWS knows where every MAC lives, so it never needs to flood).</li>
+  </ul>
+</div>
+
+<details><summary>Interview check: how does a switch know where to send a frame?</summary>
+  <p>It maintains a MAC table learned from traffic: for every frame received, it records the source MAC against
+  the arrival port. For forwarding, it looks up the destination MAC: known → send out that one port; unknown →
+  flood out all other ports and let the reply teach it. Entries expire so devices can move. No configuration or
+  IP knowledge is involved — a classic L2 switch never reads IP headers.</p>
+</details>
+<details><summary>Interview check: what happens when a frame's FCS check fails?</summary>
+  <p>The frame is silently discarded by the receiving NIC or switch — no error is sent back. Layer 2 detects
+  corruption but does not repair it; recovery (retransmission) is the transport layer's job, which is why TCP
+  exists and why UDP applications must tolerate loss. This is intentional separation of concerns.</p>
+</details>
+<details><summary>Interview check: what is the MTU and why does every backend engineer eventually meet it?</summary>
+  <p>The Maximum Transmission Unit is the largest payload one link-layer frame can carry — 1500 bytes on
+  standard Ethernet. Anything bigger must be split (IP fragmentation or TCP segmentation). It bites backend
+  engineers through tunnels: VPNs, VXLAN (Virtual Extensible LAN) overlays in Docker/Kubernetes, and PPPoE links
+  each consume tens of bytes of the 1500, and mismatched expectations cause hangs where small requests work but
+  large responses stall — the classic "curl works, the app doesn't" mystery (Parts 4 and 12).</p>
+</details>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Layer 2 delivers data between machines on the same local network, like an office mail room. Every network
+    card has a built-in name (MAC address). Data travels in frames — envelopes with "to" and "from" MACs — and
+    switches read those names to deliver each frame only where it belongs, learning who sits where by watching
+    traffic.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>L2 provides framing, flat 48-bit addressing (OUI + vendor suffix), CRC-based error <em>detection</em>
+    (drop, don't repair), and medium access. Switches forward on destination MAC via a learned table
+    (flood-then-learn), giving per-port full duplex. EtherType identifies the L3 payload; MTU caps payload at
+    1500 bytes; VLANs add logical segmentation; Wi-Fi is an alternative L2/L1 with its own retransmission. ARP
+    bridges IP to MAC on the local link.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Modern data centers and clouds stretch L2 semantics over L3 fabrics: VXLAN encapsulates frames inside UDP
+    packets so VMs can "stay on the same LAN" across racks — an envelope inside an envelope inside an envelope,
+    and 50 bytes off your MTU budget. Cloud fabrics suppress flooding entirely (the controller knows every
+    MAC/IP placement), which is why some on-prem tricks (gratuitous ARP failover, MAC spoofing) silently fail in
+    AWS. And because L2 loops are catastrophic (frames have no TTL — they circulate forever in a broadcast
+    storm), physical networks run spanning-tree protocols to cut loops; "someone plugged a switch into itself"
+    has taken down real trading floors.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="layer3">6. Layer 3 — Network: packets across networks</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 3 — Network</span></p>
+
+<p><strong>Purpose:</strong> deliver data from any host to any other host <em>across network boundaries</em> —
+Part 1's global-addressing and pathfinding problems. Layer 2 dies at the edge of the LAN; Layer 3 is what makes
+an inter-network (and the Internet) possible. Its two pillars: <strong>IP</strong> (Internet Protocol), which
+defines logical addresses and the packet format, and <strong>routing</strong>, the hop-by-hop decision process
+that moves packets toward their destination through devices called <strong>routers</strong>.</p>
+
+<table>
+  <tr><th>Layer 3 at a glance</th><th></th></tr>
+  <tr><td><strong>Data unit</strong></td><td>packet</td></tr>
+  <tr><td><strong>Addressing</strong></td><td>IP addresses — logical, hierarchical, e.g. <code>203.0.113.50</code></td></tr>
+  <tr><td><strong>Header added</strong></td><td>IPv4 header: 20 bytes (typically)</td></tr>
+  <tr><td><strong>Key protocols</strong></td><td>IPv4, IPv6, ICMP (Internet Control Message Protocol)</td></tr>
+  <tr><td><strong>Devices</strong></td><td>routers, L3 switches, every host's kernel IP stack</td></tr>
+  <tr><td><strong>Failure smells like</strong></td><td>"no route to host", ping fails beyond the gateway, TTL exceeded, wrong subnet mask, NAT misbehavior</td></tr>
+</table>
+
+<h3>6.1 Why we need IP when we already have MAC — hierarchy vs flatness</h3>
+
+<p>MAC addresses identify; IP addresses <em>locate</em>. A MAC is a serial number: globally unique, but
+location-free — knowing a card's MAC tells the world nothing about how to reach it. Imagine routing global mail
+by passport number: every post office on Earth would need a table of eight billion passport numbers. Flat
+addressing cannot scale to a planet.</p>
+
+<p>IP addresses are <strong>hierarchical</strong>, like postal addresses: one part of
+<code>203.0.113.50</code> names the <em>network</em> (the street), the rest names the <em>host</em> on it (the
+house). Routers exploit this ruthlessly — a router in Singapore does not know where your laptop is; it knows
+"the 203.0.113.x network is reachable via that fiber," exactly as a sorting center knows "Mumbai goes on this
+truck" without knowing any Mumbai house. The result: core Internet routers manage with under a million route
+entries instead of billions of host entries. The price: unlike a burned-in MAC, your IP must <em>change</em>
+when you move networks (laptop at home vs office), because it encodes location. The two address types are
+complementary, not redundant — IP says <em>where to head</em>, MAC says <em>which neighbor gets the frame on
+this specific hop</em>. Part 3 is an entire chapter on this layer: address structure, subnets, public vs
+private, NAT, and how routing tables actually decide.</p>
+
+<h3>6.2 The IPv4 header — the fields you will actually use</h3>
+
+<div class="figure-title">Fig 2.7 — IPv4 header sketch (20 bytes; the fields a backend engineer meets)</div>
+<pre class="diagram">
+  bit 0                              15│16                             31
+ ┌─────┬─────┬───────────────┬─────────┴──────────────────────────────┐
+ │ ver │ IHL │ type of svc   │          total length                  │
+ │  4  │  5  │ (QoS hints)   │   header+payload, max 65535            │
+ ├─────┴─────┴───────────────┼─────────┬──────────────────────────────┤
+ │ identification            │ flags   │     fragment offset          │
+ │ (groups fragments)        │ DF/MF   │  (reassembly position)       │
+ ├──────────┬────────────────┼─────────┴──────────────────────────────┤
+ │   TTL    │   protocol     │          header checksum               │
+ │   64     │   6 = TCP      │                                        │
+ │          │  17 = UDP      │                                        │
+ │          │   1 = ICMP     │                                        │
+ ├──────────┴────────────────┴────────────────────────────────────────┤
+ │              source IP address        e.g. 192.168.1.23            │
+ ├─────────────────────────────────────────────────────────────────────┤
+ │              destination IP address   e.g. 203.0.113.50            │
+ └─────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<ul>
+  <li><strong>TTL</strong> (Time To Live) — despite the name, a <em>hop counter</em>, not a timer. The sender
+  sets it (Linux default 64); every router decrements it by one; at zero, the router drops the packet and sends
+  back an ICMP "time exceeded" message. Why it exists: routing loops happen (misconfigurations, transient
+  convergence), and without TTL a looped packet would orbit forever, eventually melting the loop with traffic.
+  TTL guarantees every packet dies <em>eventually</em>. Traceroute (below) is a brilliant hack built entirely on
+  this field.</li>
+  <li><strong>Protocol</strong> — Layer 3's "what's in my payload?" field, sibling of EtherType: 6 means a TCP
+  segment is inside, 17 means UDP, 1 means ICMP. Decapsulation reads this to hand upward correctly.</li>
+  <li><strong>Fragmentation fields</strong> — if a 4000-byte packet must cross a 1500-byte-MTU link, IP can
+  split it into fragments (identification + offset let the destination reassemble). In practice modern systems
+  avoid fragmentation (it is fragile and slow): TCP sizes its segments to fit (Part 4), and senders set the DF
+  ("don't fragment") flag and probe the path's MTU. You mainly meet fragmentation when it <em>fails</em> —
+  see the MTU war stories teased in section 5.</li>
+  <li><strong>Source and destination IP</strong> — set by the sending host, and (NAT aside) <em>unchanged
+  across the entire journey</em>. Routers read the destination, choose the next hop, decrement TTL, and forward.
+  Contrast with MACs, which are rewritten at every hop — section 14 makes this vivid.</li>
+</ul>
+
+<h3>6.3 ICMP — the network's own messaging service</h3>
+
+<p><strong>ICMP</strong> (Internet Control Message Protocol) is Layer 3's control channel: small messages about
+the network itself — "destination unreachable," "time exceeded," "echo request/reply." It rides directly inside
+IP packets (protocol 1) with <em>no transport layer at all</em> — proof that not every communication uses every
+layer. Two tools you already use are pure ICMP:</p>
+
+<pre class="code">$ ping -c 2 203.0.113.50                      # ICMP echo request → echo reply
+64 bytes from 203.0.113.50: icmp_seq=1 ttl=52 time=48.3 ms
+64 bytes from 203.0.113.50: icmp_seq=2 ttl=52 time=47.9 ms
+                                  └── started at 64, so ~12 router hops away
+
+$ traceroute 203.0.113.50                     # the TTL hack: send with TTL=1, 2, 3…
+ 1  192.168.1.1     1.8 ms     ← home router (each line = one router that
+ 2  100.72.16.1     9.4 ms        replied "TTL exceeded" when the counter
+ 3  198.51.100.1   14.2 ms        hit zero at its position)
+ 4  203.0.113.1    46.8 ms
+ 5  203.0.113.50   48.1 ms     ← destination reached</pre>
+
+<p>Traceroute deliberately sends packets with TTL=1 (dies at router 1, which identifies itself via the ICMP
+error), then TTL=2 (dies at router 2), and so on — mapping the path by scheduling deaths. When a security group
+blocks ICMP (common in AWS), ping fails while your app works fine — remember that before declaring an instance
+"down."</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — sorting centers and the address on the envelope</div>
+  <p>Layer 3 is the national postal sorting network. Each sorting center (router) reads only the city/PIN-code
+  portion of the address (the network part of the IP), consults its dispatch chart (routing table), and throws
+  the envelope onto the next truck (next hop). No center knows the full route — each knows only the best next
+  step, and the address itself never changes in transit. TTL is the "max forwards" stamp: after too many
+  centers, the letter is destroyed and a notice (ICMP) is mailed back to the sender — so no letter circulates
+  forever.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — Layer 3 in your stack</div>
+  <ul>
+    <li>Your VPC is an IP empire you govern: <code>10.0.0.0/16</code> address space, subnets per AZ, route
+    tables you edit in Terraform, an Internet Gateway as the door (Part 11).</li>
+    <li>Every Kubernetes pod gets its own IP (e.g., <code>10.244.3.17</code>) — "IP-per-pod" is the core K8s
+    networking promise, and CNI plugins exist to fulfill it (Part 12).</li>
+    <li><code>docker inspect api | grep IPAddress</code> → <code>172.17.0.2</code>: your container lives in a
+    private Layer 3 world behind your host.</li>
+    <li>The <code>ttl=52</code> in a ping tells you hop distance; a TTL that <em>varies between requests</em>
+    tells you a load balancer is answering from different machines — a real diagnostic trick.</li>
+  </ul>
+</div>
+
+<details><summary>Interview check: why do we need both MAC and IP addresses?</summary>
+  <p>MAC is flat identity (which card, no location); IP is hierarchical location (which network, then which
+  host). Routers scale by aggregating routes per network — impossible with flat addresses. Conversely, on the
+  final hop you must address a specific physical neighbor, which is MAC's job (found via ARP). IP gets the
+  packet to the right network; MAC gets the frame across each individual link.</p>
+</details>
+<details><summary>Interview check: what is TTL and what uses it creatively?</summary>
+  <p>An 8-bit hop counter decremented by each router; at zero the packet is dropped and ICMP "time exceeded"
+  returns to the sender. It exists to kill packets caught in routing loops. Traceroute exploits it by sending
+  probes with TTL 1, 2, 3… so each router along the path reveals itself through its error message.</p>
+</details>
+<details><summary>Interview check: at which layer do ping and traceroute operate?</summary>
+  <p>Layer 3 — both are ICMP, which rides directly in IP with no TCP/UDP beneath it (traceroute variants can use
+  UDP/TCP probes, but the returning "TTL exceeded" messages are ICMP). Consequence: a successful ping proves L1–L3
+  reachability but says nothing about whether the application's port is open or the service is healthy — that
+  requires L4+ checks (section 17).</p>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="layer4">7. Layer 4 — Transport: process to process</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 4 — Transport</span></p>
+
+<p><strong>Purpose:</strong> Layer 3 delivers packets <em>host to host</em> — to a machine. But you never talk
+to a machine; you talk to a <em>program</em> on it. Layer 4 delivers <em>process to process</em>: from the curl
+on your laptop to the Spring Boot process — not the PostgreSQL process — on the server. It solves Part 1's
+"which app?" problem with <strong>ports</strong>, and Part 1's reliability problem with <strong>TCP</strong>
+(Transmission Control Protocol) — or deliberately declines to solve it with <strong>UDP</strong> (User Datagram
+Protocol).</p>
+
+<table>
+  <tr><th>Layer 4 at a glance</th><th></th></tr>
+  <tr><td><strong>Data unit</strong></td><td>segment (TCP) / datagram (UDP)</td></tr>
+  <tr><td><strong>Addressing</strong></td><td>port numbers (16-bit, 0–65535), e.g. <code>:443</code>, <code>:5432</code></td></tr>
+  <tr><td><strong>Header added</strong></td><td>TCP: 20 bytes minimum (commonly 32 with options) · UDP: 8 bytes</td></tr>
+  <tr><td><strong>Key protocols</strong></td><td>TCP, UDP (and QUIC, a modern transport built atop UDP — Part 7)</td></tr>
+  <tr><td><strong>Devices</strong></td><td>endpoint kernels; L4 load balancers, firewalls, NAT devices (middleboxes)</td></tr>
+  <tr><td><strong>Failure smells like</strong></td><td>"connection refused", "connection timed out", port conflicts, half-open connections, retransmission storms</td></tr>
+</table>
+
+<p>The mechanics in one picture — Layer 3 gets the packet to the machine; Layer 4's port number selects the
+process:</p>
+
+<div class="figure-title">Fig 2.8 — Ports demultiplex one machine's traffic to many processes</div>
+<pre class="diagram">
+                          one server, IP 10.0.2.17
+                       ┌───────────────────────────────┐
+   packet arrives ───► │ L3: "dst 10.0.2.17 — that's   │
+                       │      me" → hand payload up    │
+                       │ L4: read dst port…            │
+                       │         │                     │
+                       │   ┌─────┼─────────┬─────────┐ │
+                       │   ▼     ▼         ▼         ▼ │
+                       │ :443  :8080     :5432    :6379│
+                       │ nginx Spring   Postgres  Redis│
+                       │       Boot                    │
+                       └───────────────────────────────┘
+     IP address answers "WHICH MACHINE?"
+     port number answers "WHICH PROGRAM ON IT?"
+</pre>
+
+<pre class="code">$ ss -ltn                     # which processes are listening on which ports (L4 view)
+State    Recv-Q   Send-Q   Local Address:Port      Peer Address:Port
+LISTEN   0        4096     0.0.0.0:5432            0.0.0.0:*        ← postgres
+LISTEN   0        511      0.0.0.0:443             0.0.0.0:*        ← nginx
+LISTEN   0        100      *:8080                  *:*              ← spring boot</pre>
+
+<p><strong>TCP vs UDP in one breath</strong> (Part 4 spends a whole chapter here): TCP first establishes a
+connection (the three-way handshake), then provides a reliable, ordered byte stream — it numbers bytes,
+acknowledges receipt, retransmits losses, reorders arrivals, and paces itself via flow and congestion control.
+Nearly everything you run rides it: HTTP, PostgreSQL, Redis, Kafka, SSH (Secure Shell). UDP sends independent
+datagrams with none of that — no handshake, no recovery, 8 bytes of header — and is the choice when speed and
+freshness beat completeness: DNS queries, video calls, game state, and QUIC/HTTP-3 (which rebuilds reliability
+in userspace on top of UDP — Part 7 explains why).</p>
+
+<h3>7.1 The end-to-end principle — why routers never read this layer</h3>
+
+<p>Here is a fact with deep consequences: <strong>transport lives only at the endpoints.</strong> The dozen
+routers between your laptop and the server maintain no TCP state, see no "connections," and never parse the TCP
+header — they forward IP packets, full stop. All the intelligence — handshakes, acknowledgments,
+retransmissions — runs in the two endpoint kernels. This is the <strong>end-to-end principle</strong>, the
+Internet's core design philosophy: keep the network's middle dumb, fast, and general; put smarts at the edges.
+It is why the Internet could grow without upgrading every router for every new feature, and why you can deploy
+QUIC today without asking any carrier's permission.</p>
+
+<p>The honest asterisk: <strong>middleboxes</strong>. NAT devices, firewalls, and load balancers <em>do</em>
+read (and rewrite) L4 fields — that is partly why they are controversial, and why new transports are hard to
+deploy (middleboxes drop what they don't recognize, which is how UDP became the only viable foundation for
+QUIC). When people call a load balancer an <strong>"L4 load balancer"</strong> (AWS NLB — Network Load
+Balancer), they mean: it forwards based on IP addresses and ports only, never reading the bytes above —
+contrast with L7 balancers in section 11 and the full story in Part 9.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the apartment number and registered mail</div>
+  <p>The street address (IP) gets the envelope to the right building; the apartment number (port) gets it to
+  the right unit. The mailman (the network) does not know or care who lives there — matching apartment numbers
+  to residents is the building's internal affair (the endpoint's kernel). And TCP vs UDP is registered mail vs
+  a postcard: registered mail is signed for, tracked, re-sent if lost, and arrives in order at a cost; postcards
+  are cheap, fast, unacknowledged, and occasionally vanish — both useful, for different mail.</p>
+</div>
+
+<details><summary>Interview check: ping succeeds but <code>curl</code> gets "connection refused" — what do you know?</summary>
+  <p>L1–L3 are healthy (the host is reachable and routing works), and the host is actively responding — "refused"
+  means a TCP RST came back, i.e., no process is listening on that port (or a firewall actively rejects). The
+  problem is at L4: wrong port, crashed/not-started service, or binding to localhost only. A <em>timeout</em>
+  instead would suggest a silent packet drop — typically a firewall or security group (L3/L4 filtering).</p>
+</details>
+<details><summary>Interview check: what is a segment vs a datagram vs a packet?</summary>
+  <p>A segment is TCP's unit (a chunk of the byte stream plus TCP header); a datagram is UDP's independent
+  message; a packet is Layer 3's unit (IP header plus its payload — which usually <em>contains</em> a segment or
+  datagram). Using the names precisely signals you understand which layer you are discussing; "the packet's
+  port number" is, strictly, a category error.</p>
+</details>
+<details><summary>Interview check: why are routers L3 devices and not L4?</summary>
+  <p>By design (the end-to-end principle): forwarding needs only the destination IP, so routers stay simple,
+  stateless per-connection, and fast, while reliability logic runs in endpoint kernels. Keeping the middle dumb
+  let the network scale and let transports evolve without touching infrastructure. Middleboxes that do inspect
+  L4 (NAT, firewalls, L4 LBs) buy functionality at the cost of state, fragility, and protocol ossification.</p>
+</details>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Layer 3 delivers to the right computer; Layer 4 delivers to the right <em>program</em> on it, using port
+    numbers (like apartment numbers). It also chooses a delivery style: TCP = careful registered mail (everything
+    arrives, in order, or gets re-sent); UDP = postcards (fast, no guarantees). Only the two endpoint computers
+    do this work — the routers in between just pass packets along.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>L4 multiplexes many conversations per host via 16-bit ports; a connection is identified by the 4-tuple
+    (src IP, src port, dst IP, dst port) — Part 5 builds on this. TCP adds connection setup, sequencing, ACKs,
+    retransmission, flow and congestion control (~20–32B header); UDP adds only ports and a checksum (8B).
+    "Connection refused" = RST (reachable host, closed port); "timeout" = silent drop (suspect firewalls).
+    L4 LBs forward on tuple alone; L7 LBs parse application bytes.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The end-to-end principle is a live architectural argument, not history: middleboxes ossified TCP (you
+    cannot add TCP options that NATs/firewalls mangle), so QUIC tunnels an encrypted, evolvable transport inside
+    boring UDP precisely to be invisible to them. Kernel vs userspace transport is a real trade (QUIC burns more
+    CPU; kernel TCP gets decades of optimization and offload to NIC hardware). And L4 LBs that keep no per-flow
+    state (consistent hashing, e.g., Maglev) survive failover differently than stateful ones — interview gold in
+    Part 9.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="layer5">8. Layer 5 — Session: the layer that dissolved</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 5 — Session</span></p>
+
+<p><strong>Purpose (as designed, 1984):</strong> manage long-running <em>dialogs</em> between applications,
+distinct from the transport connections beneath them. The session layer was to handle <strong>dialog
+control</strong> (whose turn is it to send — half-duplex turn-taking, like a walkie-talkie), <strong>session
+establishment and teardown</strong> (open and close a logical conversation that might span multiple transport
+connections), and <strong>checkpointing/synchronization</strong> (insert markers into a long transfer so that
+after a crash you resume from the last checkpoint instead of restarting — designed for an era when transferring
+a large file over a flaky 9600-baud line could take days).</p>
+
+<p><strong>The honest story:</strong> as a distinct piece of software, <strong>Layer 5 barely exists
+today</strong>. TCP absorbed connection management; applications absorbed dialog logic. There is no session
+daemon in Linux, no session header on the wire. But the <em>ideas</em> did not die — they scattered into tools
+you use constantly:</p>
+
+<ul>
+  <li><strong>TLS session resumption</strong> (Transport Layer Security, Part 8): after a full handshake, client
+  and server stash a session ticket so the <em>next</em> connection can skip expensive negotiation — a logical
+  session outliving its transport connection. The most literally "Layer 5" thing in modern networking.</li>
+  <li><strong>gRPC channels:</strong> a channel is a long-lived logical conversation that survives and manages
+  underlying HTTP/2 connections, reconnecting beneath your code — session management as a library.</li>
+  <li><strong>WebSocket lifetimes:</strong> an explicit open → bidirectional dialog → close lifecycle layered on
+  one TCP connection, with ping/pong keepalives — dialog control reborn for browsers.</li>
+  <li><strong>Database sessions:</strong> a PostgreSQL connection carries session state — <code>SET</code>
+  variables, temporary tables, transaction status. Connection poolers like PgBouncer exist precisely to manage
+  the mismatch between logical sessions and physical connections.</li>
+  <li><strong>Resumable uploads/downloads</strong> (HTTP <code>Range</code> requests, S3 multipart uploads):
+  checkpointing, reinvented at Layer 7.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — "session cookies" are not Layer 5</div>
+  <p>The "session" in <em>session cookies</em>, <code>HttpSession</code>, Spring Session, or
+  <code>express-session</code> is an <strong>application construct at Layer 7</strong>: HTTP is stateless, so
+  your framework fakes continuity by issuing an ID in a cookie and storing state server-side (often in Redis).
+  Same English word, different machinery, no relation to OSI Layer 5. Interviewers probe exactly this
+  confusion.</p>
+</div>
+
+<details><summary>Interview check: does the session layer exist in real systems?</summary>
+  <p>Not as a discrete layer — in the TCP/IP world its functions folded into applications and libraries. But its
+  concerns are alive: TLS session resumption, gRPC channel management, WebSocket lifecycles, DB connection
+  state, resumable transfers. The model gives you vocabulary for a real class of design problems (long-lived
+  dialogs over short-lived connections), even though no "L5 protocol header" travels on the wire.</p>
+</details>
+<details><summary>Interview check: where would you place a WebSocket in the OSI model?</summary>
+  <p>It is negotiated via an HTTP/1.1 Upgrade (L7), then provides a long-lived, message-framed, bidirectional
+  dialog over one TCP connection — functionally session-layer behavior implemented at the application layer.
+  Best answer: "established at L7, providing L5-style dialog semantics over L4" — and saying it that way shows
+  you treat OSI as vocabulary, not dogma.</p>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="layer6">9. Layer 6 — Presentation: same bytes, same meaning</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 6 — Presentation</span></p>
+
+<p><strong>Purpose (as designed):</strong> make sure both sides <em>interpret</em> bytes identically —
+representation, independent of meaning-of-the-conversation (L7) and delivery (L4 and below). In 1984 this was
+urgent: IBM mainframes encoded text as EBCDIC (Extended Binary Coded Decimal Interchange Code), minicomputers
+used ASCII (American Standard Code for Information Interchange) — the literal bytes for the string
+<code>"HELLO"</code> differed machine to machine, as did integer byte order and floating-point formats.
+Someone had to translate. The OSI answer included a whole notation language (ASN.1 — Abstract Syntax Notation
+One — still alive inside TLS certificates).</p>
+
+<p><strong>The modern reality:</strong> like L5, there is no separate presentation software layer — but its
+concerns are <em>your daily job</em>, shipped inside libraries your process links:</p>
+
+<ul>
+  <li><strong>Character encoding:</strong> UTF-8 (Unicode Transformation Format, 8-bit) won the encoding wars.
+  Every mojibake bug — <code>café</code> rendering as <code>cafÃ©</code> because someone decoded UTF-8 bytes
+  as Latin-1 — is a presentation-layer failure, in your code.</li>
+  <li><strong>Serialization:</strong> turning objects into bytes and back. JSON (JavaScript Object Notation) via
+  Jackson in Spring or <code>JSON.parse</code> in Node.js; Protocol Buffers (protobuf) in gRPC; Avro on Kafka
+  topics (with a schema registry to keep producers and consumers agreeing). When a consumer crashes on a
+  producer's new field, you are debugging Layer 6 concerns.</li>
+  <li><strong>Compression:</strong> gzip/brotli responses negotiated by <code>Accept-Encoding</code> and
+  <code>Content-Encoding</code> headers — fewer bytes at the cost of CPU.</li>
+  <li><strong>Encryption — traditionally placed here:</strong> textbooks put encryption at L6 ("transform the
+  representation so eavesdroppers can't read it"). Reality is messier, and worth being honest about:</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — where does TLS live? (the honest answer)</div>
+  <p>TLS sits <strong>between TCP and the application protocol</strong>: above L4, below L7. Its handshake and
+  resumption are session-layer behavior (L5); its record encryption transforms representation (L6); people
+  argue about it in forums with surprising passion. The truth a senior engineer states calmly:
+  <strong>the layers above 4 are blurry in TCP/IP reality</strong> — the model is OSI, the wire is TCP/IP, and
+  TCP/IP simply calls everything above transport "application." Say "TLS runs between the transport and
+  application layers — L5/L6 in OSI terms" and you are both correct and obviously fluent. What TLS is
+  <em>not</em> is "Layer 7" — HTTP is the L7 protocol; HTTPS means "HTTP <em>through</em> a TLS pipe"
+  (Part 8).</p>
+</div>
+
+<div class="figure-title">Fig 2.9 — Where the upper layers actually live in your process</div>
+<pre class="diagram">
+   ┌────────────────────────────────────────────────────────────┐
+   │  YOUR PROCESS (JVM / node / uvicorn)                       │
+   │                                                            │
+   │   L7  application protocol      HTTP message structure     │
+   │   ────────────────────────────────────────────────────     │
+   │   L6  presentation ideas        Jackson (JSON), UTF-8,     │
+   │                                 gzip, TLS record crypto    │
+   │   ────────────────────────────────────────────────────     │
+   │   L5  session ideas             TLS handshake/resumption,  │
+   │                                 keep-alive, channels       │
+   ├────────────────────────────────────────────────────────────┤
+   │  OS KERNEL                                                 │
+   │   L4  TCP        ← from here down, distinct real layers    │
+   │   L3  IP                                                   │
+   ├────────────────────────────────────────────────────────────┤
+   │  NIC + NETWORK   L2 Ethernet / L1 signals                  │
+   └────────────────────────────────────────────────────────────┘
+    to TCP, everything above is ONE opaque byte stream;
+    the "layers" 5–7 are roles inside your process, not software strata
+</pre>
+
+<details><summary>Interview check: in OSI terms, where does JSON serialization happen?</summary>
+  <p>Presentation (L6) — translating between in-memory structures and an agreed byte representation, including
+  character encoding (UTF-8). In implementation it happens inside your application process via libraries
+  (Jackson, <code>json</code> module), which is the general fate of L6: a real concern with no separate layer of
+  software. Content negotiation (<code>Content-Type</code>, <code>Accept</code>, <code>Content-Encoding</code>)
+  is HTTP — an L7 protocol — carrying presentation metadata.</p>
+</details>
+<details><summary>Interview check: is gzip compression L6 or L7?</summary>
+  <p>The transformation itself is a presentation concern (L6: representation, not meaning). But it is negotiated
+  and signaled by HTTP headers, an L7 mechanism, and implemented in app-level libraries or proxies. The mature
+  answer embraces the blur: "an L6 concern carried out within L7 protocols — above L4 the layers are vocabulary,
+  not separate software."</p>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="layer7">10. Layer 7 — Application: where you live</h2>
+
+<p><span class="osi-badge">📍 OSI Layer 7 — Application</span></p>
+
+<p><strong>Purpose:</strong> protocols that carry the actual semantics applications care about — Part 1's
+"meaning" problem. Everything below moves opaque bytes; Layer 7 defines what the bytes <em>say</em>: this is a
+request for a resource, here is a method and a path, here are headers, here is a status code; or: this is a
+query for a DNS record; or: here is a SQL command and here come result rows. This is your home layer — and it
+contains far more than HTTP:</p>
+
+<table>
+  <tr><th>L7 protocol</th><th>What it speaks</th><th>Where you meet it daily</th></tr>
+  <tr><td><strong>HTTP</strong> (HyperText Transfer Protocol)</td><td>request/response: methods, paths, headers, status codes</td><td>REST APIs, React fetches, health checks, webhooks (Part 7)</td></tr>
+  <tr><td><strong>DNS</strong> (Domain Name System)</td><td>name → record queries</td><td>every connection your code opens by hostname (Part 6)</td></tr>
+  <tr><td><strong>gRPC</strong></td><td>typed RPC (Remote Procedure Calls) over HTTP/2 + protobuf</td><td>service-to-service calls (Part 13)</td></tr>
+  <tr><td><strong>PostgreSQL wire protocol</strong></td><td>startup/auth, Parse/Bind/Execute, row data</td><td>everything JDBC (Java Database Connectivity) and psycopg do on port 5432</td></tr>
+  <tr><td><strong>RESP</strong> (Redis Serialization Protocol)</td><td>commands and replies as length-prefixed text</td><td>every cache get/set on port 6379</td></tr>
+  <tr><td><strong>Kafka protocol</strong></td><td>produce/fetch/offset APIs, batches</td><td>every publish and consume on port 9092</td></tr>
+  <tr><td><strong>SMTP</strong> (Simple Mail Transfer Protocol)</td><td>mail submission and relay</td><td>"send the password-reset email"</td></tr>
+  <tr><td><strong>SSH</strong> (Secure Shell)</td><td>encrypted remote terminal and tunnels</td><td><code>ssh ec2-user@…</code>, <code>git push</code></td></tr>
+</table>
+
+<p>To make "a protocol your code speaks" concrete, here are real Layer 7 bytes. This is exactly what travels to
+Redis when Spring Data calls <code>redisTemplate.opsForValue().set("user", "alice")</code> — RESP is humble
+text:</p>
+
+<pre class="code">*3              ← array of 3 items follows
+$3              ← next item is 3 bytes long
+SET
+$4
+user
+$5
+alice
+                ← Redis replies:
++OK</pre>
+
+<p>And this is the kind of thing your JDBC driver exchanges with PostgreSQL — a binary protocol, sketched:</p>
+
+<pre class="code">client → server:  'Q' | length | "SELECT id, total FROM orders WHERE id=42;"
+server → client:  'T' | RowDescription: 2 fields (id int8, total numeric)
+                  'D' | DataRow: 42, 1499.00
+                  'C' | CommandComplete: "SELECT 1"
+                  'Z' | ReadyForQuery</pre>
+
+<h3>10.1 The classic confusion: "application layer" ≠ your application</h3>
+
+<p>Layer 7 is named treacherously. It does <strong>not</strong> mean "my business logic." It means <strong>the
+protocol your application speaks on the wire</strong>. Your <code>OrderController</code>, your service classes,
+Spring MVC's routing, your React components — none of that is Layer 7; it all sits <em>above</em> the model
+entirely. OSI describes communication between machines; it stops at the protocol boundary:</p>
+
+<div class="figure-title">Fig 2.10 — Your code sits ABOVE the model; L7 is the protocol, not the logic</div>
+<pre class="diagram">
+   ┌─────────────────────────────────────────────────────────┐
+   │  BUSINESS LOGIC      OrderService.placeOrder()          │   NOT in the
+   │  FRAMEWORK           Spring MVC routing, Jackson, DI    │   OSI model —
+   │                      express routes / FastAPI deps      │   above it
+   ╞═════════════════════════════════════════════════════════╡
+   │  L7  APPLICATION     the HTTP message itself:           │   OSI starts
+   │      PROTOCOL        "POST /api/orders HTTP/1.1"        │   here
+   │                      headers, status codes, body bytes  │
+   ├─────────────────────────────────────────────────────────┤
+   │  L6/L5               JSON encoding, gzip, TLS           │
+   ├─────────────────────────────────────────────────────────┤
+   │  L4  TCP → L3 IP → L2 Ethernet → L1 signals             │
+   └─────────────────────────────────────────────────────────┘
+   when Tomcat parses bytes into an HttpServletRequest, it is
+   walking the boundary between L7 and your world
+</pre>
+
+<p>The practical test: <em>could a completely different program speak it?</em> Anything — curl, a Go service, a
+browser — can speak HTTP to your API, because HTTP is a shared L7 protocol. Nothing else can call
+<code>OrderService.placeOrder()</code> directly, because that is your private code. Spring's whole web tier is
+machinery for translating between the two worlds: bytes-of-HTTP in, method calls out.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the letter's contents, written in a shared genre</div>
+  <p>In postal terms, Layers 1–4 moved the envelope; Layer 7 is the letter inside — but more precisely, it is
+  the <em>genre conventions</em> of the letter: a tax form has fields in fixed places; a formal complaint has a
+  reference number, a subject line, a body. The clerk who processes it (your framework) relies on the format to
+  extract meaning, and what the office then <em>decides</em> (your business logic) is beyond the postal system
+  altogether. HTTP is a genre: method, path, headers, blank line, body — rigid enough for any clerk anywhere to
+  parse.</p>
+</div>
+
+<details><summary>Interview check: is Spring MVC part of Layer 7?</summary>
+  <p>No — Layer 7 is the protocol (HTTP); Spring MVC is framework code <em>above</em> the model that consumes
+  and produces L7 messages. The embedded server (Tomcat/Netty) implements the HTTP protocol — parsing bytes into
+  request objects — so it operates <em>at</em> L7; your controllers and services operate on the results. The
+  distinction matters: "L7 problem" means malformed requests, wrong headers, protocol violations — not a bug in
+  business logic.</p>
+</details>
+<details><summary>Interview check: name three non-HTTP application-layer protocols a backend uses daily.</summary>
+  <p>DNS (every hostname resolution), the PostgreSQL wire protocol (every JDBC query), RESP (every Redis
+  command), the Kafka protocol (every produce/consume), SMTP (every transactional email), SSH (every deploy or
+  <code>git push</code> over SSH). Each defines its own message grammar over TCP or UDP — HTTP is just the most
+  famous tenant of L7, not the landlord.</p>
+</details>
+<details><summary>Interview check: what does an "L7-aware" component do that an L4 one cannot?</summary>
+  <p>It parses application messages, so it can route by path or Host header, terminate TLS, retry idempotent
+  requests, return its own error pages, enforce rate limits per endpoint, and inspect payloads (as a WAF — Web
+  Application Firewall — does). The cost: it must fully reconstruct the byte stream into messages — more CPU,
+  more latency, more configuration — versus an L4 device that just forwards tuples (section 11 and Part 9).</p>
+</details>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The top three layers are about meaning: Layer 7 is the language of the conversation (HTTP, DNS, the
+    database's wire language), Layer 6 is the spelling and formatting (JSON, UTF-8, compression), Layer 5 is
+    keeping a long conversation going across interruptions. In real systems all three live inside your program
+    and its libraries — and your business code sits on top of them all.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>TCP delivers an opaque byte stream; everything above it ships in-process. L7 protocols define message
+    framing and semantics (HTTP request lines, RESP types, Postgres message tags); L6 concerns define byte
+    representation (UTF-8, JSON vs protobuf, gzip); L5 concerns manage logical continuity (TLS resumption,
+    channels, keep-alive). TLS slots between TCP and the application protocol. Frameworks (Spring, Express,
+    FastAPI) are L7 <em>consumers</em>, not L7 itself.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Because L5–L7 are in-process, their boundaries are negotiable per protocol: HTTP/2 added its own framing,
+    multiplexing and flow control (transport-like features at L7); gRPC layers typed RPC over that; QUIC then
+    pulled TLS and stream multiplexing <em>into</em> the transport. The modern stack is a spiral, not a ladder —
+    each generation re-implements lower-layer ideas one level up to escape ossification. Knowing the OSI
+    vocabulary is precisely what lets you describe these inversions crisply (Parts 7–8 walk HTTP/2, HTTP/3 and
+    TLS 1.3 in this light).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="devices">11. Devices, layer by layer — how deep does each box read?</h2>
+
+<p>Every network device can be classified by one question: <strong>how deep into the packet does it look before
+deciding what to do?</strong> This single idea organizes hubs, switches, routers, load balancers, and proxies
+into one clean spectrum — and predicts their cost, speed, and capabilities:</p>
+
+<table>
+  <tr><th>Device</th><th>Operates at</th><th>Reads</th><th>Decides based on</th><th>Examples in your world</th></tr>
+  <tr><td><strong>Hub / repeater / cable</strong></td><td>L1</td><td>nothing — only signals</td><td>nothing; repeats everywhere</td><td>museum pieces; media converters</td></tr>
+  <tr><td><strong>Switch</strong></td><td>L2</td><td>Ethernet header</td><td>destination MAC + MAC table</td><td>office switches, Linux bridges, Docker networks</td></tr>
+  <tr><td><strong>Router</strong></td><td>L3</td><td>IP header</td><td>destination IP + routing table</td><td>home router, VPC route tables, core Internet routers</td></tr>
+  <tr><td><strong>L4 load balancer / firewall / NAT</strong></td><td>L4</td><td>TCP/UDP header</td><td>IP addresses + ports (the connection tuple)</td><td>AWS NLB (Network Load Balancer), security groups, iptables, kube-proxy</td></tr>
+  <tr><td><strong>L7 load balancer / reverse proxy / WAF</strong></td><td>L7</td><td>the full application message</td><td>paths, Host headers, cookies, payload content</td><td>AWS ALB (Application Load Balancer), nginx, Envoy, API gateways, WAFs</td></tr>
+</table>
+
+<div class="figure-title">Fig 2.11 — How deep into the envelope each device reads</div>
+<pre class="diagram">
+   the frame on the wire:
+   ┌─────────┬─────────┬─────────┬──────────────────────────┬─────┐
+   │ ETHERNET│   IP    │   TCP   │   HTTP (the message)     │ FCS │
+   │ header  │ header  │ header  │                          │     │
+   └─────────┴─────────┴─────────┴──────────────────────────┴─────┘
+        ▲         ▲         ▲              ▲
+        │         │         │              │
+        │         │         │              └── L7 PROXY / WAF / ALB
+        │         │         │                  opens the letter and READS it:
+        │         │         │                  route by path, block SQL injection,
+        │         │         │                  rewrite headers, terminate TLS
+        │         │         │
+        │         │         └── L4 LOAD BALANCER / FIREWALL
+        │         │             reads addresses + apartment numbers (ports);
+        │         │             never opens the letter
+        │         │
+        │         └── ROUTER  opens one flap: reads the street address (IP),
+        │                     picks the next hop, reseals
+        │
+        └── SWITCH  reads only the name on the OUTER envelope (MAC);
+                    contents are none of its business
+</pre>
+
+<p>The trade is uniform across the spectrum: <strong>deeper reading = smarter decisions = more work per
+packet</strong>. A switch's MAC lookup runs in dedicated silicon at line rate; an L7 proxy must terminate the
+TCP connection, possibly decrypt TLS, buffer and parse the entire HTTP message — orders of magnitude more CPU
+per request. This is why the same nginx box that proxies 50,000 requests/second would, as a pure L4 passthrough,
+handle several times more — and why Part 9 treats "L4 or L7?" as the first question of load-balancer design.
+A <strong>WAF</strong> (Web Application Firewall) is the deepest reader of all: it inspects request
+<em>bodies</em> hunting for SQL injection and cross-site scripting patterns — security screening that requires
+opening every letter.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>When a vendor or a job posting says a product is "Layer N," decode it as: <strong>"it makes decisions using
+  the Layer-N header and ignores everything above."</strong> An "L3 switch" is a switch that also routes; an "L4
+  LB" balances on connection tuples; an "L7 gateway" parses requests. The phrase tells you exactly what the box
+  can and cannot see — and therefore what failures it can and cannot cause.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="encapsulation">12. Encapsulation — the heart of the chapter</h2>
+
+<p>Everything so far converges here. You know the layers and their headers; now watch them <em>work together</em>
+on one real piece of data. Three definitions first, then the mechanism:</p>
+
+<ul>
+  <li><strong>Header</strong> — control information a layer prepends to the data it was given: addresses,
+  lengths, type-of-payload fields, sequence numbers. The header is that layer's message to its <em>peer layer</em>
+  on the other machine (remember Fig 2.2's horizontal conversations).</li>
+  <li><strong>Payload</strong> — the data being carried, which the carrying layer treats as an opaque blob. One
+  layer's entire output (header and all) is simply the next layer's payload.</li>
+  <li><strong>Trailer</strong> — control information appended <em>after</em> the payload. In practice only
+  Layer 2 uses one: Ethernet's 4-byte FCS, which must come last because the checksum is computed while the frame
+  streams out.</li>
+</ul>
+
+<p><strong>Encapsulation</strong> is the process: as data descends the sender's stack, each layer wraps the
+layer above's output in its own header (and trailer), like envelopes inside envelopes. Follow a real example:
+your Spring Boot API returns a 280-byte HTTP response (status line + headers + a small JSON body):</p>
+
+<div class="figure-title">Fig 2.12 — Encapsulation: one HTTP response descends the stack</div>
+<pre class="diagram">
+ L7  the application writes its message            ┌────────────────────┐
+     HTTP/1.1 200 OK + headers + JSON              │  HTTP response     │
+     = 280 bytes                                   │  280 bytes         │
+                                                   └─────────┬──────────┘
+                                                             ▼
+ L4  TCP wraps it: ports, sequence num,    ┌─────────┬────────────────────┐
+     ack num, flags, window                │ TCP hdr │  HTTP response     │
+     = SEGMENT, 300 bytes                  │ 20 B    │  280 bytes         │
+                                           └─────────┴─────────┬──────────┘
+                                                               ▼
+ L3  IP wraps THAT: src/dst IP,    ┌─────────┬─────────┬────────────────────┐
+     TTL, protocol=6               │ IP hdr  │ TCP hdr │  HTTP response     │
+     = PACKET, 320 bytes           │ 20 B    │ 20 B    │  280 bytes         │
+                                   └─────────┴─────────┴─────────┬──────────┘
+                                                                 ▼
+ L2  Ethernet wraps THAT:  ┌─────────┬─────────┬─────────┬──────────────┬─────┐
+     src/dst MAC, type,    │ ETH hdr │ IP hdr  │ TCP hdr │ HTTP response│ FCS │
+     plus FCS trailer      │ 14 B    │ 20 B    │ 20 B    │ 280 B        │ 4 B │
+     = FRAME, 338 bytes    └─────────┴─────────┴─────────┴──────────────┴─────┘
+                                                                 ▼
+ L1  the NIC streams 338 bytes (2704 bits) onto the wire as signals,
+     prefixed by the 8-byte preamble so the receiver can lock on
+</pre>
+
+<p>Now the arithmetic, because the numbers carry a lesson:</p>
+
+<pre class="code">application data (HTTP response)            280 bytes
++ TCP header                                 20 bytes   (commonly 32 with options)
++ IP header                                  20 bytes
++ Ethernet header + FCS trailer         14 + 4 bytes
+─────────────────────────────────────────────────────
+on the wire                                 338 bytes
+overhead: 58 bytes  ≈ 17% of this frame
+the rule of thumb: ~40 bytes (TCP+IP) per packet, plus 18 for Ethernet</pre>
+
+<p>That ~40–58 bytes is charged <strong>per packet, regardless of payload size</strong> — which has real
+architectural consequences. Send a 4-byte heartbeat ("PING") and the wire carries ~62 bytes: 94% overhead. Send
+telemetry as thousands of tiny messages and most of your bandwidth is envelopes, not letters. This is why
+batching is everywhere in your stack: Kafka producers accumulate records into batches before sending; Redis
+pipelining packs many commands per segment; JDBC offers batch inserts; TCP itself has Nagle's algorithm, which
+delays tiny writes hoping to coalesce them (and which you will meet in Part 4, because it famously interacts
+badly with delayed ACKs). Conversely, a full 1460-byte payload in a 1500-byte frame is ~97% efficient — big
+writes amortize the envelope tax.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — envelopes inside envelopes</div>
+  <p>You write a letter (L7 data). You seal it in an envelope addressed "Flat 4B" with a note "page 3 of 7 —
+  confirm receipt" (L4: port + sequencing + reliability). That goes inside a courier envelope addressed
+  "14 Marine Drive, Mumbai 400001" (L3: the end-to-end postal address). At each leg of the journey, the courier
+  slips it into a transport pouch labeled only with the next sorting hub (L2: this hop's addressing), and the
+  pouch physically rides a truck (L1). At every hub the pouch is discarded and a new one is labeled for the next
+  leg — but the inner envelopes are never opened. Each wrapper speaks to exactly one audience: the pouch to this
+  truck's driver, the courier envelope to the sorting system, the inner envelope to the building's mail room,
+  the letter to the human. That is encapsulation, complete and exact.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Each layer treats everything handed down from above as an <strong>opaque payload</strong> — TCP does not
+  parse HTTP; IP does not parse TCP; Ethernet does not parse IP. Each header is a private letter to the same
+  layer on the receiving side. This opacity is the entire magic: it is why HTTPS can encrypt L7 without breaking
+  routers, why HTTP/3 could swap transports without rewiring the Internet, and why a packet capture shows neat
+  nested structures (section 16). The names matter too — use them precisely: L2 <strong>frame</strong>,
+  L3 <strong>packet</strong>, L4 <strong>segment</strong> (TCP) or <strong>datagram</strong> (UDP), L5–7
+  <strong>message/data</strong>. Saying "the frame's TTL" or "the packet's port" in an interview signals
+  confusion; the correct pairings signal fluency.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>To send data, each layer puts the data in its own envelope with its own addressing: the app's message
+    goes inside a TCP envelope (which program), inside an IP envelope (which computer), inside an Ethernet
+    envelope (which neighbor on this hop). Each envelope adds a few dozen bytes, so many tiny messages waste
+    capacity — which is why systems batch small messages together.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Down the sender's stack, each layer prepends its header (L2 also appends the FCS trailer): 280 B of HTTP
+    becomes a 300 B segment, a 320 B packet, a 338 B frame. Headers carry peer-to-peer control data: ports/seq
+    (L4), IPs/TTL/protocol (L3), MACs/EtherType (L2). Fixed ~58 B/packet overhead makes throughput
+    payload-size-dependent; MTU 1500 caps the frame's payload, so TCP segments large responses into multiple
+    packets (MSS — Maximum Segment Size — in Part 4).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Encapsulation nests deeper than the textbook four: VXLAN in Kubernetes overlays wraps your Ethernet frame
+    in UDP+IP+Ethernet again (frame-in-packet-in-frame), TLS wraps HTTP in records inside TCP, and a VPN can wrap
+    the whole VXLAN affair once more — every wrapper spending MTU budget and CPU. Real performance work counts
+    envelopes: per-packet overhead × packets/second is why NICs offload segmentation (TSO/GRO — TCP Segmentation
+    Offload / Generic Receive Offload, where the NIC splits/merges segments in hardware), why jumbo frames
+    (9000-byte MTU) exist inside data centers, and why "many small writes" is a pathology you fix with batching,
+    not bigger pipes.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="decapsulation">13. Decapsulation — unwrapping at the receiver</h2>
+
+<p><strong>Decapsulation</strong> is the mirror process at the destination: each layer reads <em>its own</em>
+header (the letter from its peer), acts on it, strips it, and hands the remaining payload up. Each layer also
+answers two questions before passing anything along: <em>"is this intact?"</em> and <em>"is this for me — and
+who gets it next?"</em></p>
+
+<div class="figure-title">Fig 2.13 — Decapsulation: each layer strips its header and hands the rest up</div>
+<pre class="diagram">
+ L1  NIC samples signals, locks clock via preamble,
+     reconstructs 338 bytes                                 338 B
+        │  hands bits up
+        ▼
+ L2  checks FCS (corrupt? → silently drop)
+     dst MAC mine? (or broadcast?)  → strip 14+4 B
+     EtherType 0x0800 → give payload to the IPv4 code       320 B
+        │
+        ▼
+ L3  dst IP mine? (a router would say NO and FORWARD;
+     a host says yes)  → validate header, strip 20 B
+     protocol = 6 → give payload to TCP                     300 B
+        │
+        ▼
+ L4  dst port 8080 → which socket? finds the LISTEN-ing
+     process, checks seq number, sends ACK, strips 20 B     280 B
+        │
+        ▼
+ L7  the bytes "HTTP/1.1 200 OK …" reach the process
+     that owns the socket — Tomcat parses the message,
+     and your code receives a ResponseEntity               meaning
+</pre>
+
+<p>Notice the three "type" fields acting as a chain of forwarding instructions — EtherType says "IPv4 is
+inside," IP's protocol field says "TCP is inside," TCP's port says "the process on socket 8080 gets it." Each
+header's job is partly to name its payload's recipient one layer up; without those fields, the receiver would
+hold bytes with no idea which code should interpret them. And notice the failure behaviors, because they shape
+debugging: a bad FCS is dropped <em>silently</em> (L2 never apologizes); a wrong-host IP is forwarded or
+dropped; a closed port triggers an active TCP RST ("connection refused"); a malformed HTTP message earns a
+<code>400 Bad Request</code>. The higher the layer, the chattier the failure — a gradient you will exploit in
+section 17.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — one response, every representation at once</div>
+  <p>While that 280-byte response is in flight, it simultaneously exists as: a <code>ResponseEntity</code>
+  object in your JVM's heap; 280 bytes in a kernel socket buffer; a 300-byte TCP segment with seq/ack numbers;
+  a 320-byte IP packet with TTL 64 ticking down; a 338-byte Ethernet frame; and 2,704 bits of voltage
+  transitions. Six honest descriptions of the same data, one per layer — and tools exist at each altitude:
+  your debugger sees the object, <code>ss</code> sees the socket, <code>tcpdump</code> sees segments and
+  packets, the switch counts frames, <code>ethtool -S</code> counts symbol errors.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="journey">14. The packet journey — hop by hop, layer by layer</h2>
+
+<p>Encapsulation showed the vertical story; now the horizontal one. Your laptop on home Wi-Fi requests
+<code>GET /api/orders</code> from a server at <code>203.0.113.50</code>. Watch which layers each device along
+the path processes — and, crucially, which headers survive the trip and which are rewritten at every hop:</p>
+
+<div class="figure-title">Fig 2.14 — Multi-hop journey: how high each hop climbs the stack</div>
+<pre class="diagram">
+ LAPTOP          SWITCH /         HOME            ISP &amp; BACKBONE        SERVER
+ 192.168.1.23    ACCESS POINT     ROUTER          ROUTERS (×10)         203.0.113.50
+                                  (+ NAT)
+ ┌─────┐                                                                ┌─────┐
+ │ L7  │ builds HTTP                                                    │ L7  │ parses HTTP
+ │ L6/5│ (TLS, JSON…)                                                   │ L6/5│
+ │ L4  │ TCP seq/ack ◄─────────── end-to-end conversation ────────────► │ L4  │ TCP acks
+ │ L3  │ IP ◄──────────────────── end-to-end addresses ───────────────► │ L3  │ IP
+ │ L2  │      ┌──────┐      ┌────────┐         ┌────────┐               │ L2  │
+ │ L1  │      │ L2   │      │ L3     │         │ L3     │               │ L1  │
+ └──┬──┘      │ L1   │      │ L2  L1 │         │ L2  L1 │               └──▲──┘
+    │         └──────┘      └────────┘         └────────┘                  │
+    └── frame 1 ──► reads ──► frame 2 ────────► frame 3…n ────────────────┘
+        (Wi-Fi)     MAC only   NEW Ethernet      NEW frame per hop
+                               frame; decrements  TTL 64→63→62→…→52
+                               TTL; NAT rewrites
+                               src IP (Part 3)
+
+   switch:   climbs to L2  — reads dst MAC, forwards, never sees IP
+   routers:  climb to L3   — new L2 frame each hop, dst IP untouched
+   endpoints: climb to L7  — only they ever see TCP or HTTP
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — frames are hop-by-hop; packets are end-to-end</div>
+  <p>The Ethernet/Wi-Fi frame lives for exactly <strong>one hop</strong>: each router strips the arriving frame
+  and builds a fresh one for the next link — new source MAC (its own), new destination MAC (the next hop's,
+  learned via ARP), recomputed FCS. The IP packet inside is the <strong>end-to-end</strong> traveler: source and
+  destination IP set by your laptop survive the entire journey (with one famous exception — NAT, where your home
+  router swaps the private source IP for its public one; Part 3 dissects this). TTL is the visible heartbeat of
+  this design: 64 at your laptop, 52 on arrival — twelve routers, twelve fresh frames, one packet.</p>
+</div>
+
+<p>The same fact as a table — this is the single most clarifying exhibit in the chapter. Source/destination
+IPs are stable; MACs change on every link (MAC values abbreviated for readability):</p>
+
+<table>
+  <tr><th>Link</th><th>src MAC</th><th>dst MAC</th><th>src IP</th><th>dst IP</th></tr>
+  <tr><td>laptop → home router</td><td><code>f4:5c:89…</code> (laptop)</td><td><code>3c:fd:fe…</code> (router LAN side)</td><td>192.168.1.23</td><td>203.0.113.50</td></tr>
+  <tr><td>home router → ISP router</td><td><code>8c:3b:ad…</code> (router WAN side)</td><td><code>d4:6d:50…</code> (ISP gateway)</td><td>198.51.100.7 <em>(NAT rewrote it — Part 3)</em></td><td>203.0.113.50</td></tr>
+  <tr><td>ISP core hop</td><td><code>00:1c:73…</code></td><td><code>44:4c:a8…</code></td><td>198.51.100.7</td><td>203.0.113.50</td></tr>
+  <tr><td>last router → server</td><td><code>02:9a:f1…</code></td><td><code>0a:58:0a…</code> (server NIC)</td><td>198.51.100.7</td><td>203.0.113.50</td></tr>
+</table>
+
+<p>Why this design? Because it is the postal system's design (Part 1's analogy paying off again): the address
+on the envelope never changes, but the vehicle carrying it — and the routing label of each leg — changes at
+every sorting center. L2 is the truck of each leg; L3 is the address; L4/L7 are the letter only sender and
+recipient ever read. When Part 3 introduces ARP fully, you will see the router asking, at each hop, "who has
+the next-hop IP? tell me your MAC" — the question that builds each new frame.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>On the way to a server, your data passes through a switch (reads only local names), your router and many
+    Internet routers (read only the destination address and pass it along), and finally the server (the only
+    machine that opens everything and reads the actual request). The outer envelope is replaced at every hop;
+    the address inside stays the same the whole way.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Switches forward frames on dst MAC (L2). Routers decapsulate to L3: verify and decrement TTL, look up dst
+    IP, ARP for the next hop's MAC, re-encapsulate in a fresh frame (new MACs, new FCS). IPs persist end-to-end
+    except NAT's source rewrite at the home/VPC boundary. Only endpoints maintain TCP state and parse L7. A
+    TTL of 52 on arrival (from 64) ⇒ 12 L3 hops, each of which was also one complete L2 frame lifetime.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"Hop-by-hop L2, end-to-end L3" explains entire technology families: MAC spoofing only matters on the
+    local segment (your MAC never leaves your LAN — a common security misconception dies here); traceroute maps
+    L3 hops but is blind to switches; NAT's IP rewrite breaks the end-to-end model enough that whole protocol
+    families (FTP active mode, SIP, peer-to-peer) needed fixups; and overlay networks (VXLAN, WireGuard) work by
+    making "one L3 hop" of the underlay carry "one L2 hop" of the overlay. When debugging, always ask: am I
+    looking at a per-hop artifact (frame, MAC, switch port) or an end-to-end artifact (IP, TCP state, HTTP)?
+    Mixing them up sends you to the wrong floor of the building.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="worked-example">15. A worked packet example — one GET, fully dressed</h2>
+
+<p>Let's assemble everything into one concrete artifact: the actual request packet for
+<code>GET /api/orders</code>, byte-accurate, as it leaves your laptop. (We use plain HTTP on port 80 so the
+payload is readable; with HTTPS the HTTP bytes would be TLS-encrypted — same nesting, opaque letter. Part 8.)
+The HTTP message is 77 bytes; wrapped, it becomes a 135-byte frame:</p>
+
+<div class="figure-title">Fig 2.15 — The complete nested structure of one real request frame</div>
+<pre class="diagram">
+ ETHERNET FRAME ─ 135 bytes total ──────────────────────────────────────┐
+ │ dst MAC  3c:fd:fe:9e:a1:b0   (home router — the NEXT HOP, not the    │
+ │ src MAC  f4:5c:89:b2:7d:11   (laptop)               final server!)   │
+ │ EtherType 0x0800 (an IPv4 packet is inside)                          │
+ │ ┌─ IPv4 PACKET ─ 117 bytes ─────────────────────────────────────┐    │
+ │ │ version 4 · header 20 B · total length 117                    │    │
+ │ │ TTL 64 · protocol 6 (a TCP segment is inside)                 │    │
+ │ │ src IP  192.168.1.23      (private — NAT will rewrite)        │    │
+ │ │ dst IP  203.0.113.50      (the server, end-to-end)            │    │
+ │ │ ┌─ TCP SEGMENT ─ 97 bytes ──────────────────────────────┐     │    │
+ │ │ │ src port 52302 (ephemeral) · dst port 80 (the app)    │     │    │
+ │ │ │ seq 184101 · ack 99421 · flags PSH,ACK · window 502   │     │    │
+ │ │ │ ┌─ HTTP MESSAGE ─ 77 bytes ─ the letter itself ──┐    │     │    │
+ │ │ │ │ GET /api/orders HTTP/1.1                       │    │     │    │
+ │ │ │ │ Host: api.example.com                          │    │     │    │
+ │ │ │ │ Accept: application/json                       │    │     │    │
+ │ │ │ │                                                │    │     │    │
+ │ │ │ └────────────────────────────────────────────────┘    │     │    │
+ │ │ └────────────────────────────────────────────────────────┘     │    │
+ │ └────────────────────────────────────────────────────────────────┘    │
+ │ FCS (4 bytes — CRC over the whole frame)                              │
+ └───────────────────────────────────────────────────────────────────────┘
+   135 = 14 (ETH) + 20 (IP) + 20 (TCP) + 77 (HTTP) + 4 (FCS)
+</pre>
+
+<p>And the same frame as raw bytes — this is what a capture tool actually records. Read the annotations and
+you can decode it by hand, which is exactly the skill Wireshark automates:</p>
+
+<pre class="code">offset  bytes                                              meaning
+0000    3c fd fe 9e a1 b0                                  ETH dst MAC (router)
+0006    f4 5c 89 b2 7d 11                                  ETH src MAC (laptop)
+000c    08 00                                              EtherType: IPv4
+000e    45 00 00 75                                        IP: ver 4, hdr 20 B, total len 117
+0012    1a 2b 40 00                                        id, flags DF (don't fragment)
+0016    40 06 8f 0e                                        TTL 64 (0x40), proto 6=TCP, cksum
+001a    c0 a8 01 17                                        src IP 192.168.1.23
+001e    cb 00 71 32                                        dst IP 203.0.113.50
+0022    cc 4e 00 50                                        TCP: src port 52302, dst port 80
+0026    00 02 cf 25  00 01 84 5d                           seq 184101, ack 99421
+002e    50 18 01 f6  7a 3c 00 00                           hdr 20 B, flags PSH+ACK, win 502
+0036    47 45 54 20 2f 61 70 69 2f 6f 72 64 65 72 73 20    "GET /api/orders "
+0046    48 54 54 50 2f 31 2e 31 0d 0a 48 6f 73 74 3a 20    "HTTP/1.1..Host: "
+0056    61 70 69 2e 65 78 61 6d 70 6c 65 2e 63 6f 6d ...   "api.example.com"…</pre>
+
+<p>Every concept of the chapter is visible in those bytes: the next-hop MAC vs end-to-end IP (section 14), the
+chain of type fields <code>0x0800</code> → protocol <code>6</code> → port <code>80</code> (section 13), TTL 64
+about to start its countdown (section 6), and 58 bytes of envelope around 77 bytes of letter (section 12). When
+ASCII (American Standard Code for Information Interchange) bytes <code>47 45 54</code> spell <code>GET</code>,
+the abstraction tower touches the ground.</p>
+
+<!-- ============================================================ -->
+<h2 id="wireshark">16. Seeing the layers in Wireshark</h2>
+
+<p><strong>Wireshark</strong> is a free packet analyzer — and, pedagogically, it is <em>the OSI model rendered
+as a user interface</em>. It captures frames from your NIC and displays each one as a stack of expandable rows:
+one row per layer, in exactly the order you just learned, each row decoding that layer's header fields. The
+detail pane for our GET request looks like this:</p>
+
+<div class="figure-title">Fig 2.16 — How Wireshark displays the same packet: one row per layer</div>
+<pre class="diagram">
+ ┌─ Wireshark: packet detail ─────────────────────────────────────────┐
+ │ → Frame 42: 135 bytes on wire, 135 bytes captured        (L1 view) │
+ │ → Ethernet II, Src: f4:5c:89:b2:7d:11,                   (L2)      │
+ │      Dst: 3c:fd:fe:9e:a1:b0, Type: IPv4 (0x0800)                   │
+ │ → Internet Protocol Version 4,                           (L3)      │
+ │      Src: 192.168.1.23, Dst: 203.0.113.50, TTL: 64                 │
+ │ → Transmission Control Protocol,                         (L4)      │
+ │      Src Port: 52302, Dst Port: 80, Seq: 184101, Flags: PSH,ACK    │
+ │ ▼ Hypertext Transfer Protocol                            (L7)      │
+ │      GET /api/orders HTTP/1.1                                      │
+ │      Host: api.example.com                                         │
+ │      Accept: application/json                                      │
+ └────────────────────────────────────────────────────────────────────┘
+   click any row → the matching raw bytes highlight in the hex pane
+   (no L5/L6 rows for plain HTTP — for HTTPS a "TLS" row appears
+    between TCP and the now-encrypted application data)
+</pre>
+
+<p>Do this once and the OSI model stops being a diagram you memorized — capture your own curl and watch your
+bytes wear their envelopes:</p>
+
+<pre class="code">$ sudo tcpdump -i any -w my-curl.pcap host example.com &amp;   # start capturing
+$ curl http://example.com/                                  # make the request
+$ fg                                                        # Ctrl-C to stop capture
+$ wireshark my-curl.pcap                                    # open the capture GUI
+
+# or stay in the terminal — tcpdump prints the L3/L4 story live:
+$ sudo tcpdump -i any -n host example.com
+15:42:01.118 IP 192.168.1.23.52302 &gt; 93.184.216.34.80: Flags [S],  seq 184100
+15:42:01.162 IP 93.184.216.34.80 &gt; 192.168.1.23.52302: Flags [S.], seq 99420, ack 184101
+15:42:01.163 IP 192.168.1.23.52302 &gt; 93.184.216.34.80: Flags [.],  ack 99421
+15:42:01.164 IP 192.168.1.23.52302 &gt; 93.184.216.34.80: Flags [P.], seq 184101:184178, ack 99421</pre>
+
+<p>Those first three lines are TCP's three-way handshake — Part 4's opening act, already legible to you. In
+Kubernetes and Docker work, the same skill applies through sidecars and <code>kubectl debug</code> ephemeral
+containers; Wireshark even decodes the PostgreSQL, Kafka, DNS, and gRPC protocols by name. One habit, learned
+now, pays for the whole course: <em>when confused, look at the actual packets — the layers will tell you which
+one is lying.</em></p>
+
+<!-- ============================================================ -->
+<h2 id="debugging">17. How the OSI model guides debugging — walk up the stack</h2>
+
+<p>Here is the model's daily cash value. "The service is unreachable" names a symptom, not a cause — and the
+cause lives at exactly one layer. Amateurs guess randomly; professionals <strong>walk the stack bottom-up</strong>,
+because each layer's health is meaningless unless the layer below it is healthy, and each working layer
+eliminates an entire category of suspects:</p>
+
+<div class="figure-title">Fig 2.17 — The walk-up-the-stack interrogation</div>
+<pre class="diagram">
+ L1  is there a link at all?            ip link / ethtool: "Link detected"?
+        │ yes                           Wi-Fi connected? cable seated? NIC up?
+        ▼
+ L2  can I reach my neighbors?          ip neigh: does ARP resolve the gateway?
+        │ yes                           right VLAN? switch port forwarding?
+        ▼
+ L3  can I reach that HOST?             ping the gateway, then the server IP;
+        │ yes                           traceroute to find WHERE it dies
+        ▼
+ L4  is the PORT open / answering?      nc -zv host 8080  /  ss -ltn on the server
+        │ yes                           refused = nothing listening; timeout = firewall
+        ▼
+ L5/6 does the TLS handshake complete?  openssl s_client -connect host:443
+        │ yes                           cert expired? wrong hostname? protocol mismatch?
+        ▼
+ L7  does the protocol conversation     curl -v: what status code? what headers?
+     succeed?                           4xx/5xx = app-level — NOW read the logs
+</pre>
+
+<table>
+  <tr><th>Symptom</th><th>First suspect layer</th><th>Reach for</th></tr>
+  <tr><td>"Network cable unplugged", no link light, Wi-Fi won't associate</td><td>L1</td><td><code>ip link</code>, <code>ethtool</code>, look at the hardware</td></tr>
+  <tr><td>Can't reach the gateway; ARP entries FAILED/INCOMPLETE</td><td>L2</td><td><code>ip neigh</code>, switch/VLAN config</td></tr>
+  <tr><td>Ping fails past the gateway; "no route to host"; TTL exceeded</td><td>L3</td><td><code>ping</code>, <code>traceroute</code>, <code>ip route</code>, route tables/NACLs</td></tr>
+  <tr><td>"Connection refused" / "connection timed out" on a known-good host</td><td>L4</td><td><code>nc -zv</code>, <code>ss -ltn</code>, security groups, firewalls</td></tr>
+  <tr><td>"certificate verify failed", "handshake failure"</td><td>L5/L6</td><td><code>openssl s_client</code>, cert dates/SANs</td></tr>
+  <tr><td>4xx/5xx, malformed responses, wrong content</td><td>L7</td><td><code>curl -v</code>, app logs, the actual request</td></tr>
+</table>
+
+<p>Two refinements that mark an experienced debugger. First, <strong>bisect instead of climbing every rung</strong>:
+ping (L3) is a fast probe that splits the stack in half — if it works, forget L1–L3 and look up; if it fails,
+look down (remembering that blocked ICMP can lie — confirm with an L4 probe like <code>nc</code>). Second,
+<strong>"refused" vs "timeout" is a one-word diagnosis</strong>: refused means the host answered (stack healthy
+through L3, no listener at L4 — wrong port, crashed process, or wrong machine); timeout means silence (suspect
+L3 routing or, far more often in AWS, a security group silently eating packets). This six-question walk is the
+skeleton; Part 15 fleshes it into a full production playbook — DNS, conntrack, MTU black holes, and the
+kube-proxy mysteries included.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the walk, in an AWS minute</div>
+  <p>Your Spring Boot service in a private subnet can't reach RDS (Relational Database Service):
+  <code>ping rds-host</code> — blocked, inconclusive (ICMP is usually disabled; don't panic at L3).
+  <code>nc -zv rds-host 5432</code> — timeout. That word convicts a silent packet-dropper: the RDS security
+  group. One missing inbound rule (allow 5432 from the app's security group) later, <code>nc</code> says
+  <code>succeeded</code>, and the app connects. Total time: three commands — because each command asked one
+  layer one question.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">18. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>Walk me through the OSI layers, with one protocol or device per layer.</summary>
+    <p>Bottom-up: L1 Physical — raw bits as signals (cables, hubs, NIC PHYs). L2 Data Link — frames between
+    neighbors on one network, MAC addressing (Ethernet, Wi-Fi; switches). L3 Network — packets across networks,
+    logical addressing and routing (IP, ICMP; routers). L4 Transport — process-to-process delivery via ports,
+    reliable or not (TCP, UDP; L4 load balancers). L5 Session — long-running dialogs (TLS session resumption,
+    WebSocket lifetimes). L6 Presentation — representation: encoding, serialization, compression, encryption
+    (UTF-8, JSON, gzip, TLS records). L7 Application — protocols with application semantics (HTTP, DNS, SMTP,
+    gRPC). Adding the data units — bit, frame, packet, segment, data — turns a good answer into a great one.</p>
+  </details>
+
+  <details><summary>Why did OSI lose to TCP/IP as an implementation, yet remain the standard vocabulary?</summary>
+    <p>TCP/IP shipped first and free (in BSD Unix), was simpler (four layers, running code, pragmatic specs),
+    and had the ARPANET as a live proof; OSI's actual protocols (X.400, FTAM, CLNP) were late, complex,
+    committee-designed, and costly. But the seven-layer model was a superb <em>taxonomy</em> — precise names for
+    distinct concerns — so the industry kept the map while running the rival's territory. Hence today's reality:
+    we implement TCP/IP and we <em>speak</em> OSI ("L2 issue", "L7 load balancer").</p>
+  </details>
+
+  <details><summary>What happens, layer by layer, when you load a web page?</summary>
+    <p>Sender side: the browser builds an HTTP request (L7), serialized/encoded and usually TLS-encrypted
+    (L6/L5); TCP segments it and adds ports/sequence numbers (L4); IP wraps each segment with end-to-end
+    addresses and TTL (L3); Ethernet/Wi-Fi frames it for the first hop with MACs and an FCS (L2); the NIC
+    signals the bits (L1). Each router strips and rebuilds L2 per hop while forwarding on L3. The server
+    decapsulates in reverse — FCS check, IP match, port demux to the listening process, TLS decryption, HTTP
+    parse — then the response repeats the whole dance backward. (DNS resolution happens first — itself an L7
+    protocol over UDP — covered in Part 6.)</p>
+  </details>
+
+  <details><summary>What is the difference between a frame, a packet, and a segment?</summary>
+    <p>They are the data units of L2, L3, and L4: a TCP segment (ports, seq/ack) rides inside an IP packet
+    (end-to-end addresses, TTL), which rides inside a frame (per-hop MACs, FCS). Frames are rewritten at every
+    hop; the packet persists end-to-end; segments exist only at the endpoints. Precision matters because each
+    unit has different scope and different tools — saying "the frame's port" or "the segment's TTL" reveals a
+    muddled mental model.</p>
+  </details>
+
+  <details><summary>Hub vs switch vs router — layers, addressing, behavior?</summary>
+    <p>Hub: L1 — repeats signals out every port, no addressing, one collision domain; extinct. Switch: L2 —
+    forwards frames by destination MAC using a self-learned MAC table (flood-then-learn), giving each port
+    full-duplex isolation within one network. Router: L3 — connects <em>different</em> networks, forwards
+    packets by destination IP using routing tables, decrements TTL, rewrites L2 framing each hop. One mnemonic:
+    hub = megaphone, switch = mail room, router = post office.</p>
+  </details>
+
+  <details><summary>Explain encapsulation and its overhead implications.</summary>
+    <p>Each layer wraps the layer above's output with its own header (plus Ethernet's trailing FCS): HTTP data →
+    TCP segment → IP packet → Ethernet frame. Typical cost: ~20 B TCP + 20 B IP + 18 B Ethernet ≈ 58 B per
+    packet regardless of payload, so a 280-byte response costs 338 wire bytes (~17% overhead) while a 4-byte
+    heartbeat is ~94% overhead. Consequences: batch small messages (Kafka batching, Redis pipelining, JDBC
+    batches), respect the 1500-byte MTU, and expect tunnels (TLS, VXLAN, VPN) to add further nesting and shrink
+    usable payload.</p>
+  </details>
+
+  <details><summary>Why do MAC addresses change at every hop while IP addresses don't?</summary>
+    <p>Because they answer different questions: IP is the end-to-end destination ("which host on which
+    network"), set once by the sender; MAC is per-link delivery ("which directly-connected neighbor gets this
+    frame next"). Each router strips the arriving frame and builds a new one — its own MAC as source, the
+    ARP-resolved next hop as destination — while leaving the IP header intact except for TTL decrement (and
+    checksum update). The exception for IPs is NAT, which deliberately rewrites the source address at a network
+    boundary.</p>
+  </details>
+
+  <details><summary>Where does TLS fit in the OSI model?</summary>
+    <p>Between transport and application: above TCP, below HTTP. Its handshake and session resumption are
+    session-layer (L5) behavior; its record encryption is presentation-layer (L6) transformation; so "L5/L6" or
+    simply "between L4 and L7" are both defensible — and the honest framing is that layers above 4 are blurry in
+    the TCP/IP world, which lumps everything above transport into 'application'. What it is <em>not</em> is L7:
+    HTTPS means HTTP (the L7 protocol) carried through a TLS pipe. Strong answers note TLS encrypts the L7
+    payload, which is why L7 load balancers must terminate TLS to route by path.</p>
+  </details>
+
+  <details><summary>What is the MTU, and what happens when a packet exceeds it?</summary>
+    <p>The Maximum Transmission Unit is the largest payload a link-layer frame carries — 1500 bytes on standard
+    Ethernet. An oversized IPv4 packet is either fragmented by a router (split into offset-tagged fragments
+    reassembled at the destination) or, if the DF flag is set — the modern default — dropped with an ICMP
+    "fragmentation needed" message that lets the sender shrink (Path MTU Discovery). When firewalls block that
+    ICMP, you get an MTU black hole: small packets pass, large ones vanish — the classic "SSH works, SCP hangs"
+    or "API works, file upload hangs" bug, especially behind VPNs and Kubernetes overlays (Parts 4 and 12).</p>
+  </details>
+
+  <details><summary>What does it mean that a load balancer is "L4" vs "L7"?</summary>
+    <p>An L4 balancer decides using only transport-layer information — IP addresses and ports — forwarding bytes
+    without interpreting them: very fast, protocol-agnostic, but blind to paths and headers (AWS NLB). An L7
+    balancer terminates the connection, parses the application protocol, and routes on message content — Host,
+    path, cookies — enabling path-based routing, retries, and WAF-style inspection at higher per-request cost
+    (AWS ALB, nginx, Envoy). The layer number declares exactly which headers the device reads. Part 9 goes
+    deep.</p>
+  </details>
+
+  <details><summary>Why don't routers look at TCP headers?</summary>
+    <p>The end-to-end principle: keep the network's core simple and stateless — forwarding needs only the IP
+    header — and put intelligence (reliability, ordering, flow control) in the endpoints. This let the Internet
+    scale and let transports evolve without infrastructure upgrades. The caveat: middleboxes (NAT, firewalls,
+    load balancers) do inspect and rewrite L4, which adds capability but also state, fragility, and protocol
+    ossification — a major reason QUIC hides its transport machinery inside encrypted UDP payloads.</p>
+  </details>
+
+  <details><summary>A service is "unreachable." Describe your OSI-guided debugging approach.</summary>
+    <p>Walk up the stack, or bisect with ping: L1 — link up? (<code>ip link</code>, Wi-Fi/cable). L2 — gateway
+    ARP resolves? (<code>ip neigh</code>). L3 — can I ping/traceroute the host? where does the path die? L4 —
+    is the port open? (<code>nc -zv</code>; "refused" = no listener, "timeout" = likely firewall/security
+    group). L5/6 — TLS handshake? (<code>openssl s_client</code>: expiry, hostname). L7 — <code>curl -v</code>:
+    status code, headers, then application logs. Each passing layer eliminates a category; the first failing
+    layer names the fix.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">19. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "The OSI model is how the Internet is implemented."</strong><br>
+  ✅ The Internet runs the TCP/IP suite — four pragmatic layers; OSI's own protocols lost in the 1980s. OSI
+  survives as the industry's shared <em>vocabulary</em> and mental map: we say "L4" and "L7" while running
+  TCP and HTTP. Map, not territory — knowing the difference is itself interview material.</p>
+
+  <p><strong>❌ "TLS is Layer 7."</strong><br>
+  ✅ TLS sits between TCP and the application protocol — session-ish in its handshake (L5), presentation-ish in
+  its encryption (L6). HTTP is the L7 protocol; HTTPS is HTTP <em>through</em> TLS. The blur is real because
+  TCP/IP flattens everything above L4 — but "TLS = L7" specifically confuses the pipe with the letter
+  inside it.</p>
+
+  <p><strong>❌ "Switches understand IP addresses."</strong><br>
+  ✅ A classic switch reads only Ethernet headers — destination MACs against its learned MAC table. It forwards
+  frames carrying IP packets without ever parsing them, exactly as a courier moves boxes without reading the
+  invoices inside. ("L3 switches" exist — switch hardware that also routes — but that is a router function in a
+  switch-shaped box, and the exception that proves the layer rule.)</p>
+
+  <p><strong>❌ "Every layer is used in every communication."</strong><br>
+  ✅ Ping is ICMP directly inside IP — no transport layer at all. ARP lives at L2/L3's boundary with no IP
+  header. Plain HTTP uses no TLS, so nothing session/presentation-like appears. A switch's entire job tops out
+  at L2. The stack is a menu of services, not a mandatory parade — each conversation uses the layers it
+  needs.</p>
+
+  <p><strong>❌ "L5 and L6 are vestigial, so they're useless to know."</strong><br>
+  ✅ The <em>layers</em> dissolved into applications; the <em>concerns</em> are your daily bugs: UTF-8 vs
+  Latin-1 mojibake, JSON vs protobuf schema drift, gzip negotiation, TLS session resumption, WebSocket
+  lifecycle, connection-pool session state. Knowing the vocabulary lets you file these problems correctly — and
+  explains exactly what an "L7 proxy" can and cannot see after TLS termination.</p>
+
+  <p><strong>❌ "MAC addresses are globally unique, burned in forever, and identify you on the Internet."</strong><br>
+  ✅ MACs are routinely synthetic: hypervisors and Docker generate them (the <code>02:</code> locally-administered
+  prefix), phones randomize them per Wi-Fi network for privacy, and admins can override them. And your MAC never
+  travels past your first router — frames are rebuilt every hop — so a web server has no idea what your MAC is.
+  MAC-based "security" (Wi-Fi MAC filtering) is correspondingly weak.</p>
+
+  <p><strong>❌ "Routers rewrite the packet's addresses at every hop."</strong><br>
+  ✅ Routers rewrite the <em>frame</em> — new source/destination MACs per link — while the IP packet's
+  source and destination survive end-to-end (TTL decrement aside). The exception is NAT at network boundaries,
+  which rewrites the source IP deliberately and is the reason your laptop's 192.168.x.x address never appears
+  on the public Internet (Part 3).</p>
+
+  <p><strong>❌ "An L4 and an L7 load balancer are basically the same thing."</strong><br>
+  ✅ They read different depths and therefore live in different worlds: L4 forwards on IP:port tuples — fast,
+  content-blind, can't route <code>/api</code> differently from <code>/static</code>; L7 terminates and parses
+  HTTP — path routing, retries, header rewrites, WAF inspection, at real CPU cost and with TLS termination
+  implications. Choosing between them (or stacking both) is a core architecture decision — Part 9's whole
+  agenda.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p><strong>Looking back:</strong> Part 1 gave you ten problems; this part filed each one in a labeled drawer —
+  physics in L1, the neighborhood in L2, global addressing and pathfinding in L3, reliability and "which app"
+  in L4, meaning and trust in L5–L7 — and showed the filing system in motion: encapsulation down one stack,
+  hop-by-hop frames across the world, decapsulation up the other. <strong>Looking ahead:</strong> now we open
+  the drawers one by one. First, the layer that makes the Internet an inter-network: <a href="part03.html">
+  <strong>Part 3 — IP Addresses</strong></a> — address anatomy, subnets and CIDR, public vs private space, NAT
+  (finally explained), ARP in full, and how a routing table actually chooses a next hop. The journey diagram of
+  section 14 will become something you can configure, not just admire.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part01.html"><span class="dir">← Previous</span><span class="t">Part 1: Why Networking Exists</span></a>
+  <a href="part03.html"><span class="dir">Next →</span><span class="t">Part 3: IP Addresses</span></a>
+</div>
+
+</main>
+</body>
+</html>

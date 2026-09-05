@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 9: Load Balancers — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html" class="active"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 9 of 15</p>
+<h1>Load Balancers — Many Servers, One Front Door</h1>
+<p class="lede">In Part 5 you learned a hard rule: two Spring Boot instances cannot both bind to port 8080 on the
+same machine. In Part 7 you learned the liberating consequence: a stateless app can run as many identical copies
+as you like. This part is where those two facts collide and demand a new device — a single, stable front door
+that spreads incoming requests across a fleet of identical servers and quietly stops sending traffic to any one
+of them that dies. That device is the <strong>load balancer</strong>, and almost every production system you will
+ever touch sits behind one.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why">Why load balancers exist</a></li>
+    <li><a href="#before">What came before — and why it broke</a></li>
+    <li><a href="#scaling">Horizontal vs vertical scaling</a></li>
+    <li><a href="#core">The core mechanism — one VIP, many backends</a></li>
+    <li><a href="#health">Health checks — the feature that matters</a></li>
+    <li><a href="#l4">Layer 4 load balancing</a></li>
+    <li><a href="#l7">Layer 7 load balancing</a></li>
+    <li><a href="#l4-vs-l7">L4 vs L7 — the centerpiece comparison</a></li>
+    <li><a href="#xff">The X-Forwarded-For problem</a></li>
+    <li><a href="#algorithms">Load balancing algorithms</a></li>
+    <li><a href="#stickiness">Session persistence / stickiness</a></li>
+    <li><a href="#aws">The AWS ELB family — ALB and NLB</a></li>
+    <li><a href="#routing">Request-routing worked examples</a></li>
+    <li><a href="#ops">Operational realities — 502/503/504 and timeouts</a></li>
+    <li><a href="#journey">Where the LB sits in the request journey</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why">1. Why load balancers exist</h2>
+
+<p>Everything you have built so far in this course terminates at a single server process. In Part 1 you met the
+<strong>single point of failure</strong> — the mainframe whose death darkened every terminal in the building.
+In Part 5 you met the brick wall that says two processes cannot share one TCP port. In Part 7 you met the
+property that rescues you from both: <strong>statelessness enables horizontal scaling</strong>. The load balancer
+(LB) is the missing piece that turns those three facts into a working production architecture.</p>
+
+<p>Start by being honest about the limits of one server. A single Spring Boot instance on a single machine has
+a finite amount of everything:</p>
+
+<ul>
+  <li><strong>Finite CPU</strong> — it can only execute so many request handlers per second before threads queue.</li>
+  <li><strong>Finite RAM</strong> — the JVM heap, the HikariCP connection pool, in-flight request buffers all share one fixed pool of memory.</li>
+  <li><strong>Finite connections</strong> — there is a hard ceiling on simultaneous open sockets (the 5-tuple space and file-descriptor limits from Part 5).</li>
+  <li><strong>Finite uptime</strong> — the process <em>will</em> eventually be killed: a deploy, an out-of-memory crash, a kernel panic, a hardware fault, or simply you running <code>mvn spring-boot:run</code> again with a new build.</li>
+</ul>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>A load balancer exists to solve <strong>two distinct problems at once</strong> — and the entire chapter
+  depends on you keeping them separate in your head:</p>
+  <ol>
+    <li><strong>SCALE</strong> — one server cannot serve all your users, so spread the incoming requests across
+    many identical servers, multiplying your total capacity. This is about <em>throughput</em>: handling 50,000
+    requests per second (RPS) when one box tops out at 5,000.</li>
+    <li><strong>AVAILABILITY</strong> — any one server can die at any moment, so make sure the system survives
+    losing one (or several) of them without users noticing. This is about <em>resilience</em>: surviving a crash,
+    a bad deploy, or an entire data center going dark.</li>
+  </ol>
+  <p>A load balancer is the in-path device that achieves both by sitting between clients and a pool of servers,
+  sending each request to a server it believes is alive and not overloaded. Without it, you are back to one box:
+  one ceiling, one failure domain.</p>
+</div>
+
+<p>These two goals are not the same thing, and conflating them is a classic interview trap (we return to it in
+the misconceptions). You can have scale without availability (ten servers behind a dumb splitter that keeps
+sending traffic to a crashed one) and availability without much scale (two servers, one active and one cold
+standby). A good load balancer gives you both, but they are earned by <em>different features</em>: scale comes
+from the distribution algorithm; availability comes from health checks. Keep that distinction; it organizes
+everything below.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the receptionist at the front desk</div>
+  <p>Throughout this course we have used the postal system and a building's front desk. The load balancer is the
+  <strong>receptionist</strong>. Visitors (clients) arrive at one well-known address — the building's front door —
+  and never need to know which floor, desk, or staff member will actually help them. The receptionist looks at a
+  board of who is available, who is on a break, and who called in sick, and routes each visitor to a staffer who
+  can take them <em>right now</em>. If a staffer goes home, the receptionist simply stops sending visitors their
+  way — no visitor is sent to an empty desk. If the queue grows, you hire more staff and tell the receptionist
+  about them; visitors still walk through the same one door. The genius of the design is that the front door's
+  address never changes no matter how the staff roster churns. That stable front door is the load balancer's
+  whole reason for being.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="before">2. What came before — and why it broke</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>Before dedicated load balancers, engineers tried to spread traffic with the tools they already had. The
+  earliest and most common trick was <strong>DNS round-robin</strong> (Part 6): you give one hostname several
+  <code>A</code> records, and the DNS server hands them out in rotation, so different clients resolve
+  <code>api.example.com</code> to different server IPs. It is free, requires no new hardware, and "balances"
+  in the loosest sense. Before even that, shops did <strong>manual failover</strong>: a human (or a script
+  watching a ping) would notice the primary server was down and repoint DNS or swap a cable to the standby.
+  Both approaches were better than nothing and both were quietly broken in ways that bit operators at 3 a.m.</p>
+</div>
+
+<p>Let's be precise about <em>why</em> DNS round-robin is not a real load balancer, because understanding its
+failures is the cleanest way to understand what a load balancer must actually do. Recall from Part 6 that DNS
+answers are cached and governed by a TTL (Time To Live).</p>
+
+<div class="figure-title">Fig 9.1 — DNS round-robin and its four failure modes</div>
+<pre class="diagram">
+   client asks DNS:  "what is api.example.com?"
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │   DNS server     │   rotates through a static list:
+                 │  api.example.com │   203.0.113.10
+                 │   A 203.0.113.10 │   203.0.113.11
+                 │   A 203.0.113.11 │   203.0.113.12
+                 │   A 203.0.113.12 │
+                 └──────────────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+   ┌─────────┐       ┌─────────┐       ┌─────────┐
+   │ server  │       │ server  │       │ server  │  ◄── THIS ONE CRASHED,
+   │   .10   │       │   .11   │       │   .12   │      but DNS keeps
+   │  alive  │       │  alive  │       │  DEAD   │      handing out .12
+   └─────────┘       └─────────┘       └─────────┘
+</pre>
+
+<ol>
+  <li><strong>No health awareness.</strong> DNS hands out <code>.12</code> on its turn whether or not <code>.12</code>
+  is alive. It is a phone book, not a doctor — it has no idea a server crashed. One-third of your users get
+  connection-refused errors until a human edits the zone.</li>
+  <li><strong>Cache stickiness.</strong> Once a client (or its resolver, or the OS, or the browser) caches
+  <code>.10</code>, it keeps using <code>.10</code> for the whole TTL — and many clients ignore TTL and cache
+  far longer. Distribution is therefore coarse and sticky, not per-request.</li>
+  <li><strong>Uneven distribution.</strong> One corporate proxy or one mobile carrier resolving once and serving
+  thousands of users behind it sends all of them to a single IP. "Round-robin" across resolvers is nothing like
+  round-robin across users.</li>
+  <li><strong>Slow failover bounded by TTL.</strong> Even after you remove a dead server's record, clients keep
+  the old answer until their cache expires. A 300-second TTL means up to five minutes of users hitting a corpse.
+  Lower the TTL and you hammer DNS and still cannot go below seconds.</li>
+</ol>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>DNS round-robin distributes <em>names to addresses</em>, once, at lookup time, with no knowledge of server
+  health and no control after the answer leaves. What you actually need is an <strong>in-path device that makes a
+  fresh decision for every single connection, using live health data, and can react in seconds</strong>. That
+  device is the load balancer. DNS still plays a role — it points clients at the load balancer's address — but it
+  is the doorman's <em>address book</em>, not the doorman.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="scaling">3. Horizontal vs vertical scaling</h2>
+
+<p>There are exactly two ways to make a system handle more load, and the choice between them dictates whether you
+even need a load balancer.</p>
+
+<ul>
+  <li><strong>Vertical scaling (scale up)</strong> — make the one box bigger: more CPU cores, more RAM, faster
+  disks. You upgrade your EC2 instance from an <code>m5.large</code> to an <code>m5.24xlarge</code>. Simple — your
+  code does not change, there is nothing to coordinate — but it has a hard ceiling (there is a biggest box money
+  can buy), it usually requires downtime to resize, and crucially <em>it is still one failure domain</em>. A huge
+  server that crashes takes 100% of your traffic with it.</li>
+  <li><strong>Horizontal scaling (scale out)</strong> — add more boxes: run three, ten, fifty identical instances
+  and spread load across them. This needs two things: a load balancer in front, and <strong>stateless
+  application instances</strong> (Part 7) so any instance can serve any request. The payoff is enormous: capacity
+  scales nearly linearly (double the instances, roughly double the throughput), there is no single failure domain
+  (lose one of fifty and you lose 2% of capacity, not 100%), and you can grow and shrink the fleet on demand
+  (autoscaling).</li>
+</ul>
+
+<table>
+  <tr><th></th><th>Vertical scaling (scale up)</th><th>Horizontal scaling (scale out)</th></tr>
+  <tr><td><strong>How</strong></td><td>Bigger single machine</td><td>More identical machines</td></tr>
+  <tr><td><strong>Ceiling</strong></td><td>Hard — limited by largest available box</td><td>Soft — add boxes nearly indefinitely</td></tr>
+  <tr><td><strong>Failure domain</strong></td><td>One box = single point of failure</td><td>Many boxes; survive any one dying</td></tr>
+  <tr><td><strong>Needs a load balancer?</strong></td><td>No</td><td>Yes — mandatory</td></tr>
+  <tr><td><strong>Needs stateless app?</strong></td><td>No</td><td>Yes (Part 7) — or a shared session store</td></tr>
+  <tr><td><strong>Scaling cost curve</strong></td><td>Super-linear (big boxes cost disproportionately more)</td><td>Near-linear (commodity boxes)</td></tr>
+  <tr><td><strong>Downtime to scale</strong></td><td>Usually yes (resize + restart)</td><td>No — add/remove behind the LB live</td></tr>
+  <tr><td><strong>Good for</strong></td><td>Databases, stateful single-writer systems, quick wins</td><td>Stateless web/API tiers, the default for cloud-native</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — cattle, not pets</div>
+  <p>Cloud-native design prefers horizontal scaling, and the culture has a one-liner for it: treat servers like
+  <strong>cattle, not pets</strong>. A pet has a name, you nurse it back to health when it is sick, and losing it
+  is a tragedy. Cattle are numbered, interchangeable, and if one is unwell you replace it without ceremony.
+  Horizontal scaling only works if your instances are cattle — identical, disposable, stateless (Part 7) — which
+  is exactly why the load balancer can pull a dead one out of rotation and slot a fresh one in without anyone
+  noticing. Vertical scaling produces pets; horizontal scaling produces a herd plus a receptionist who manages it.</p>
+</div>
+
+<p>In practice you use both: scale the stateless app tier horizontally behind a load balancer, and scale the
+hard-to-shard database vertically (until it too needs sharding or read replicas, a Part 13 topic). The rest of
+this chapter is about the horizontal tier and the device that makes it possible.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>You can make a system handle more work two ways: get a bigger computer (vertical) or get more computers
+    (horizontal). More computers needs a "traffic director" in front — the load balancer — so users still reach
+    one address while the work is shared. The advantage of more computers is that if one breaks, the others keep
+    going.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Vertical scaling raises one node's resources; it is simple but ceiling-bound and remains a single failure
+    domain. Horizontal scaling adds nodes behind a load balancer and scales capacity near-linearly while removing
+    the single failure domain, but it requires statelessness (Part 7) so any node can serve any request — or a
+    shared session store if you cannot avoid state. Autoscaling groups add and remove nodes from the LB's pool
+    based on metrics like CPU or request count.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Horizontal scaling trades a capacity ceiling for coordination problems: you now own load distribution,
+    health detection, graceful draining, session handling, and the "thundering herd" risks of a fleet reacting in
+    unison (section 14). The economics also flip — commodity horizontal fleets ride Moore's-law pricing while
+    the biggest vertical boxes carry a premium — but databases and other single-writer systems resist horizontal
+    scaling without sharding or consensus, which is why the canonical pattern is "stateless tier scales out,
+    stateful tier scales up until it must shard." Knowing <em>which</em> tier you are scaling is half the
+    architecture interview.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="core">4. The core mechanism — one VIP, many backends</h2>
+
+<p>Here is the heart of it. Clients connect to <strong>one stable address</strong>, and the load balancer that
+owns that address forwards each request to one of N servers behind it. That stable address is either a
+<strong>VIP</strong> (Virtual IP — an IP address that belongs to the load balancer rather than to any one
+backend) or, more commonly in the cloud, a DNS name that resolves to the load balancer. The pool of servers
+behind it goes by several interchangeable names you will see in different tools:</p>
+
+<ul>
+  <li><strong>targets</strong> — AWS's word (a "target group");</li>
+  <li><strong>upstreams</strong> — Nginx's and HAProxy's word (an "upstream block");</li>
+  <li><strong>backend pool</strong> — the generic term, and what Azure calls it;</li>
+  <li><strong>members</strong> or <strong>real servers</strong> — older hardware-LB vocabulary.</li>
+</ul>
+
+<p>They all mean the same thing: the actual servers doing the work. Picture three identical Spring Boot instances,
+each listening on 8080, each on its own private IP inside your network (Part 3's <code>10.0.x.x</code> range):</p>
+
+<div class="figure-title">Fig 9.2 — One VIP in front, three Spring Boot instances behind</div>
+<pre class="diagram">
+                          clients all use ONE address
+                                       │
+                                       ▼
+                          ┌─────────────────────────┐
+       VIP / DNS name ──► │     LOAD BALANCER        │
+   api.example.com        │   owns 203.0.113.50      │
+   → 203.0.113.50         │  (the only public IP)    │
+                          └────────────┬─────────────┘
+                       picks a healthy backend by
+                       its algorithm, per request
+            ┌───────────────────────┼───────────────────────┐
+            ▼                       ▼                       ▼
+   ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+   │ Spring Boot #1  │     │ Spring Boot #2  │     │ Spring Boot #3  │
+   │  10.0.1.11:8080 │     │  10.0.1.12:8080 │     │  10.0.1.13:8080 │
+   └─────────────────┘     └─────────────────┘     └─────────────────┘
+       private IPs — not reachable from the Internet directly (Part 3)
+</pre>
+
+<p>Notice three things that make this work and that we will keep returning to:</p>
+
+<ol>
+  <li><strong>The public address belongs to the LB, not the servers.</strong> The three Spring Boot instances sit
+  on private IPs (Part 3) and are not directly reachable from the Internet. The world only ever sees
+  <code>203.0.113.50</code>. You can add a fourth instance, kill the second, redeploy the third — the front door
+  is unchanged.</li>
+  <li><strong>The port problem from Part 5 dissolves.</strong> All three instances happily bind to 8080 because
+  they are on different machines (different IPs), so the 5-tuple is unique for each. The LB then maps its own
+  listener port (say 443) to whichever backend's 8080 it chose.</li>
+  <li><strong>Statelessness (Part 7) is what lets this be transparent.</strong> Because any instance can serve any
+  request, the LB is free to pick a different backend for every request from the same user. If the app stuffed
+  session data in instance #1's memory, request two landing on #2 would break — which is the sticky-session
+  problem we revisit in section 11.</li>
+</ol>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — but isn't the LB itself a single point of failure?</div>
+  <p>Yes — and this is the most important caveat in the chapter. If everything funnels through one load balancer
+  and that load balancer dies, you have simply <em>moved</em> the single point of failure, not removed it. The
+  fix is that a real load balancer is never one box. It runs as a <strong>redundant HA (High Availability)
+  pair</strong> — two LB nodes sharing the VIP, one taking over instantly if the other fails — or, in the cloud,
+  as a <strong>managed, horizontally-scaled fleet</strong>. AWS runs an Application Load Balancer as a managed
+  service spread across multiple Availability Zones (Part 11), automatically scaling its own capacity; you never
+  see or run "the box." So the load balancer must itself be highly available, by the same logic that made you
+  build it in the first place. We will hammer this point again in the misconceptions, because interviewers love
+  the "isn't the LB a SPOF?" question.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — one published phone number, a bank of receptionists</div>
+  <p>A large company publishes a single phone number on its website. Internally, that number rings a bank of
+  receptionists, and a switchboard routes your call to whichever one is free. You, the caller, never dial a
+  specific receptionist's extension and never notice when one goes to lunch. And the switchboard itself is not a
+  single fragile machine in a closet — it is duplicated, with a backup that takes over silently if the primary
+  fails. The published number is the VIP; the receptionists are the backends; the switchboard is the
+  highly-available load balancer.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Users connect to one address. Behind that address, the load balancer secretly forwards each request to one
+    of several identical servers. Users never know how many servers there are or which one answered. And the load
+    balancer is itself duplicated so it does not become the new weak point.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The LB owns a virtual IP (VIP) or DNS name and maintains a pool of backend targets on private IPs. For each
+    incoming request it selects a healthy target by its algorithm and forwards traffic, mapping its listener port
+    to the target's port. Backends bind the same port on different hosts, so the 5-tuple (Part 5) stays unique.
+    The LB is deployed as an HA pair or managed multi-AZ fleet so it is not itself a single point of failure.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"One VIP, many backends" hides real choices: whether the LB terminates the connection (L7) or forwards it
+    (L4), whether it preserves or rewrites the source IP (SNAT, section 6), how the VIP fails over (gratuitous ARP
+    for an on-prem HA pair, or DNS/anycast for a managed fleet), and how state about which client maps to which
+    backend is kept (or deliberately not kept). Managed cloud LBs additionally scale their own data plane, so the
+    "single VIP" is often many physical nodes behind one anycast address resolved per-AZ — meaning the front door
+    is itself a small distributed system.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="health">5. Health checks — the feature that makes it more than a splitter</h2>
+
+<p>If a load balancer only spread requests evenly, it would be a glorified splitter — and would happily send
+one-third of your traffic to a crashed server, exactly like DNS round-robin. What elevates a load balancer to a
+real availability device is the <strong>health check</strong>: the LB continuously asks each backend "are you
+okay?" and routes only to the ones that say yes. This is the feature that delivers the AVAILABILITY goal from
+section 1.</p>
+
+<h3>5.1 Active vs passive checks</h3>
+
+<ul>
+  <li><strong>Active health checks</strong> — the LB proactively probes each backend on a schedule, e.g. an
+  HTTP <code>GET /actuator/health</code> every 15 seconds. If the backend returns 200, it is healthy; if it
+  times out or returns a non-2xx, a failure is recorded. After a configured number of consecutive failures (the
+  <em>unhealthy threshold</em>), the LB stops routing to it; after a number of consecutive successes (the
+  <em>healthy threshold</em>), it brings it back. This is the primary mechanism.</li>
+  <li><strong>Passive health checks</strong> — the LB also watches <em>real</em> traffic. If a backend starts
+  returning connection resets or 5xx errors on actual user requests, the LB can mark it suspect without waiting
+  for the next active probe. Passive checks react faster to sudden failures but cannot, by themselves, tell when
+  a server has recovered (no real traffic is being sent to it) — so they pair with active checks.</li>
+</ul>
+
+<div class="figure-title">Fig 9.3 — Active health checking pulls a dead backend out of rotation</div>
+<pre class="diagram">
+   LOAD BALANCER probes each target every 15s on /actuator/health
+        │                    │                    │
+        ▼                    ▼                    ▼
+   ┌─────────┐          ┌─────────┐          ┌─────────┐
+   │ #1 .11  │          │ #2 .12  │          │ #3 .13  │
+   │ 200 OK  │          │ 200 OK  │          │ time-out│
+   │ HEALTHY │          │ HEALTHY │          │ ✗ ✗ ✗   │  3 fails in a row
+   └─────────┘          └─────────┘          └─────────┘  → UNHEALTHY
+        ▲                    ▲
+        │                    │              (no new traffic routed here
+   traffic flows        traffic flows        until it passes the health
+   here                 here                 check again)
+</pre>
+
+<h3>5.2 Shallow vs deep checks — a genuine trade-off</h3>
+
+<p>What the health endpoint actually <em>tests</em> is a real design decision with a sharp edge:</p>
+
+<ul>
+  <li><strong>Shallow check</strong> — "is the process up and accepting connections?" This is a bare TCP connect,
+  or an HTTP 200 from a trivial <code>/health</code> that returns <code>{"status":"UP"}</code> without touching
+  any dependency. Cheap, fast, and it answers exactly one question: is the server listening?</li>
+  <li><strong>Deep check</strong> — "is this server actually able to do useful work?" The health endpoint itself
+  pings the database, checks the Redis connection, verifies it can reach a downstream service. Spring Boot
+  Actuator does this out of the box: <code>/actuator/health</code> aggregates a <code>db</code> indicator (runs
+  a validation query through HikariCP), a <code>redis</code> indicator, a <code>diskSpace</code> indicator, and
+  more.</li>
+</ul>
+
+<div class="callout misconception">
+  <div class="callout-title">⚠️ The deep-check cascade — read this twice</div>
+  <p>Deep checks sound strictly better, but they have a famous failure mode. Suppose all ten instances share one
+  database, and the database has a brief hiccup. Every instance's deep <code>/actuator/health</code> now returns
+  <code>DOWN</code> because the DB indicator fails. The load balancer dutifully marks <strong>all ten healthy
+  servers as unhealthy at once</strong> and pulls the entire fleet out of rotation — turning a recoverable
+  30-second database blip into a total outage, and possibly a cascading one as retries pile up. The lesson:
+  a health check should report whether <em>this instance</em> is healthy, not whether a <em>shared dependency</em>
+  is healthy. A common compromise is a "liveness" check that is shallow (am I up?) and a separate "readiness"
+  check that is deeper (can I serve traffic?) but scoped carefully — a distinction Kubernetes formalizes and
+  Part 12 explores.</p>
+</div>
+
+<p>Here is what a real AWS target-group health-check configuration looks like, and the JSON the LB gets back from
+a Spring Boot instance:</p>
+
+<pre class="code"># AWS target group health check (console / CLI settings)
+Health check protocol:   HTTPS
+Health check path:       /actuator/health
+Health check port:       traffic-port        # i.e. 8080
+Healthy threshold:       3      # 3 consecutive 200s → mark healthy
+Unhealthy threshold:     3      # 3 consecutive failures → mark unhealthy
+Timeout:                 5  seconds
+Interval:                15 seconds
+Success codes:           200
+
+# What the LB receives from GET /actuator/health on a healthy instance:
+{
+  "status": "UP",
+  "components": {
+    "db":        { "status": "UP", "details": { "database": "PostgreSQL", "validationQuery": "isValid()" } },
+    "diskSpace": { "status": "UP", "details": { "free": 21849600000, "threshold": 10485760 } },
+    "ping":      { "status": "UP" },
+    "redis":     { "status": "UP", "details": { "version": "7.2.4" } }
+  }
+}
+# HTTP 200 → target stays in rotation. Any non-200 (or no response within 5s) counts as a failure.</pre>
+
+<h3>5.3 Connection draining — graceful removal</h3>
+
+<p>What happens to requests already in flight when you take a backend out of rotation — say, during a deploy?
+If the LB kills the backend instantly, every request mid-flight is severed and users see errors. The fix is
+<strong>connection draining</strong> (AWS calls it <em>deregistration delay</em>): when a target is being
+removed, the LB stops sending it <em>new</em> requests but lets existing in-flight requests finish, up to a
+timeout (default 300 seconds on an ALB). Only then is the target fully removed.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — graceful rolling deploy</div>
+  <p>This is exactly what makes zero-downtime <strong>rolling deployments</strong> and <strong>blue/green
+  deployments</strong> work. To deploy a new version across three instances:</p>
+  <ol>
+    <li>Deregister instance #1 from the target group. The LB stops routing new requests to it but lets its
+    current requests drain (connection draining).</li>
+    <li>Once drained, deploy the new build to #1, wait for its <code>/actuator/health</code> to return 200 for
+    three consecutive checks, then register it back.</li>
+    <li>Repeat for #2, then #3. At no point are fewer than two healthy instances serving traffic, so users see
+    zero downtime.</li>
+  </ol>
+  <p>Blue/green does the same idea with two whole fleets: stand up a complete "green" fleet on the new version,
+  health-check it, then swing the LB's traffic from "blue" to "green" — and swing it straight back if anything
+  looks wrong. Health checks plus draining are the primitives that make both safe. On the application side,
+  Spring Boot supports graceful shutdown (<code>server.shutdown=graceful</code>) so the JVM finishes in-flight
+  requests and runs HikariCP's connection-cleanup callbacks before the process exits — the app's half of the same
+  handshake.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The load balancer keeps asking every server "are you okay?" every few seconds. If a server stops answering,
+    the LB stops sending it visitors until it recovers. When you deploy new code, the LB quietly stops sending new
+    requests to a server, lets it finish what it is doing, updates it, and adds it back — so users never notice.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Active checks probe an endpoint (e.g. <code>/actuator/health</code>) on an interval, using healthy and
+    unhealthy thresholds to debounce flapping; passive checks observe real-traffic errors. Shallow checks test
+    only liveness; deep checks test dependencies but risk cascading the whole fleet down when a shared dependency
+    blips. Connection draining (deregistration delay) lets in-flight requests finish before a target is removed,
+    enabling rolling and blue/green deploys.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Health-check design is a reliability discipline: scope checks to per-instance health, separate liveness
+    from readiness, and avoid coupling a server's health to a shared dependency's health to prevent correlated
+    removal. Tune thresholds and intervals against your failover SLO versus false-positive flapping; account for
+    the probe load itself on the fleet. Draining timeouts must exceed your longest legitimate request but not so
+    long that bad instances linger. Mature setups also guard against "fail-open vs fail-closed" — what should the
+    LB do if <em>every</em> target reports unhealthy? Some LBs fail open (route anyway) on the theory that a
+    fleet-wide unhealthy signal usually means a bad check, not a dead fleet.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="l4">6. Layer 4 load balancing</h2>
+
+<span class="osi-badge">📍 OSI Layer 4 — Transport</span>
+
+<p>Now the distinction this entire chapter lives on. Load balancers come in two flavors depending on which OSI
+layer (Part 2) they operate at, and the difference determines what they can and cannot see — and therefore what
+they can and cannot do.</p>
+
+<p>A <strong>Layer 4 load balancer</strong> (L4 LB) operates at the transport layer (Part 4): it works with
+TCP and UDP. The critical fact is what it can see. An L4 LB looks only at the <strong>5-tuple</strong> from
+Part 5 — source IP, source port, destination IP, destination port, and protocol — the addressing on the
+"envelope." It does <strong>not</strong> open the envelope. It has no idea whether the bytes inside are an HTTP
+GET, a SQL query, a Redis command, or a gRPC call. To an L4 LB, a connection is just a flow of bytes between two
+endpoints to be forwarded.</p>
+
+<div class="figure-title">Fig 9.4 — What an L4 load balancer can see (just the envelope)</div>
+<pre class="diagram">
+   A packet arriving at an L4 load balancer:
+
+   ┌──────────────────────────── L4 reads THIS ───────────────────────────┐
+   │  source IP      203.0.113.7      source port   54321                  │
+   │  dest IP        203.0.113.50     dest port      443        proto TCP   │
+   └───────────────────────────────────────────────────────────────────────┘
+   ┌──────────────────────────── L4 ignores THIS ──────────────────────────┐
+   │   ░░░░░ encrypted / opaque payload bytes ░░░░░                         │
+   │   could be HTTP, could be Postgres wire protocol, could be anything    │
+   │   the L4 LB never looks inside — it just forwards the flow             │
+   └───────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<h3>6.1 Two modes — NAT and Direct Server Return</h3>
+
+<ul>
+  <li><strong>Connection / NAT mode</strong> — the most common. The LB rewrites the destination IP+port of each
+  packet from the VIP to a chosen backend (destination NAT, from Part 3), and the return traffic flows back
+  through the LB. Depending on the topology, it may also rewrite the <em>source</em> address — called
+  <strong>SNAT</strong> (Source Network Address Translation) — so the backend's reply is guaranteed to return via
+  the LB. SNAT is convenient but it hides the real client IP from the backend (the backend sees the LB's IP),
+  which is the seed of the X-Forwarded-For problem in section 9.</li>
+  <li><strong>Direct Server Return (DSR)</strong> — an optimization where inbound requests pass through the LB
+  but backends reply <em>directly</em> to the client, bypassing the LB on the (usually larger) return path. This
+  lets the LB handle enormous traffic because it only touches the small inbound half. It is fiddly to set up and
+  less common in the cloud, but worth knowing the term.</li>
+</ul>
+
+<h3>6.2 The defining strengths and limits of L4</h3>
+
+<p><strong>Strengths.</strong> Because an L4 LB does almost nothing — read five fields, rewrite an address,
+forward — it is <em>extremely fast</em> and adds negligible latency. It is also <strong>protocol-agnostic</strong>:
+since it never inspects the payload, it works for <em>any</em> TCP or UDP traffic. PostgreSQL on 5432, Redis on
+6379, Kafka on 9092, raw gRPC, a custom binary protocol, plain non-HTTP TCP — an L4 LB balances them all
+identically, because to it they are just bytes. And because it does not terminate TLS, <strong>TLS passes
+straight through it untouched</strong> (TLS passthrough, Part 8): the client's encrypted session runs end-to-end
+to the backend, which holds the certificate and decrypts. The LB never sees plaintext and never needs the cert.</p>
+
+<p><strong>Limits.</strong> The very blindness that makes it fast makes it dumb about content. An L4 LB
+<strong>cannot</strong> route by URL path (it cannot see the path), cannot read or inject HTTP headers, cannot
+do cookie-based routing, cannot inject a stickiness cookie, cannot terminate TLS to inspect or modify requests.
+If you want <code>/api</code> to go to one pool and <code>/images</code> to another, an L4 LB simply cannot do
+it — that information lives inside the envelope it refuses to open.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the mail sorter who only reads the address label</div>
+  <p>An L4 load balancer is a mail sorter who reads only the address on the outside of a sealed envelope and
+  drops it into the right delivery bin. Fast, works for any kind of letter — a bill, a love letter, a legal
+  notice — because the sorter never opens anything. But ask that sorter to "send all the invoices to the finance
+  bin," and they are helpless: figuring out it is an invoice would require opening and reading the letter, which
+  is precisely what they never do. That is L4 in one image.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A Layer 4 load balancer only looks at the "to" and "from" addresses on each packet — not what is inside.
+    That makes it very fast and able to balance any kind of traffic (databases, caches, anything), but it cannot
+    make decisions based on web addresses (URLs) because it never reads them.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>An L4 LB forwards TCP/UDP flows using only the 5-tuple, via NAT (rewriting destination, optionally source
+    via SNAT) or Direct Server Return. It is protocol-agnostic and low-latency, and passes TLS through to the
+    backend untouched, so the backend terminates and the LB never sees plaintext. It cannot route by path,
+    header, or cookie, and cannot inject anything, because it does not parse the application payload.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>L4 balancing operates on flows, so its "stickiness" is naturally per-connection; cross-connection affinity
+    needs 5-tuple or source-IP hashing. SNAT exhausts ephemeral ports under very high connection counts (a real
+    scaling limit, Part 5), and source-IP preservation versus SNAT is a routing-symmetry trade-off. Because TLS is
+    opaque, an L4 LB cannot do SNI-based routing unless it peeks at the unencrypted ClientHello SNI field
+    (TLS SNI inspection) — a hybrid trick NLBs and HAProxy support without fully terminating. DSR scales the LB by
+    removing it from the response path entirely.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="l7">7. Layer 7 load balancing</h2>
+
+<span class="osi-badge">📍 OSI Layer 7 — Application (HTTP)</span>
+
+<p>A <strong>Layer 7 load balancer</strong> (L7 LB) operates at the application layer (Part 2/7). Unlike L4, it
+<strong>terminates the connection</strong> — it completes the TCP handshake (Part 4) and the TLS handshake
+(Part 8) with the client itself, decrypts the bytes, and <strong>reads the full HTTP request</strong>. Now,
+instead of seeing an opaque flow, it sees everything Part 7 taught you: the method (<code>GET</code>,
+<code>POST</code>), the path (<code>/api/orders</code>), the <code>Host</code> header, every other header, and
+the cookies. That visibility unlocks a long list of capabilities an L4 LB cannot touch.</p>
+
+<div class="figure-title">Fig 9.5 — An L7 LB reads inside the request and routes by content</div>
+<pre class="diagram">
+   client request (decrypted by the L7 LB):
+
+   ┌───────────────────────────────────────────────────────────┐
+   │  GET /api/orders/42 HTTP/1.1                               │  ◄─ L7 reads
+   │  Host: shop.example.com                                    │     ALL of this
+   │  Cookie: session=abc123                                    │
+   │  Authorization: Bearer eyJhbGci...                         │
+   └───────────────────────────────────────────────────────────┘
+                              │
+              L7 LB inspects path / host / headers / cookies
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼ path /api/*         ▼ path /auth/*         ▼ default
+   ┌─────────────┐      ┌─────────────┐        ┌─────────────┐
+   │ order-svc   │      │ auth-svc    │        │ frontend    │
+   │ pool        │      │ pool        │        │ pool        │
+   └─────────────┘      └─────────────┘        └─────────────┘
+</pre>
+
+<p>Because it reads the request, an L7 LB can do all of the following:</p>
+
+<ul>
+  <li><strong>Content / path-based routing</strong> — <code>/api/*</code> to service A, <code>/images/*</code> to
+  service B, based on the URL path.</li>
+  <li><strong>Host-based routing</strong> — <code>Host: admin.example.com</code> to the admin pool,
+  <code>Host: shop.example.com</code> to the storefront pool, all behind one IP.</li>
+  <li><strong>Header- and cookie-based routing</strong> — route <code>X-Canary: true</code> requests to the new
+  build, or route by a tenant ID header.</li>
+  <li><strong>Sticky sessions via an injected cookie</strong> — this is precisely where the Part 7 sticky-session
+  problem is actually solved. The L7 LB can set its own cookie (e.g. AWS's <code>AWSALB</code>) so the same client
+  keeps returning to the same backend. (Section 11 explains why you usually should not want this.)</li>
+  <li><strong>TLS termination</strong> — the certificate lives on the LB (Part 8). The LB decrypts, and either
+  forwards plaintext HTTP to backends on a trusted private network, or re-encrypts to the backends (TLS
+  re-encryption / end-to-end TLS).</li>
+  <li><strong>Request rewriting, redirects, compression, response caching</strong> — rewrite paths, issue
+  HTTP→HTTPS redirects, gzip responses, cache static responses.</li>
+  <li><strong>Rate limiting and WAF integration</strong> — throttle abusive clients and plug into a
+  <strong>WAF</strong> (Web Application Firewall) that inspects requests for SQL injection, XSS, and other
+  attacks — only possible because the LB can read the request.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the cost of L7</div>
+  <p>None of this is free. An L7 LB must parse HTTP for every request, must hold and manage the TLS certificate
+  and private key, must do the cryptographic work of terminating TLS, and is therefore <strong>slightly slower
+  and more resource-hungry</strong> than an L4 LB. And it is <strong>HTTP-aware only</strong> — an L7 HTTP load
+  balancer cannot balance raw PostgreSQL or Kafka traffic, because those are not HTTP. You buy intelligence with
+  CPU and protocol specificity. That is the fundamental L4-vs-L7 trade, and the next section makes it a table.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the receptionist who reads your form</div>
+  <p>If L4 is the mail sorter reading only the address, L7 is the front-desk receptionist who opens your intake
+  form, reads "I'm here for a dental appointment," and walks you to the dental wing — and who can also check your
+  ID at the door (WAF), tell you the dental wing is full and ask you to wait (rate limiting), and stamp your form
+  with a number so you see the same dentist next visit (sticky cookie). They can do all this only because they
+  read the form. The price is that reading every form takes longer than glancing at an address, and a receptionist
+  trained to read dental forms is useless for sorting raw shipping containers (non-HTTP traffic).</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A Layer 7 load balancer actually opens and reads the web request, so it knows the URL, the website name,
+    and the cookies. That lets it send <code>/api</code> requests to one group of servers and <code>/images</code>
+    to another, handle HTTPS for you, block bad requests, and more. The catch: reading everything is a bit slower,
+    and it only understands web (HTTP) traffic.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>An L7 LB terminates TCP and TLS, parses the HTTP request, and routes on path, host, header, or cookie. It
+    can inject stickiness cookies, terminate or re-encrypt TLS (cert lives on the LB, Part 8), rewrite/redirect,
+    compress, cache, rate-limit, and integrate a WAF. The cost is HTTP parsing, cert management, and TLS CPU per
+    request, plus it is HTTP-only — it cannot balance arbitrary TCP protocols.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Because the L7 LB terminates the connection, it owns connection pooling and keep-alive to backends
+    independently of client connections, enabling HTTP/2 and HTTP/1.1 multiplexing, request coalescing, and
+    retry-on-idempotent semantics. It becomes the natural place for cross-cutting concerns (authn offload, header
+    normalization, observability), which is exactly why an L7 LB blurs into a reverse proxy (Part 10) and an API
+    gateway. The trade is that it is now a stateful, CPU-bound, HTTP-semantics-bearing component on the critical
+    path — and the place where most subtle production bugs (header handling, timeouts, buffering) live.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="l4-vs-l7">8. L4 vs L7 — the centerpiece comparison</h2>
+
+<p>This is the table to memorize. If you remember one thing from this chapter, make it the difference between
+what an L4 and an L7 load balancer can see and do.</p>
+
+<table>
+  <tr><th></th><th>Layer 4 (Transport)</th><th>Layer 7 (Application / HTTP)</th></tr>
+  <tr><td><strong>OSI layer</strong></td><td>4 — TCP/UDP</td><td>7 — HTTP/HTTPS</td></tr>
+  <tr><td><strong>What it sees</strong></td><td>5-tuple only: source/dest IP + port, protocol</td><td>The full HTTP request: method, path, Host, headers, cookies, body</td></tr>
+  <tr><td><strong>Connection</strong></td><td>Forwards the flow (does not terminate)</td><td>Terminates the connection, then opens its own to the backend</td></tr>
+  <tr><td><strong>Speed / latency</strong></td><td>Extremely fast, minimal added latency</td><td>Slightly slower — must parse HTTP and do TLS work</td></tr>
+  <tr><td><strong>Routing by URL path / host?</strong></td><td>No — cannot see them</td><td>Yes — its main superpower</td></tr>
+  <tr><td><strong>Header / cookie routing?</strong></td><td>No</td><td>Yes</td></tr>
+  <tr><td><strong>TLS handling</strong></td><td>Passthrough — backend terminates, LB never sees plaintext</td><td>Terminates TLS (cert on the LB); can re-encrypt to backends</td></tr>
+  <tr><td><strong>Protocols supported</strong></td><td>Any TCP/UDP: Postgres, Redis, Kafka, gRPC, raw, non-HTTP</td><td>HTTP/HTTPS, HTTP/2, gRPC, WebSocket — application protocols it understands</td></tr>
+  <tr><td><strong>Inject stickiness cookie / WAF / compression?</strong></td><td>No</td><td>Yes</td></tr>
+  <tr><td><strong>Sees real client IP?</strong></td><td>Yes (or preserves via no-SNAT); else PROXY protocol</td><td>No directly — passes it in X-Forwarded-For (section 9)</td></tr>
+  <tr><td><strong>AWS product</strong></td><td>NLB (Network Load Balancer)</td><td>ALB (Application Load Balancer)</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — how to choose</div>
+  <p><strong>Choose L7</strong> when you are balancing HTTP/HTTPS microservices and want path- or host-based
+  routing, TLS offload, sticky cookies, request rewriting, rate limiting, or a WAF — i.e. the typical web/API
+  tier. <strong>Choose L4</strong> when you need ultra-high throughput and lowest latency, are balancing
+  non-HTTP traffic (a database, cache, message broker, or custom binary protocol), need a static IP, or want
+  <em>end-to-end</em> TLS straight to the application with the LB never holding your certificate or seeing
+  plaintext. Many real architectures use both: an L4 NLB at the very edge for a static IP and raw throughput,
+  fronting L7 ALBs that do the smart HTTP routing.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Layer 4 is fast and works with anything but is "blind" to web addresses. Layer 7 is a little slower but
+    can read web requests and route by URL, handle HTTPS, and block bad traffic. Use Layer 7 for websites and
+    APIs; use Layer 4 for databases, caches, or when you need raw speed.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>L4 forwards flows on the 5-tuple, is protocol-agnostic, low-latency, and passes TLS through. L7 terminates
+    and parses HTTP, enabling content routing, TLS offload, stickiness, rewriting, and WAF — at the cost of CPU
+    and HTTP-only support. Pick L7 for HTTP microservice routing and offload; pick L4 for non-HTTP, ultra-high
+    throughput, static IPs, or end-to-end TLS.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The decision is rarely binary in large systems: a layered topology (L4 edge for anycast static IPs and DDoS
+    absorption, L7 behind it for routing) is common, as is pushing L7 logic into a service mesh sidecar (Part 13).
+    The deeper L4-vs-L7 axis is <em>where TLS terminates</em> and <em>who owns HTTP semantics</em> — which dictates
+    where you can do authn, observability, and request mutation, and where the cert and plaintext live. Choosing
+    L4 to keep TLS end-to-end is often a compliance or zero-trust requirement, not a performance one.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="xff">9. The X-Forwarded-For problem</h2>
+
+<p>This is the section backend engineers hit in production constantly, so slow down here. The moment an L7 load
+balancer <strong>terminates</strong> the client's connection (section 7) and opens its <em>own</em> connection to
+your backend, a subtle and infuriating thing happens: your Spring Boot app no longer sees the real client. From
+the app's point of view, every request arrives <em>from the load balancer's IP</em>, because the LB is the one
+that actually connected to it.</p>
+
+<div class="figure-title">Fig 9.6 — Why the backend sees the LB's IP, not the client's</div>
+<pre class="diagram">
+   real client                 LOAD BALANCER (L7)            Spring Boot
+   203.0.113.7                 10.0.1.5                      10.0.1.11
+       │                            │                            │
+       │  TCP+TLS connection #1     │                            │
+       │ ─────────────────────────► │  terminates here           │
+       │  src = 203.0.113.7         │                            │
+       │                            │   NEW connection #2         │
+       │                            │ ─────────────────────────►  │
+       │                            │   src = 10.0.1.5  ◄──────── app's
+       │                            │  (the LB's own IP!)          getRemoteAddr()
+       │                            │                              returns 10.0.1.5
+</pre>
+
+<p>If your app naively logs <code>request.getRemoteAddr()</code>, every log line says <code>10.0.1.5</code> — the
+LB — and you have lost the real client IP entirely. Worse, if you rate-limit by remote address, you are now
+rate-limiting <em>the load balancer</em>, so one abusive client trips the limit for everyone. The solution,
+which you already met in Part 7, is a set of <code>X-Forwarded-*</code> headers the LB injects before forwarding:</p>
+
+<pre class="code"># What an L7 load balancer adds to the request before forwarding to your app:
+
+X-Forwarded-For:   203.0.113.7              # the real client IP (the one that connected to the LB)
+X-Forwarded-Proto: https                    # the client spoke HTTPS to the LB (even though LB→app is plain http)
+X-Forwarded-Host:  shop.example.com         # the Host the client originally requested
+X-Forwarded-Port:  443
+
+# If there are multiple proxies in the chain, X-Forwarded-For becomes a comma-separated list,
+# left = original client, each hop appends the IP it received the request from:
+X-Forwarded-For:   203.0.113.7, 198.51.100.4, 10.0.0.9
+#                  ^client      ^outer proxy   ^inner proxy</pre>
+
+<p>For L4 load balancers, which never parse HTTP and so cannot inject HTTP headers, the equivalent is the
+<strong>PROXY protocol</strong> — a small header prepended to the TCP stream that carries the original source IP
+and port. The backend (or the L7 LB sitting behind the L4 LB) must be configured to read it.</p>
+
+<h3>9.1 The redirect-loop trap — getScheme() returns http</h3>
+
+<p>Here is the specific bug that has cost more engineers an afternoon than almost any other in this course. When
+an L7 LB terminates TLS (section 7) and forwards <em>plain HTTP</em> to your backend on a private network, your
+Spring Boot app sees an <code>http</code> request — even though the user is on HTTPS. So
+<code>request.getScheme()</code> returns <code>"http"</code>, <code>request.isSecure()</code> returns
+<code>false</code>, and any code that says "if this request is not secure, redirect to the HTTPS version" fires —
+sending the browser to <code>https://...</code>, which the LB terminates and forwards as <code>http</code> again,
+which triggers the redirect again. You have built an <strong>infinite redirect loop</strong>, and the browser
+gives up with <code>ERR_TOO_MANY_REDIRECTS</code>.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — fixing it in Spring Boot</div>
+  <p>The fix is to tell Spring to <em>trust and honor</em> the forwarded headers, so it reconstructs the original
+  scheme, host, and client IP from <code>X-Forwarded-*</code> instead of from the LB connection it actually sees:</p>
+  <pre class="code"># application.properties — tell Spring Boot it is behind a proxy
+server.forward-headers-strategy=framework
+#   FRAMEWORK = Spring's built-in ForwardedHeaderFilter (recommended for ALB / Nginx)
+#   NATIVE    = let the servlet container (Tomcat) handle it (good for some PaaS like Cloud Foundry)
+#   NONE      = ignore the headers (the default — and the cause of the redirect loop)
+
+# After enabling, behind a TLS-terminating ALB:
+request.getScheme()      // now correctly returns "https"
+request.isSecure()       // now correctly returns true
+request.getRemoteAddr()  // now resolves to the X-Forwarded-For client IP, 203.0.113.7</pre>
+  <p>With <code>framework</code> set, <code>getScheme()</code> returns <code>https</code>, the redirect condition
+  is false, the loop never starts, and your logs and rate limiter see the real client IP again.</p>
+</div>
+
+<div class="callout misconception">
+  <div class="callout-title">⚠️ Security caveat — never blindly trust these headers</div>
+  <p><code>X-Forwarded-For</code> is just a header, and <em>anyone</em> can send it. If a client connects to you
+  directly and sends <code>X-Forwarded-For: 1.2.3.4</code>, a naive app will believe its IP is 1.2.3.4 — perfect
+  for bypassing an IP allowlist or framing another address in your logs. The rule: <strong>only trust
+  <code>X-Forwarded-For</code> from your own load balancer</strong>. Configure the set of trusted proxy IPs/ranges,
+  and take the client IP as the rightmost entry that is <em>not</em> one of your own proxies (or the leftmost,
+  depending on your trust model and how many hops you control). Trusting the header unconditionally is a real,
+  exploited vulnerability — not a theoretical one.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Behind a load balancer, your app sees the load balancer's address, not the real visitor's. The LB writes
+    the real visitor's address into a special header called <code>X-Forwarded-For</code>. You must tell your app
+    to read that header — otherwise your logs are useless and you can accidentally create an endless HTTPS
+    redirect loop.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Connection termination replaces the client's source IP with the LB's, so <code>getRemoteAddr()</code>
+    returns the LB. The LB preserves the original IP, protocol, and host in <code>X-Forwarded-For/-Proto/-Host</code>
+    (or PROXY protocol for L4). Set <code>server.forward-headers-strategy</code> so Spring reconstructs scheme/host/IP;
+    without it, TLS-terminated <code>http</code> requests cause <code>getScheme()=="http"</code> and HTTPS redirect
+    loops. Trust the headers only from known proxy IPs.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Forwarded-header handling is a trust-boundary problem: you must know exactly how many proxy hops you own to
+    pick the correct client IP from the comma list, and strip or overwrite untrusted inbound values at your edge.
+    The standardized <code>Forwarded</code> header (RFC 7239) supersedes the de-facto <code>X-Forwarded-*</code>
+    set but is less widely emitted. For L4 paths, the PROXY protocol (v1 text / v2 binary) carries the original
+    tuple and must be enabled symmetrically. Misconfiguration here underlies IP-spoofing, allowlist bypass, log
+    poisoning, and cache-poisoning via <code>X-Forwarded-Host</code> — treat these headers as attacker-controlled
+    until proven proxy-originated.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="algorithms">10. Load balancing algorithms</h2>
+
+<p>Once the LB has a set of healthy backends, how does it choose which one gets the next request? That choice is
+the <strong>load balancing algorithm</strong>, and each one encodes an assumption about your traffic. Pick the
+algorithm whose assumption matches reality and load spreads evenly; pick the wrong one and you get a hot,
+overloaded backend next to idle ones.</p>
+
+<h3>10.1 Round Robin</h3>
+
+<p>Rotate through the targets in order: request 1 → #1, request 2 → #2, request 3 → #3, request 4 → #1, and so
+on. Dead simple and the default in many tools.</p>
+
+<div class="figure-title">Fig 9.7 — Round robin cycles through the pool</div>
+<pre class="diagram">
+   req1 ──► #1        req4 ──► #1        req7 ──► #1
+   req2 ──► #2        req5 ──► #2        req8 ──► #2
+   req3 ──► #3        req6 ──► #3        req9 ──► #3
+   ──────────────────────────────────────────────────►  time
+</pre>
+
+<p><strong>Assumes:</strong> every backend has equal capacity <em>and</em> every request costs roughly the same.
+<strong>Wins</strong> for homogeneous fleets with uniform, short requests (the classic stateless web tier).
+<strong>Fails</strong> when requests vary wildly in cost — one slow report-generation request can pile up on a
+backend while round robin keeps feeding it more, oblivious to how busy it already is.</p>
+
+<h3>10.2 Weighted Round Robin</h3>
+
+<p>Like round robin, but each backend gets a weight, and bigger weights receive proportionally more requests.
+A backend with weight 3 gets three requests for every one a weight-1 backend gets.</p>
+
+<p><strong>Assumes:</strong> you know each backend's relative capacity. <strong>Wins</strong> for
+<em>heterogeneous</em> fleets (some <code>m5.large</code>, some <code>m5.2xlarge</code>) and for
+<strong>canary deployments</strong> — give the new build weight 5 and the stable build weight 95 to send 5% of
+traffic to the canary. <strong>Fails</strong> when weights are stale or request cost is uneven, same as plain
+round robin.</p>
+
+<h3>10.3 Least Connections</h3>
+
+<p>Send the next request to the backend that currently has the <em>fewest active connections</em>. This adapts to
+reality instead of assuming it: a backend bogged down with slow requests accumulates open connections, so the LB
+naturally stops piling more onto it.</p>
+
+<div class="figure-title">Fig 9.8 — Least connections sends work to the least-busy backend</div>
+<pre class="diagram">
+   current active connections per backend:
+
+   #1  ███████████   (11 active)
+   #2  ███           ( 3 active)   ◄── next request goes HERE (fewest)
+   #3  ██████        ( 6 active)
+</pre>
+
+<p><strong>Assumes:</strong> active-connection count is a good proxy for how busy a backend is.
+<strong>Wins</strong> for <em>long-lived or uneven</em> requests — streaming, large uploads/downloads, slow
+database-backed queries, WebSocket connections. <strong>Fails</strong> if connection count does not reflect real
+load (e.g. many cheap idle keep-alive connections look "busy" but are not).</p>
+
+<h3>10.4 Weighted Least Connections, Least Response Time</h3>
+
+<p><strong>Weighted Least Connections</strong> combines the two ideas: pick by fewest connections, but scaled by
+each backend's capacity weight, so a big box can hold more connections before it is considered "as busy" as a
+small one. <strong>Least Response Time</strong> (a.k.a. Least Time) goes further and routes to the backend with
+the best blend of low active connections <em>and</em> fastest recent response time — directly optimizing the
+metric users actually feel. It needs the LB to measure latency per backend, which L7 LBs can do because they see
+responses.</p>
+
+<h3>10.5 IP Hash / consistent hashing</h3>
+
+<p>Compute a hash of the client's source IP (or another key) and use it to pick a backend, so <em>the same client
+always maps to the same backend</em>. This is a poor-man's stickiness without cookies, and it is the basis of
+<strong>cache affinity</strong>: if backend #2 has cached this client's data, keep sending them to #2 so the
+cache stays warm.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — why "consistent" hashing matters</div>
+  <p>Naive hashing (<code>hash(ip) % N</code>) has a nasty property: if N changes — one backend is added or
+  removed — the modulus changes for <em>almost every</em> client, reshuffling nearly all of them to new backends
+  and blowing away every warm cache at once. <strong>Consistent hashing</strong> fixes this by placing backends
+  and clients on a hash ring, so removing one backend only re-maps the clients that were on <em>that</em> backend
+  — a minimal reshuffle — while everyone else stays put. This "only the affected slice moves" property is why
+  consistent hashing underpins distributed caches and sharded data stores, and it returns in detail in Part 13.</p>
+</div>
+
+<h3>10.6 Random and Power-of-Two-Choices</h3>
+
+<p>Pure <strong>random</strong> picks a backend at random; with enough requests it spreads roughly evenly, but
+unlucky streaks can briefly overload one. The modern default at scale is <strong>Power-of-Two-Choices</strong>:
+pick <em>two</em> backends at random and send the request to whichever of the two has fewer active connections.
+This one tweak dramatically smooths the load — it gets almost all the benefit of full least-connections without
+the LB having to track and compare <em>every</em> backend on every request, which matters enormously when there
+are thousands of backends. Two random samples plus a comparison beats both pure random and naive round robin at
+scale, which is why it is the quiet default inside many modern proxies and service meshes (Part 13).</p>
+
+<table>
+  <tr><th>Algorithm</th><th>Assumption it makes</th><th>Best used when</th></tr>
+  <tr><td>Round Robin</td><td>Equal capacity, equal request cost</td><td>Homogeneous fleet, short uniform requests</td></tr>
+  <tr><td>Weighted Round Robin</td><td>You know relative capacities</td><td>Mixed instance sizes; canary 95/5 splits</td></tr>
+  <tr><td>Least Connections</td><td>Active connections ≈ busyness</td><td>Long-lived/uneven requests: streaming, slow queries, WebSockets</td></tr>
+  <tr><td>Weighted Least Connections</td><td>Capacity-scaled busyness</td><td>Mixed sizes <em>and</em> uneven request cost</td></tr>
+  <tr><td>Least Response Time</td><td>Latency is the metric to optimize</td><td>User-facing latency-sensitive traffic</td></tr>
+  <tr><td>IP Hash / Consistent Hash</td><td>Same client should reuse same backend</td><td>Cache affinity, cookie-free stickiness</td></tr>
+  <tr><td>Power-of-Two-Choices</td><td>Two random samples approximate least-conn</td><td>Very large fleets where scanning all backends is costly</td></tr>
+</table>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The load balancer needs a rule to pick which server gets the next request. The simplest is "take turns"
+    (round robin). A smarter one is "send it to whoever is least busy right now" (least connections). Another
+    sends the same visitor to the same server every time (IP hash). Each rule is good for different situations.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Round robin and weighted round robin distribute by position/weight assuming known capacity; least
+    connections and least response time adapt to live load and latency; IP/consistent hashing pins clients to
+    backends for affinity, with consistent hashing minimizing reshuffle on membership change; power-of-two-choices
+    approximates least-connections cheaply at scale. Match the algorithm's assumption to your request profile.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Algorithm choice interacts with fleet size, request-cost variance, and observability: global least-connections
+    requires shared state that does not scale, which is why P2C (a randomized, near-stateless approximation)
+    dominates large meshes. Weighting can be dynamic (driven by backend-reported load or EWMA latency). Consistent
+    hashing trades even distribution for affinity and needs virtual nodes to avoid hot spots. The subtle failure is
+    feedback-loop instability — latency-based routing can oscillate or herd — so production systems damp signals
+    and add randomization (the same jitter logic that prevents retry storms, section 14 and Part 13).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="stickiness">11. Session persistence / stickiness</h2>
+
+<p>Sometimes you genuinely need the same client to keep hitting the same backend. The classic reason, straight
+from Part 7: an app that stores session state <em>in the memory of one instance</em>. If a user logs in and their
+session lives in instance #1's heap, then any later request the LB routes to #2 or #3 finds no session and the
+user appears logged out. <strong>Sticky sessions</strong> (session affinity) are the band-aid: the LB ensures a
+given client keeps returning to the instance that holds their session.</p>
+
+<p>An L7 LB implements stickiness by injecting a cookie. AWS's ALB sets a cookie named <code>AWSALB</code> (or a
+custom app cookie you nominate); on each subsequent request the LB reads that cookie and routes the client back
+to the same target.</p>
+
+<div class="figure-title">Fig 9.9 — Sticky sessions pin a client to one backend via a cookie</div>
+<pre class="diagram">
+   first request (no cookie):
+   client ──► LB ──► picks #2 ──► sets cookie AWSALB=encodes(#2)
+
+   later requests (cookie present):
+   client ──► LB reads AWSALB ──► always routes to #2
+                                       │
+                              ┌────────┴────────┐
+                              ▼                 (others idle by comparison)
+                         ┌─────────┐
+                         │   #2    │  ◄── this client is now PINNED here
+                         └─────────┘
+</pre>
+
+<div class="callout misconception">
+  <div class="callout-title">⚠️ Why stickiness is an anti-pattern at scale</div>
+  <p>Stickiness fixes the symptom and creates three new problems. (1) It <strong>breaks even
+  distribution</strong> — long-lived sticky clients pile onto a few backends, producing <em>hot targets</em>
+  while freshly added instances sit nearly idle, undermining the whole point of load balancing. (2) It makes
+  scaling and deploys painful — adding instances does not relieve existing sticky load, and draining a sticky
+  instance strands its sessions. (3) Worst of all, it does not even give you availability: <strong>when a sticky
+  target dies, every session pinned to it is lost</strong> — the exact users mid-checkout get logged out, which
+  is what you were trying to prevent.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the real fix is to not need stickiness</div>
+  <p>The better answer is the one from Part 7: make the app <strong>stateless</strong>, or externalize session
+  state into a <strong>shared store</strong> like Redis (Spring Session backed by Redis is the canonical pattern).
+  Then any instance can serve any request because the session lives <em>outside</em> the instances, the LB is free
+  to use any algorithm, scaling and deploys are trivial, and a dying instance loses nothing because it held
+  nothing. Stickiness is acceptable as a stopgap for a legacy app you cannot refactor today; it is not a
+  destination. If you reach for sticky sessions as your <em>default</em> design, you have skipped the Part 7
+  lesson that makes horizontal scaling work at all.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>"Sticky sessions" means the load balancer sends the same visitor back to the same server every time, using
+    a cookie. It is sometimes needed if a server remembers things about you in its own memory. But it is a band-aid:
+    the load gets uneven, and if that one server dies you lose everything it remembered. The real fix is to store
+    that memory somewhere shared (like Redis) so any server can handle you.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>L7 stickiness uses an LB-generated cookie (e.g. <code>AWSALB</code>) or a designated app cookie to pin a
+    client to a target. It compensates for in-memory session state but causes hot targets, complicates scaling and
+    draining, and loses sessions on target death. Prefer statelessness or an external session store (Redis via
+    Spring Session) so any instance can serve any request and the LB can balance freely.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Affinity trades load evenness and failure-resilience for cache/session locality; it is justified only when
+    the locality benefit (warm in-memory cache, expensive-to-rebuild per-client state) genuinely outweighs the
+    cost and you accept session loss on node failure. Where locality is the real goal, consistent hashing gives
+    affinity that degrades gracefully on membership change, unlike cookie-pinning. The durable architecture moves
+    state to an external store and treats instances as fungible — the precondition for autoscaling, spot
+    instances, and aggressive rolling deploys.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="aws">12. The AWS ELB family — ALB and NLB</h2>
+
+<p>Time to make this concrete in the cloud you will actually deploy to. AWS's load-balancing service is
+<strong>ELB</strong> (Elastic Load Balancing) — that is the umbrella brand, not a single product. Under it sit
+several load balancer types; you will spend nearly all your time with two of them.</p>
+
+<h3>12.1 ALB — Application Load Balancer (L7)</h3>
+
+<p>The <strong>ALB</strong> (Application Load Balancer) is AWS's managed <strong>Layer 7</strong> load balancer
+for HTTP, HTTPS, gRPC, and WebSocket. Its building blocks:</p>
+
+<ul>
+  <li><strong>Listeners</strong> — a listener watches a port/protocol (e.g. HTTPS on 443) for incoming connections.</li>
+  <li><strong>Rules</strong> — each listener has an ordered list of rules with <em>conditions</em> (path pattern,
+  host header, HTTP header, query string, source IP) and <em>actions</em> (forward to a target group, redirect,
+  return a fixed response). This is where path- and host-based routing lives.</li>
+  <li><strong>Target groups</strong> — the backend pools. Targets can be EC2 instances, IP addresses (for ECS/EKS
+  tasks, Part 12), or even Lambda functions. Each target group has its own health check (section 5).</li>
+  <li><strong>TLS termination via ACM</strong> — the ALB terminates HTTPS using a certificate from
+  <strong>ACM</strong> (AWS Certificate Manager, Part 8), which provisions and auto-renews the cert for free. The
+  cert lives on the ALB; you never copy a private key onto a server.</li>
+  <li><strong>WAF integration</strong> — attach AWS WAF to the ALB to filter malicious requests before they reach
+  your app.</li>
+</ul>
+
+<h3>12.2 NLB — Network Load Balancer (L4)</h3>
+
+<p>The <strong>NLB</strong> (Network Load Balancer) is AWS's managed <strong>Layer 4</strong> load balancer for
+TCP and UDP. It is built for <em>ultra-high throughput</em> and <em>ultra-low latency</em> — it can handle
+millions of requests per second (RPS) with single-digit-millisecond latency. Its distinguishing features:</p>
+
+<ul>
+  <li><strong>Static / Elastic IP per Availability Zone</strong> — an NLB gives you a fixed IP in each AZ
+  (and supports Elastic IPs), which is exactly what you need when a client or firewall must allowlist a specific
+  IP. (An ALB only gives you a DNS name, with IPs that can change.)</li>
+  <li><strong>Preserves the source IP</strong> — because it operates at L4 and can forward without SNAT, backends
+  can see the real client IP directly (no <code>X-Forwarded-For</code> needed for the IP itself).</li>
+  <li><strong>TLS passthrough or termination</strong> — an NLB can pass TLS straight through to the backend
+  (end-to-end encryption, the LB never sees plaintext) or, optionally, terminate TLS itself.</li>
+  <li><strong>Any TCP/UDP protocol</strong> — used to front non-HTTP services (databases, Kafka, custom
+  protocols) and, very commonly, placed <em>in front of ALBs</em> to give an HTTP stack a static entry IP plus
+  raw throughput.</li>
+</ul>
+
+<p>Two more members, one line each: the <strong>CLB</strong> (Classic Load Balancer) is the original, now legacy
+and deprecated — do not use it for new work; the <strong>GWLB</strong> (Gateway Load Balancer) is a specialist
+for inserting inline third-party network appliances (firewalls, deep packet inspection) into your traffic path,
+which you will rarely touch as an app engineer.</p>
+
+<table>
+  <tr><th></th><th>ALB — Application Load Balancer</th><th>NLB — Network Load Balancer</th></tr>
+  <tr><td><strong>OSI layer</strong></td><td>7 (Application)</td><td>4 (Transport)</td></tr>
+  <tr><td><strong>Protocols</strong></td><td>HTTP, HTTPS, gRPC, WebSocket</td><td>TCP, UDP, TLS</td></tr>
+  <tr><td><strong>Routing</strong></td><td>Path, host, header, query, method — content-aware</td><td>5-tuple flow only — not content-aware</td></tr>
+  <tr><td><strong>Entry address</strong></td><td>DNS name (IPs may change)</td><td>Static IP / Elastic IP per AZ</td></tr>
+  <tr><td><strong>Latency</strong></td><td>Low (HTTP parsing + TLS work)</td><td>Ultra-low (single-digit ms)</td></tr>
+  <tr><td><strong>Throughput</strong></td><td>High</td><td>Extreme — millions of RPS</td></tr>
+  <tr><td><strong>Client IP to backend</strong></td><td>Via <code>X-Forwarded-For</code></td><td>Preserved directly (no SNAT)</td></tr>
+  <tr><td><strong>TLS</strong></td><td>Terminates (ACM), can re-encrypt</td><td>Passthrough or terminate</td></tr>
+  <tr><td><strong>WAF / sticky cookie / redirects</strong></td><td>Yes</td><td>No</td></tr>
+  <tr><td><strong>Typical use</strong></td><td>HTTP microservices, path routing, TLS offload</td><td>Non-HTTP, static IP, extreme scale, front of ALBs</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — both are HA by design</div>
+  <p>This is the payoff for section 4's worry. You never run an ALB or NLB as a single box. Both are
+  <strong>multi-AZ, automatically scaled, managed services</strong> — AWS spreads the load balancer itself across
+  Availability Zones (Part 11) and grows its capacity as your traffic grows. The load balancer is therefore not
+  the single point of failure people fear; AWS has made it highly available on your behalf. When someone in an
+  interview says "but the LB is a SPOF," the correct response is "a managed cloud LB is a horizontally-scaled,
+  multi-AZ fleet, and an on-prem LB is run as an active/standby HA pair — it is the one component you specifically
+  build <em>not</em> to be a single point of failure."</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="routing">13. Request-routing worked examples</h2>
+
+<p>Let's tie it together with three concrete routing scenarios you will actually configure.</p>
+
+<h3>13.1 ALB path-based routing — splitting one domain across microservices</h3>
+
+<p>One domain, <code>shop.example.com</code>, served by three different services. The ALB has one HTTPS listener
+on 443, and its rules route by path:</p>
+
+<div class="figure-title">Fig 9.10 — Path-based routing across three target groups</div>
+<pre class="diagram">
+   Host: shop.example.com   ──►   ALB  (HTTPS :443 listener)
+                                   │
+        ┌──────────────────┬───────┴────────┬──────────────────┐
+        ▼ /api/*           ▼ /auth/*         ▼ (default)
+   ┌─────────────┐    ┌─────────────┐   ┌─────────────┐
+   │ order-svc   │    │ auth-svc    │   │ frontend    │
+   │ target grp  │    │ target grp  │   │ target grp  │
+   │ (3 targets) │    │ (2 targets) │   │ (4 targets) │
+   └─────────────┘    └─────────────┘   └─────────────┘
+</pre>
+
+<table>
+  <tr><th>Rule priority</th><th>Condition</th><th>Action</th></tr>
+  <tr><td>10</td><td>Path is <code>/api/*</code></td><td>Forward to <code>order-service</code> target group</td></tr>
+  <tr><td>20</td><td>Path is <code>/auth/*</code></td><td>Forward to <code>auth-service</code> target group</td></tr>
+  <tr><td>default</td><td>(anything else)</td><td>Forward to <code>frontend</code> target group</td></tr>
+</table>
+
+<p>Rules are evaluated in priority order; the first match wins, and the default action catches everything else.
+This is the L7 superpower from section 7 in production form — and notice an L4 NLB simply cannot do this, because
+<code>/api/*</code> is invisible to it.</p>
+
+<h3>13.2 Weighted target groups — a 90/10 canary deploy</h3>
+
+<p>You want to ship a risky change to 10% of traffic first. A single ALB rule can forward to <em>multiple</em>
+target groups with weights:</p>
+
+<pre class="code"># ALB listener rule: forward with weights (a canary release)
+Action: forward
+  target groups:
+    - order-service-stable   weight: 90     # 90% of matching requests
+    - order-service-canary   weight: 10     # 10% to the new build
+# Watch error rates and latency on the canary target group.
+# Looks good?  shift to 50/50, then 0/100.   Looks bad?  set canary weight back to 0 instantly.</pre>
+
+<p>This is weighted distribution (section 10) applied at the target-group level. If the canary's error rate or
+latency spikes, you set its weight to 0 and traffic instantly drains back to stable — a controlled, reversible
+rollout instead of a big-bang deploy.</p>
+
+<h3>13.3 NLB fronting a stateful TCP service — one stable endpoint</h3>
+
+<p>Now a non-HTTP example where only an L4 LB will do. You run a three-node Redis (or Kafka, or PostgreSQL)
+cluster and want clients to use <em>one</em> stable endpoint instead of memorizing three changing instance IPs.
+An ALB cannot help — Redis is not HTTP. An NLB can, because it balances raw TCP:</p>
+
+<div class="figure-title">Fig 9.11 — An NLB gives a TCP service one stable front door</div>
+<pre class="diagram">
+   clients ──► NLB  (TCP :6379, static IP per AZ)
+                │   balances raw TCP — never inspects the Redis protocol
+        ┌───────┼───────┐
+        ▼       ▼       ▼
+   ┌────────┐ ┌────────┐ ┌────────┐
+   │ redis  │ │ redis  │ │ redis  │
+   │ .21    │ │ .22    │ │ .23    │
+   └────────┘ └────────┘ └────────┘
+   one published endpoint; instances can be replaced behind it
+</pre>
+
+<p>The NLB forwards TCP connections to whichever node is healthy, preserves the client's source IP, and gives the
+cluster one static IP clients can allowlist. This is the canonical reason L4 load balancers still matter in an
+HTTP-dominated world — and a preview of Part 12, where a Kubernetes <code>Service</code> of type
+<code>LoadBalancer</code> provisions exactly this kind of NLB automatically, and Part 13's discussion of giving
+stateful backing services stable network identities.</p>
+
+<!-- ============================================================ -->
+<h2 id="ops">14. Operational realities — 502 / 503 / 504 and timeouts</h2>
+
+<p>When you are on call and the load balancer is returning errors, the specific status code tells you precisely
+<em>where</em> the failure is. This is one of the highest-value debugging tables in backend engineering and a
+guaranteed interview topic; it builds directly on the HTTP status codes from Part 7.</p>
+
+<table>
+  <tr><th>Status</th><th>Name</th><th>What the LB is telling you</th><th>Likely cause</th></tr>
+  <tr><td><strong>502</strong></td><td>Bad Gateway</td><td>"I reached a backend, but it gave me garbage or closed the connection unexpectedly."</td><td>Backend crashed mid-response, returned a malformed/non-HTTP reply, or dropped the connection. Often an app exception or a backend that died after the LB connected.</td></tr>
+  <tr><td><strong>503</strong></td><td>Service Unavailable</td><td>"I have <em>no healthy backend</em> to send this to."</td><td>All targets failed their health checks (deploy gone wrong, a deep-health-check cascade from section 5, or the whole fleet down). The classic "empty target group."</td></tr>
+  <tr><td><strong>504</strong></td><td>Gateway Timeout</td><td>"A backend accepted the request but did not respond before my timeout."</td><td>Backend too slow (stuck thread, slow query, deadlock), or the request legitimately takes longer than the LB's idle/response timeout.</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — read the code, locate the fault</div>
+  <p><strong>502 = backend answered badly</strong> (it is up but broken or just crashed). <strong>503 = nobody
+  is home</strong> (no healthy targets — check your health checks and deploys first). <strong>504 = backend is
+  too slow</strong> (timeout — check slow queries, thread pools, and the LB's timeout setting). Memorize this
+  triple; it turns a vague "the LB is erroring" page into a precise first hypothesis, and being able to recite it
+  cold is something interviewers specifically probe for.</p>
+</div>
+
+<h3>14.1 Idle timeout kills long-lived connections</h3>
+
+<p>Every load balancer has an <strong>idle timeout</strong> — if no bytes flow on a connection for N seconds
+(ALB default 60), the LB closes it. This silently breaks two things backend engineers care about. First,
+<strong>long requests</strong>: a report endpoint that takes 90 seconds to respond gets its connection cut at 60
+and the client sees a 504, even though the backend was working fine. Second, <strong>idle long-lived
+connections</strong>: a WebSocket or a long-held database connection that sits quiet longer than the idle timeout
+gets reaped. This connects straight back to Part 4's TCP keepalive — keepalives exist precisely to send periodic
+"still here" bytes so a connection is not mistaken for dead and torn down by an intermediary like a load balancer
+or NAT gateway. Tune the LB idle timeout above your longest legitimate request, and enable keepalives (or
+application-level heartbeats) for persistent connections.</p>
+
+<h3>14.2 Cross-zone load balancing, and the retry-storm danger</h3>
+
+<p>One-liner you should know: <strong>cross-zone load balancing</strong> lets a load balancer node in one
+Availability Zone send traffic to healthy targets in <em>other</em> AZs, smoothing imbalance when targets are
+unevenly spread across zones (on by default for ALB; opt-in, and historically with a data-transfer cost, for
+NLB).</p>
+
+<div class="callout misconception">
+  <div class="callout-title">⚠️ The thundering herd / retry storm</div>
+  <p>When a backend slows down and clients (or the LB) retry failed requests, those retries add <em>more</em>
+  load to an already-struggling system, which makes it slower, which triggers more retries — a self-amplifying
+  <strong>retry storm</strong>, a cousin of the "thundering herd" where many clients pile on at once. Naive
+  retries turn a small blip into a full outage. The defenses — <strong>retry budgets</strong> (cap retries to a
+  small fraction of total traffic so retries can never dominate), <strong>exponential backoff</strong>, and
+  <strong>jitter</strong> (randomize retry timing so clients do not all retry in lockstep) — are core
+  resilience patterns we develop properly in Part 13. For now, plant the instinct: <em>retries without budgets
+  and jitter make outages worse, not better.</em></p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>When the load balancer shows an error, the number tells you what went wrong: 502 means a server answered
+    but broke, 503 means there were no healthy servers at all, 504 means a server was too slow. Also: load
+    balancers hang up on connections that go quiet too long, which can cut off slow requests or live connections
+    like chat — that is why "keepalive" heartbeats exist.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>502/503/504 localize faults to "backend replied badly / no healthy targets / backend timed out." Idle
+    timeouts reap quiet connections (default ~60s), breaking long requests and idle WebSocket/DB connections
+    unless you raise the timeout or use TCP keepalive (Part 4) / app heartbeats. Cross-zone balancing evens out
+    uneven per-AZ target counts. Retries without budgets, backoff, and jitter cause retry storms that amplify
+    outages.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Treat LB error codes as a layered diagnosis: 503 points at health-check/deploy/control-plane issues;
+    504 at backend latency, thread-pool saturation, or timeout misconfiguration (and timeouts must be coordinated
+    end-to-end so an inner timeout fires before an outer one); 502 at protocol/connection-lifecycle mismatches
+    (keep-alive races, backend closing pooled connections the LB still holds). Idle-timeout and keepalive settings
+    must be reconciled across client, LB, and backend to avoid half-open connections. Retry safety requires
+    budgets, capped exponential backoff with jitter, circuit breaking, and idempotency keys — without them,
+    load balancers faithfully amplify a brownout into an outage.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="journey">15. Where the load balancer sits in the request journey</h2>
+
+<p>Let's place the load balancer in the full path a request travels, stitching together every part you have read
+so far. A browser asks for <code>https://shop.example.com/api/orders</code>:</p>
+
+<div class="figure-title">Fig 9.12 — The load balancer in the end-to-end request journey</div>
+<pre class="diagram">
+   1. DNS (Part 6)            2. TCP + TLS (Parts 4, 8)        3. LB decides
+   ┌──────────┐               ┌──────────────────────┐        ┌──────────────┐
+   │ browser  │  resolves     │  browser opens TCP    │        │  LB picks a  │
+   │ looks up │ ────────────► │  then TLS handshake   │ ─────► │  HEALTHY     │
+   │ shop.... │  to the LB's  │  to the LB's address  │        │  backend by  │
+   │          │  address      │  203.0.113.50:443     │        │  its algo    │
+   └──────────┘               └──────────────────────┘        └──────┬───────┘
+                                                                     │ forwards
+                                                                     ▼
+                                              ┌───────────────────────────────┐
+                                              │  Spring Boot #2  10.0.1.12     │
+   4. app handles it    ◄─────────────────────│  runs controller, queries DB  │
+                                              └───────────────────────────────┘
+                                                                     │ response
+   5. response travels back THROUGH the LB ◄──────────────────────────┘
+      LB → browser, over the same TLS session the LB terminated
+</pre>
+
+<ol>
+  <li><strong>DNS (Part 6)</strong> resolves <code>shop.example.com</code> to the load balancer's address — not
+  to any backend. The LB is what the name points at.</li>
+  <li><strong>TCP + TLS (Parts 4, 8)</strong> — the browser opens a TCP connection and performs the TLS handshake
+  <em>with the load balancer</em> (for an L7/TLS-terminating LB), so the cert lives on the LB.</li>
+  <li><strong>The LB decides</strong> — it picks a healthy backend using its algorithm (sections 5 and 10),
+  reading the path <code>/api/orders</code> if it is L7 to route to the right target group (section 13).</li>
+  <li><strong>The app handles it</strong> — your Spring Boot instance runs the controller, queries the database
+  (acting as a client itself, Part 1), and builds the response — seeing the client IP via
+  <code>X-Forwarded-For</code> (section 9).</li>
+  <li><strong>The response travels back through the LB</strong> to the browser over the same TLS session the LB
+  terminated.</li>
+</ol>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You arrived here from <a href="part08.html"><strong>Part 8 — HTTPS &amp; TLS</strong></a>, which left you
+  with the question of <em>where</em> to terminate TLS; this part answered it (often: on the load balancer) and
+  built the front door that makes many servers look like one, solving Part 1's single-point-of-failure and
+  Part 7's scaling story. Next, <a href="part10.html"><strong>Part 10 — Reverse Proxies</strong></a> zooms in on
+  the device an L7 load balancer <em>is</em>: a reverse proxy does this same connection-terminating, request-reading
+  job and adds caching, compression, and gateway features — the line between "L7 load balancer" and "reverse
+  proxy" will dissolve. Looking further ahead: <strong>Part 11</strong> wraps this ALB inside a VPC with subnets,
+  security groups, and Availability Zones; <strong>Part 12</strong> shows Kubernetes <code>Service</code> objects
+  and Ingress controllers as built-in L4 and L7 load balancers; and <strong>Part 14</strong> walks an entire
+  request through every layer of this stack end to end.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">16. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>What is the difference between a Layer 4 and a Layer 7 load balancer, and when would you choose each?</summary>
+    <p>An L4 load balancer operates at the transport layer and sees only the 5-tuple (source/destination IP and
+    port, protocol). It forwards TCP/UDP flows without inspecting the payload — fast, protocol-agnostic (works for
+    Postgres, Redis, Kafka, anything), and passes TLS through to the backend. An L7 load balancer terminates the
+    connection, reads the full HTTP request (method, path, Host, headers, cookies), and can route by path/host,
+    terminate TLS, inject sticky cookies, rewrite requests, rate-limit, and run a WAF — at the cost of HTTP parsing
+    and being HTTP-only. Choose L7 for HTTP/HTTPS microservices needing content-based routing or TLS offload;
+    choose L4 for non-HTTP traffic, ultra-high throughput/low latency, a static IP, or end-to-end TLS where the LB
+    must not hold your certificate. On AWS these are the ALB and NLB respectively.</p>
+  </details>
+
+  <details><summary>How do health checks work, and what is the deep-vs-shallow trade-off?</summary>
+    <p>The LB actively probes each backend on an interval (e.g. <code>GET /actuator/health</code> every 15s),
+    marking a target unhealthy after N consecutive failures and healthy again after N successes; it can also
+    passively observe real-traffic errors. A shallow check tests only that the process is up and listening (TCP
+    connect or a trivial 200). A deep check has the endpoint verify dependencies — database, Redis, downstream
+    services. Deep checks catch "up but useless" instances, but they have a dangerous failure mode: if all
+    instances share a database and the database blips, every deep check fails at once and the LB removes the whole
+    fleet, turning a recoverable hiccup into a total outage. The fix is to scope health to per-instance health and
+    separate liveness (am I up?) from readiness (can I serve?), rather than coupling a server's health to a shared
+    dependency's health.</p>
+  </details>
+
+  <details><summary>Explain round robin versus least connections. When does each win?</summary>
+    <p>Round robin rotates through backends in order, assuming equal capacity and equal request cost — great for a
+    homogeneous fleet handling short, uniform requests, but it keeps feeding a backend even when that backend is
+    bogged down with slow requests. Least connections sends each request to the backend with the fewest active
+    connections, adapting to real load — better for long-lived or uneven requests like streaming, large uploads,
+    slow queries, or WebSockets, where some requests tie up a backend far longer than others. Least connections
+    needs the LB to track active connections; round robin needs no state. Variants like weighted least connections
+    add capacity awareness, and power-of-two-choices approximates least connections cheaply at very large scale.</p>
+  </details>
+
+  <details><summary>What is X-Forwarded-For and why does it matter to a backend engineer?</summary>
+    <p>When an L7 load balancer terminates the client connection and opens its own to the backend, the backend
+    sees the LB's IP as the source, not the real client's. <code>X-Forwarded-For</code> is the header the LB
+    injects to preserve the original client IP (with <code>X-Forwarded-Proto</code> and <code>X-Forwarded-Host</code>
+    for the original scheme and host). It matters because without honoring it, your logs show the LB's IP, your
+    IP-based rate limiting throttles the LB instead of clients, and — most painfully — <code>request.getScheme()</code>
+    returns <code>http</code> behind a TLS-terminating LB, which can cause infinite HTTP→HTTPS redirect loops. In
+    Spring Boot you set <code>server.forward-headers-strategy=framework</code> to fix it. Critically, you must
+    only trust these headers from your own load balancer, since any client can forge them — trusting them blindly
+    is an IP-spoofing/allowlist-bypass vulnerability. For L4 LBs the equivalent is the PROXY protocol.</p>
+  </details>
+
+  <details><summary>What is the difference between an ALB and an NLB?</summary>
+    <p>The ALB is AWS's managed Layer 7 load balancer for HTTP/HTTPS/gRPC/WebSocket: it does content-based routing
+    via listeners and rules (path, host, header conditions) to target groups, terminates TLS using ACM certificates,
+    and integrates with WAF — but it exposes only a DNS name and adds HTTP-parsing latency. The NLB is AWS's
+    managed Layer 4 load balancer for TCP/UDP: ultra-high throughput (millions of RPS), single-digit-millisecond
+    latency, a static/Elastic IP per AZ, source-IP preservation, and TLS passthrough or termination — but it
+    cannot route by URL or read headers. Use the ALB for smart HTTP routing and TLS offload; use the NLB for
+    non-HTTP services, when you need a static IP, for extreme scale, or fronting ALBs. Both are multi-AZ,
+    auto-scaling, and inherently highly available.</p>
+  </details>
+
+  <details><summary>How does a stateless application make load balancing easy?</summary>
+    <p>If the app holds no per-client state in instance memory, then <em>any</em> instance can serve <em>any</em>
+    request. The load balancer is free to send each request to any healthy backend using any algorithm, with no
+    need for sticky sessions. Scaling is trivial (new instances immediately take load), deploys are trivial (drain
+    and replace any instance with no session loss), and a crashing instance loses nothing because it held nothing.
+    Statelessness (Part 7) is the precondition that makes horizontal scaling and the "cattle, not pets" model
+    work; where state is unavoidable, you externalize it to a shared store like Redis (Spring Session) rather than
+    pinning clients to instances.</p>
+  </details>
+
+  <details><summary>What do 502, 503, and 504 from a load balancer tell you?</summary>
+    <p>They localize the fault. 502 Bad Gateway means the LB reached a backend but got an invalid response or the
+    backend closed the connection unexpectedly — the backend is up but broken or just crashed mid-response.
+    503 Service Unavailable means the LB has no healthy targets to route to — typically all targets failed health
+    checks (a bad deploy, an empty target group, or a deep-health-check cascade). 504 Gateway Timeout means a
+    backend accepted the request but did not respond within the LB's timeout — a slow query, a stuck thread, or a
+    request that legitimately exceeds the configured idle/response timeout. So: 502 = backend answered badly,
+    503 = nobody healthy is home, 504 = backend too slow.</p>
+  </details>
+
+  <details><summary>Is the load balancer itself a single point of failure?</summary>
+    <p>It would be if you ran one — which is exactly why you never do. On-prem load balancers run as a redundant
+    HA (high-availability) pair, typically active/standby sharing a virtual IP, so the standby takes over the VIP
+    within seconds if the active fails. Managed cloud load balancers (AWS ALB/NLB) are horizontally-scaled,
+    multi-AZ services that AWS spreads across Availability Zones and scales automatically — there is no single box
+    to fail. So while the LB <em>concentrates</em> traffic, it is the one component specifically architected not
+    to be a single point of failure. The correct framing is that the LB removes the backends' single-point-of-failure
+    problem while being built redundantly so it does not reintroduce one.</p>
+  </details>
+
+  <details><summary>Are load balancing and high availability the same thing?</summary>
+    <p>No — they are related but distinct goals. Load balancing is about <em>scale</em>: spreading load across
+    many servers to multiply capacity. High availability is about <em>resilience</em>: surviving the failure of
+    any one server with no user-visible outage. A load balancer can deliver both, but via different features —
+    capacity comes from the distribution algorithm, availability comes from health checks pulling dead targets out
+    of rotation. You can have one without the other: a dumb splitter gives scale but not availability (it keeps
+    sending to crashed servers), and an active/standby pair gives availability but little scale. A good load
+    balancer combines them, but conflating the two is a classic mistake.</p>
+  </details>
+
+  <details><summary>Why are sticky sessions considered an anti-pattern, and what is the better solution?</summary>
+    <p>Sticky sessions pin each client to one backend (via an LB cookie like <code>AWSALB</code>) to support apps
+    that keep session state in instance memory. They are an anti-pattern at scale because they break even
+    distribution (long-lived clients create hot targets while new instances stay idle), complicate scaling and
+    draining, and — fatally — lose every pinned session when that backend dies, which is the very thing you were
+    trying to protect. The better solution is to make the app stateless or move session state to a shared store
+    such as Redis (Spring Session). Then any instance serves any request, the LB balances freely, deploys and
+    autoscaling are trivial, and an instance death loses nothing. Stickiness is acceptable only as a temporary
+    stopgap for a legacy app, never as a default design.</p>
+  </details>
+
+  <details><summary>Why does adding a load balancer not automatically make a stateful app scale?</summary>
+    <p>A load balancer spreads requests, but if instances keep per-client state in their own memory, spreading
+    those requests across instances <em>breaks</em> the app: request two may land on an instance that has never
+    seen the user, so they appear logged out or lose their cart. You either bolt on sticky sessions (an
+    anti-pattern that defeats even distribution and loses state on failure) or — the real fix — make the app
+    stateless or externalize state to a shared store. The load balancer is necessary but not sufficient for
+    horizontal scaling; statelessness (Part 7) is the other half. Adding an LB to a stateful app gives you the
+    distribution mechanism without the property that makes distribution safe.</p>
+  </details>
+
+  <details><summary>How does an L7 load balancer route requests to different services on one domain?</summary>
+    <p>Because it terminates the connection and reads the HTTP request, an L7 LB can match on path, host, header,
+    method, or query string and forward to different backend pools (target groups). On an AWS ALB you configure a
+    listener (e.g. HTTPS:443) with ordered rules: <code>/api/*</code> → order-service target group,
+    <code>/auth/*</code> → auth-service, default → frontend. Rules are evaluated by priority, first match wins,
+    and a default action catches the rest. You can also weight a single rule across multiple target groups for
+    canary releases (e.g. 90% stable, 10% canary). An L4 LB cannot do any of this because the path and headers
+    live inside the payload it never inspects.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">17. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "A load balancer is just round-robin."</strong><br>
+  ✅ Round robin is one of several algorithms (least connections, weighted, IP/consistent hash, least response
+  time, power-of-two-choices), and the algorithm is the <em>least</em> of what a load balancer does. The features
+  that make it valuable are health checking (so it never routes to a dead server), connection draining (graceful
+  deploys), L7 content routing, TLS termination, and high availability. A pure round-robin splitter with no health
+  awareness is barely better than DNS round-robin.</p>
+
+  <p><strong>❌ "An L4 load balancer can route by URL path."</strong><br>
+  ✅ It cannot. An L4 LB sees only the 5-tuple — IP addresses and ports — and never opens the payload, so the URL
+  path, Host header, and cookies are invisible to it. Path-based routing requires an L7 load balancer that
+  terminates the connection and parses HTTP. If you need <code>/api</code> and <code>/images</code> to go to
+  different pools, you need L7 (an ALB), not L4 (an NLB).</p>
+
+  <p><strong>❌ "The load balancer is a single point of failure."</strong><br>
+  ✅ Only if naively deployed as one box — which nobody does. On-prem LBs run as redundant active/standby HA pairs
+  sharing a virtual IP; managed cloud LBs (ALB/NLB) are horizontally-scaled, multi-AZ services that AWS keeps
+  highly available automatically. The load balancer is the one component you specifically build <em>not</em> to be
+  a single point of failure.</p>
+
+  <p><strong>❌ "Load balancing and high availability are the same thing."</strong><br>
+  ✅ They are different goals served by different features. Load balancing delivers <em>scale</em> via the
+  distribution algorithm; high availability delivers <em>resilience</em> via health checks that remove dead
+  backends. You can have scale without availability (a splitter that feeds crashed servers) or availability
+  without much scale (active/standby). A good LB provides both, but keep them conceptually separate.</p>
+
+  <p><strong>❌ "Sticky sessions are a normal default."</strong><br>
+  ✅ Stickiness is a band-aid for apps that wrongly keep session state in instance memory. It breaks even
+  distribution (hot targets), complicates scaling and deploys, and loses every pinned session when a backend dies.
+  The normal default is a <em>stateless</em> app or a shared session store (Redis), which lets any instance serve
+  any request. Reaching for stickiness by default means you skipped the statelessness lesson that makes scaling
+  work.</p>
+
+  <p><strong>❌ "The backend automatically sees the real client IP."</strong><br>
+  ✅ Behind an L7 LB that terminates the connection, the backend sees the <em>load balancer's</em> IP. The real
+  client IP is carried in <code>X-Forwarded-For</code> (and the PROXY protocol for L4), and your app must be
+  configured to read and trust it — otherwise logging, rate-limiting, and scheme detection all break, including
+  the infamous redirect loop from <code>getScheme()</code> returning <code>http</code>. And you must trust the
+  header only from your own LB, never from arbitrary clients.</p>
+
+  <p><strong>❌ "Adding a load balancer automatically makes my stateful app scale."</strong><br>
+  ✅ A load balancer distributes requests, but if instances hold per-client state in memory, distributing those
+  requests across instances breaks the app — users land on instances that have never seen them. Horizontal scaling
+  needs <em>both</em> a load balancer <em>and</em> statelessness (or a shared store). The LB is necessary but not
+  sufficient; statelessness (Part 7) is the missing half.</p>
+
+  <p><strong>❌ "A health check returning 200 means everything is fine."</strong><br>
+  ✅ It only means whatever the health endpoint chose to test passed. A shallow check returning 200 says the
+  process is listening, not that it can reach the database. A deep check returning 200 says dependencies are
+  reachable but risks cascading the whole fleet down when a shared dependency blips. Designing <em>what</em> the
+  health check verifies — and scoping it to per-instance health — is a real reliability decision, not a checkbox.</p>
+</div>
+
+
+
+<div class="page-nav">
+  <a href="part08.html"><span class="dir">← Previous</span><span class="t">Part 8: HTTPS &amp; TLS</span></a>
+  <a href="part10.html"><span class="dir">Next →</span><span class="t">Part 10: Reverse Proxies</span></a>
+</div>
+
+</main>
+</body>
+</html>

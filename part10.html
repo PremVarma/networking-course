@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 10: Reverse Proxies — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html" class="active"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 10 of 15</p>
+<h1>Reverse Proxies — The Gateway in Front of Your App</h1>
+<p class="lede">In Part 9 you put a load balancer in front of three Spring Boot instances and watched it spread
+traffic across them. But that box was doing more than spreading load — it was terminating TLS, rewriting
+headers, and presenting one hostname to the world. That broader role has a name: <strong>reverse proxy</strong>.
+This is the single most useful piece of infrastructure a backend engineer can understand, because it is the
+box that turns "my app on <code>localhost:8080</code>" into "a real service on the Internet."</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#what-is-a-proxy">What is a proxy (in general)?</a></li>
+    <li><a href="#forward-proxy">The forward proxy — for the client</a></li>
+    <li><a href="#reverse-proxy">The reverse proxy — for the server</a></li>
+    <li><a href="#why-exist">Why reverse proxies exist — the master list</a></li>
+    <li><a href="#canonical">The canonical pattern — Browser → Nginx → Spring Boot</a></li>
+    <li><a href="#upstreams">Upstream pools — proxy and load balancer as one box</a></li>
+    <li><a href="#three-tools">The three tools — Nginx, HAProxy, Traefik</a></li>
+    <li><a href="#disambiguation">Reverse proxy vs LB vs API gateway vs CDN</a></li>
+    <li><a href="#caching">Caching at the proxy</a></li>
+    <li><a href="#security-ops">Security &amp; ops realities</a></li>
+    <li><a href="#where-it-sits">Where it sits in the journey</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="what-is-a-proxy">1. What is a proxy (in general)?</h2>
+
+<p>Before "forward" or "reverse," before Nginx or HAProxy, there is one root idea. Strip away every adjective and
+a proxy is this:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A <strong>proxy</strong> is an intermediary that sits between two parties and relays their communication,
+  <em>speaking on behalf of one side</em>. Party A thinks it is talking to party B, but it is really talking to
+  the proxy; the proxy then talks to B. The word itself means "an agent authorized to act for another" — a proxy
+  vote is a vote someone casts on your behalf.</p>
+</div>
+
+<p>That sounds almost too simple to be worth a chapter. The power is not in the relaying — it is in
+<em>where the intermediary sits</em>. The moment every message between A and B must pass through one box, that box
+becomes a <strong>single control point</strong>. And a single control point is the most valuable real estate in
+all of systems engineering, because at one place — without changing A or B — you can:</p>
+
+<ul>
+  <li><strong>Observe</strong> — log every request, measure latency, count errors, trace a request across services.</li>
+  <li><strong>Transform</strong> — rewrite headers, compress bodies, change paths, convert HTTP/2 to HTTP/1.1.</li>
+  <li><strong>Secure</strong> — terminate TLS, check authentication, block malicious payloads, rate-limit abusers.</li>
+  <li><strong>Cache</strong> — remember a response and serve the next identical request without bothering the backend.</li>
+  <li><strong>Route</strong> — send <code>/api</code> to one place and <code>/images</code> to another; pick a healthy server out of many.</li>
+</ul>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why intermediaries are powerful</div>
+  <p>Suppose you have 40 microservices and you want every one of them to log requests, enforce TLS, and reject
+  oversized uploads. You could write that code 40 times, in five languages, and re-test it on every deploy — or
+  you could insert <em>one</em> box that every request already flows through and configure it once. Cross-cutting
+  concerns (the things every service needs but none of them is really <em>about</em>) belong at a choke point,
+  not scattered through application code. The proxy <em>is</em> that choke point. This is the same instinct that
+  put a switch in the middle of a network back in Part 1, Fig 1.2: don't wire everything to everything — route it
+  all through one smart relay.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the front desk and the personal assistant</div>
+  <p>Picture a large office building. Visitors don't wander the corridors knocking on doors; they stop at the
+  <strong>front desk</strong>. The desk checks their ID, logs them in, tells them which floor to go to, and may
+  refuse them entry. To the visitor, the desk <em>is</em> the company — it speaks for everyone behind it. That is
+  a <strong>reverse proxy</strong>: it represents the servers to the outside world.</p>
+  <p>Now picture an executive too busy to handle their own mail. They hire a <strong>personal assistant</strong>
+  who sends letters on their behalf, screens replies, and signs for packages. To the post office, the assistant
+  <em>is</em> the executive — the outside world never sees the real person. That is a <strong>forward proxy</strong>:
+  it represents the client to the outside world. Same idea — an agent who speaks for someone — pointed in opposite
+  directions. Hold this image; the whole chapter hangs on it.</p>
+</div>
+
+<p>The postal vocabulary from Part 1 maps perfectly: a proxy is the trusted middle-person who receives mail
+addressed to one party, reads or stamps it, and forwards it on. We will define <em>both</em> directions next,
+forward first, because once you see the forward proxy clearly, the reverse proxy is just the mirror image — and
+that symmetry is the single thing most engineers never quite get straight.</p>
+
+<!-- ============================================================ -->
+<h2 id="forward-proxy">2. The forward proxy — an agent for the client</h2>
+
+<p>A <strong>forward proxy</strong> sits in front of <em>clients</em>, on the client's side of the conversation.
+The client is deliberately configured to send all its outbound requests through the proxy instead of directly to
+the destination. The proxy then makes those requests on the client's behalf and passes the responses back.</p>
+
+<div class="osi-badge">OSI Layer 7 (Application) — reads HTTP · can also do Layer 4 (TCP CONNECT tunnelling for HTTPS)</div>
+
+<div class="figure-title">Fig 10.1 — A forward proxy sits in front of the clients</div>
+<pre class="diagram">
+   CLIENT SIDE (e.g. a corporate office)              THE INTERNET
+  ┌──────────────────────────────────────┐
+  │   laptop A ──┐                        │
+  │              │                        │            ┌──────────────┐
+  │   laptop B ──┼──►  ┌───────────────┐  │            │  example.com │
+  │              │     │ FORWARD PROXY │ ─┼──────────► │    server    │
+  │   laptop C ──┘     │ (squid, etc.) │  │            └──────────────┘
+  │   configured to    └───────────────┘  │
+  │   point HERE                          │      the server sees the PROXY's
+  └──────────────────────────────────────┘      IP as the client, NOT laptop A
+</pre>
+
+<p>The defining detail — say it out loud — is in that last annotation: <strong>the destination server sees the
+proxy as the client, not the real user.</strong> When <code>example.com</code> logs the request, it records the
+proxy's IP address (Part 3). The real laptop is hidden behind it. The client knows the proxy exists (it was
+configured to use it); the server does not know which actual machine is behind it.</p>
+
+<h3>2.1 What forward proxies are used for</h3>
+
+<ul>
+  <li><strong>Corporate egress filtering / ACLs.</strong> A company routes all employee web traffic through a
+  forward proxy and applies an <strong>ACL</strong> (Access Control List — a list of allow/deny rules). The proxy
+  blocks <code>facebook.com</code> during work hours, denies known-malware domains, and permits the rest. Because
+  every request flows through one box, the policy lives in one place.</li>
+  <li><strong>Caching for many users.</strong> If 500 employees all download the same 80 MB installer, a caching
+  forward proxy fetches it once and serves the other 499 from local disk — saving the expensive Internet uplink.
+  This was the original reason the famous <em>Squid</em> proxy existed in the 1990s, when bandwidth was scarce.</li>
+  <li><strong>Anonymity / hiding client IPs.</strong> Because the server only ever sees the proxy's address, the
+  real clients are masked. Whole networks can present a single outward identity.</li>
+  <li><strong>Access control &amp; logging.</strong> Who went where, when? The proxy is the audit log for all
+  outbound traffic — useful for compliance, security forensics, and "why is our bandwidth bill so high?"</li>
+  <li><strong>Bypassing geo-restrictions.</strong> A client in one country routes through a forward proxy in
+  another country; the destination sees the proxy's location and serves region-locked content accordingly.</li>
+</ul>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — and where the VPN fits</div>
+  <p>In the early Internet, bandwidth was the bottleneck, not compute. The forward proxy was born as a
+  <em>caching</em> device: CERN's <code>httpd</code> proxy (1994) and then Squid (1996) let a university or
+  company share one slow, expensive Internet link among hundreds of machines by remembering popular pages. Over
+  time the emphasis shifted from saving bandwidth to <em>control</em> — filtering, logging, policy enforcement —
+  which is why corporate forward proxies are common today even though bandwidth is cheap.</p>
+  <p>A <strong>VPN</strong> (Virtual Private Network) is a close cousin worth one paragraph here. Like a forward
+  proxy, it routes your traffic through an intermediary so the destination sees the intermediary's IP, not yours.
+  The difference is the <em>layer</em> (the OSI model from Part 2): a classic forward proxy is an
+  application-layer (L7) HTTP relay you configure per-application, whereas a VPN operates lower down (L3, the IP
+  layer) and tunnels <em>all</em> of a machine's traffic — every protocol, not just HTTP — through an encrypted
+  pipe. Both hide the client; the VPN just does it for the whole machine and adds encryption by default. Mentally
+  file the VPN as "a forward proxy for your entire network stack."</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — who configures it</div>
+  <p>A forward proxy is configured <strong>by the client or the client's administrator</strong>. Your laptop, your
+  browser, or your IT department points outbound traffic at it on purpose. Nobody on the server side sets it up or
+  even knows it is there. Remember this — it is the exact opposite of a reverse proxy, and the contrast is the
+  whole point of the next section.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A forward proxy is a middle-person your computer is told to send all its outgoing requests through. It acts
+    on your behalf — like a personal assistant who mails your letters for you. The website you visit sees the
+    assistant's address, not yours.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Clients are explicitly configured (browser proxy settings, system <code>http_proxy</code> env var, or a PAC
+    file) to route requests to the forward proxy. For plain HTTP the proxy reads and can rewrite the request; for
+    HTTPS the client issues an HTTP <code>CONNECT</code> and the proxy opens a blind L4 tunnel it cannot read
+    (because TLS, Part 8, is end-to-end). The destination's access logs show the proxy's source IP.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Forward proxies are an <em>egress</em> control plane. In zero-trust and SASE (Secure Access Service Edge)
+    architectures they enforce DLP (Data Loss Prevention), TLS inspection via a corporate root CA, and per-app
+    policy. The CONNECT-tunnel blindness is deliberately broken in "TLS-inspecting" proxies by minting a
+    certificate for the destination on the fly — which only works because the corporate CA is pre-installed on
+    managed devices. This is the same machinery that, misused, is a man-in-the-middle attack; trust anchors are
+    everything.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="reverse-proxy">3. The reverse proxy — an agent for the servers</h2>
+
+<p>Now flip the picture. A <strong>reverse proxy</strong> sits in front of <em>servers</em>, on the server's side
+of the conversation. Clients connect to it thinking it <em>is</em> the real server — they have no idea it exists
+as a separate thing. It receives every inbound request, decides what to do with it, and forwards it to one of the
+real backend servers behind it. It represents the servers to the Internet.</p>
+
+<div class="osi-badge">OSI Layer 7 (Application) — reads &amp; rewrites HTTP · OR Layer 4 (Transport) — blind TCP/UDP stream proxy</div>
+
+<div class="figure-title">Fig 10.2 — A reverse proxy sits in front of the servers</div>
+<pre class="diagram">
+        THE INTERNET                     SERVER SIDE (your data center / VPC)
+                                  ┌──────────────────────────────────────────┐
+   ┌──────────┐                   │                      ┌──► app server 1   │
+   │ browser  │                   │   ┌───────────────┐  │   (Spring Boot)   │
+   │  (user)  │ ─────────────────►│──►│ REVERSE PROXY │ ─┼──► app server 2   │
+   └──────────┘   client thinks   │   │ (Nginx, etc.) │  │   (Spring Boot)   │
+                  THIS is the     │   └───────────────┘  └──► app server 3   │
+                  real server     │   the client never                       │
+                                  │   learns the backends exist              │
+                                  └──────────────────────────────────────────┘
+</pre>
+
+<p>Compare the two figures and the symmetry leaps out. Same box — an intermediary relaying traffic — placed on the
+<em>opposite end</em> of the conversation. Here is the side-by-side that makes it click:</p>
+
+<div class="figure-title">Fig 10.3 — Forward vs reverse: same box, opposite side of the conversation</div>
+<pre class="diagram">
+   FORWARD PROXY  (for the client, hides the client)
+
+   [client] ──► (((PROXY))) ──────────────► [ any server on the Internet ]
+       ▲              ▲
+       │              └─ on the CLIENT's side; client is configured to use it
+       └─ the one being represented / hidden
+
+
+   REVERSE PROXY  (for the server, fronts the servers)
+
+   [ any client on the Internet ] ──────► (((PROXY))) ──► [server]
+                                              ▲              ▲
+        on the SERVER's side; DNS points  ───┘              │
+        clients at it (they are NOT configured)             └─ the one being
+                                                               represented / fronted
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the crisp contrast</div>
+  <table>
+    <tr><th></th><th>Forward proxy</th><th>Reverse proxy</th></tr>
+    <tr><td><strong>Sits in front of</strong></td><td>Clients</td><td>Servers</td></tr>
+    <tr><td><strong>Acts on behalf of</strong></td><td>The client</td><td>The servers</td></tr>
+    <tr><td><strong>Who it hides</strong></td><td>Hides the client from the server</td><td>Hides the servers from the client</td></tr>
+    <tr><td><strong>Who configures it</strong></td><td>The client / its admin</td><td>The server operator (you)</td></tr>
+    <tr><td><strong>Who knows it's there</strong></td><td>The client knows; the server does not</td><td>The servers know; the client does not</td></tr>
+    <tr><td><strong>Points traffic at it via</strong></td><td>Client proxy settings</td><td>DNS (Part 6) — the hostname resolves to its IP</td></tr>
+    <tr><td><strong>One-line motto</strong></td><td>"For the client."</td><td>"For the server."</td></tr>
+  </table>
+</div>
+
+<p>That DNS row is the practical heart of it, and it ties straight back to Part 6. <strong>Clients are never
+configured to use a reverse proxy.</strong> Nobody edits browser settings to reach your API. Instead, you publish
+a DNS <code>A</code> record — <code>api.shop.com → 203.0.113.10</code> — and <code>203.0.113.10</code> is the
+reverse proxy's public IP. The browser resolves the name, connects to that address, and is talking to the proxy
+without ever knowing the difference. Your three Spring Boot instances live on private addresses
+(<code>10.0.x.x</code>) that DNS never mentions and the browser can never reach. The proxy is the only public
+face; the app is invisible.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the front desk speaks for the whole company</div>
+  <p>You call a company's main number and a receptionist answers: "Acme Corp, how can I help?" You think you've
+  reached "Acme." You haven't reached any particular person — you've reached the front desk, which then routes you
+  to whoever can help, screens you if you're a spammer, and takes a message if everyone's busy. You never learn
+  the direct extensions of the people in the back, and you don't need to. The reverse proxy is that receptionist:
+  one public point of contact that <em>represents</em> a whole building of servers you'll never address directly.
+  The visitor (client) didn't arrange this — the company (server operator) did.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A reverse proxy is a middle-person sitting in front of your servers. Visitors think they're talking to your
+    app, but they're really talking to the proxy, which passes their request to the real server behind it — like a
+    receptionist who answers for the whole company. Visitors don't set this up; you do, and DNS sends them to it.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The public DNS record for your service resolves to the reverse proxy's IP. It accepts the client's TCP/TLS
+    connection, reads the HTTP request (L7) or just the byte stream (L4), selects a backend, opens its own
+    connection to that backend, and pipes data through — rewriting headers and adding <code>X-Forwarded-*</code>
+    along the way (Part 9). Backends bind to private addresses unreachable from the Internet.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>A reverse proxy splits one logical connection into two independent ones — client↔proxy and proxy↔backend —
+    each with its own TCP state, congestion window, and (for L7) keepalive pool. This decoupling is why a reverse
+    proxy can speak HTTP/3 to clients while speaking HTTP/1.1 to a legacy app, buffer a slow client without tying
+    up a backend thread, and reuse a small pool of warm upstream connections for thousands of cold client ones.
+    The proxy is a protocol-translating, connection-multiplexing membrane, not a passthrough wire.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-exist">4. Why reverse proxies exist — what breaks without them</h2>
+
+<p>This is the spine of the chapter. Imagine you skip the proxy entirely: you take your Spring Boot app, bind it
+to a public IP on port 8080, point DNS at it, and call it production. It will <em>work</em> — for about a day.
+Then reality arrives. Below is the master list of everything a reverse proxy does, each with the one-line reason
+it exists and a mini-example of what breaks without it. Every later section of this chapter is just one of these
+expanded.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why reverse proxies exist — the seven jobs</div>
+  <ol>
+    <li><strong>(a) TLS termination.</strong> <em>Why:</em> one place to hold certificates and do the expensive
+    crypto, so every app behind it can speak simple plaintext HTTP (Part 8). <em>Without it:</em> all 40 services
+    must each load certs, renew them, and implement TLS correctly — 40 chances to leak a private key.</li>
+
+    <li><strong>(b) Load balancing / distribution.</strong> <em>Why:</em> spread requests across many app
+    instances and route around dead ones (Part 9). <em>Without it:</em> one instance, one point of failure, no way
+    to scale horizontally. <strong>An L7 load balancer simply <em>is</em> a reverse proxy</strong> — more on this
+    in §6.</li>
+
+    <li><strong>(c) Serving static content &amp; caching.</strong> <em>Why:</em> let a tiny C program (Nginx)
+    serve your React build's files and cache responses, so the heavyweight JVM never wastes a thread handing out a
+    logo. <em>Without it:</em> Spring Boot serves <code>main.abc123.js</code> on every page load, burning app
+    threads on work a file server does for free.</li>
+
+    <li><strong>(d) Single entry point / unified domain.</strong> <em>Why:</em> put many backend services behind
+    one hostname using path routing — <code>/api</code> to orders, <code>/auth</code> to login, <code>/</code> to
+    the SPA. <em>Without it:</em> the frontend juggles five hostnames and five sets of CORS rules. (This is the
+    seed of the API gateway — Part 13.)</li>
+
+    <li><strong>(e) Security shield.</strong> <em>Why:</em> hide internal topology, ports, and server software;
+    centralize a <strong>WAF</strong> (Web Application Firewall — filters malicious requests), rate-limiting, and
+    IP allowlisting; only the proxy is exposed to the Internet. <em>Without it:</em> your app's version banner,
+    open ports, and stack traces are all public attack surface. (In Part 11 the proxy lives in a public subnet and
+    the app in a private one — the proxy is the only door.)</li>
+
+    <li><strong>(f) Protocol &amp; payload handling at the edge.</strong> <em>Why:</em> do compression, header
+    manipulation, and <em>request buffering</em> to protect a slow app from slow clients (the classic
+    <em>slowloris</em> attack drips bytes to exhaust threads); speak modern HTTP/2 and HTTP/3 to clients while the
+    app speaks plain HTTP/1.1 (Part 7's versions). <em>Without it:</em> a handful of slow clients can pin every
+    one of your app's request threads and take you down with almost no bandwidth.</li>
+
+    <li><strong>(g) Cross-cutting concerns moved out of app code.</strong> <em>Why:</em> authentication checks,
+    access logging, request IDs, and observability belong at the choke point, configured once, not reimplemented
+    in every service. <em>Without it:</em> every team rebuilds logging and auth, slightly differently, forever.</li>
+  </ol>
+</div>
+
+<p>Read that list again and notice the through-line: <strong>every item moves work out of your application and
+into one operationally-managed box.</strong> The app gets to be simple — plain HTTP, one job, no certs, no CORS
+gymnastics, no DDoS handling — because the proxy absorbed all the messy edge concerns. That is the entire value
+proposition. Let's now build the canonical example that ties (a) through (g) together.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the "it worked for a day" outage</div>
+  <p>A team ships a FastAPI service straight to the Internet on <code>0.0.0.0:8000</code>, no proxy. Day one is
+  fine. Day two: a scraper opens 2,000 connections that each send one header byte per second (slowloris) —
+  uvicorn's workers are all stuck waiting, legitimate users get timeouts. Day three: the Let's Encrypt cert they
+  hand-installed expires and every browser shows a security warning. Day four: an attacker reads the
+  <code>Server: uvicorn</code> header, looks up a known CVE, and probes it. <em>Every single one of those
+  failures is something a reverse proxy in front would have absorbed</em> — buffering, central cert renewal,
+  banner hiding. The proxy isn't a luxury; it's the part of "production" that the framework tutorial left out.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="canonical">5. The canonical pattern — Browser → Nginx → Spring Boot</h2>
+
+<p>Here is the arrangement you will deploy more than any other in your career, and the one you specifically need:
+a React single-page app and a Spring Boot API, fronted by Nginx, served over HTTPS on one domain. Nginx
+terminates TLS, serves the React build's static files directly, and proxies <code>/api</code> to Spring Boot on
+<code>localhost:8080</code>. Let's build it directive by directive.</p>
+
+<div class="figure-title">Fig 10.4 — One request, split by path: static vs API</div>
+<pre class="diagram">
+                    https://shop.com  (DNS → 203.0.113.10, the proxy)
+
+   ┌──────────┐  TLS / HTTP/2   ┌───────────────────────────────┐
+   │ browser  │ ═══════════════►│            NGINX              │
+   │ (React)  │◄═══════════════ │   listens on :443, holds the  │
+   └──────────┘   one origin,   │   cert, terminates TLS here   │
+                  HTTPS only    └───────┬───────────────┬───────┘
+                                        │               │
+                     GET /  GET /assets │               │ GET /api/orders
+                     (static SPA files) │               │ (dynamic API)
+                                        ▼               ▼
+                          ┌──────────────────┐   ┌──────────────────────┐
+                          │ /var/www/        │   │ Spring Boot           │
+                          │   react-build/   │   │ 127.0.0.1:8080        │
+                          │ (files on disk)  │   │ plain HTTP, private   │
+                          └──────────────────┘   └──────────────────────┘
+
+   browser sees: ONE origin, HTTPS, port 443.
+   Spring sees:  plain HTTP on 8080, from 127.0.0.1 (the proxy next to it).
+</pre>
+
+<p>And here is the Nginx configuration that implements exactly that picture. Every line is annotated; we walk a
+single request through all of it immediately after.</p>
+
+<pre class="code"># /etc/nginx/sites-available/shop.com
+# ----------------------------------------------------------------
+# Block 1: redirect all plain HTTP to HTTPS (Part 8 — never serve :80)
+server {
+    listen 80;
+    server_name shop.com www.shop.com;
+    return 301 https://$host$request_uri;     # 301 = permanent redirect (Part 7)
+}
+
+# Block 2: the real server — HTTPS, static files, and the API proxy
+server {
+    listen 443 ssl http2;                     # 443 = HTTPS; speak HTTP/2 to clients
+    server_name shop.com www.shop.com;
+
+    # --- TLS termination happens HERE (Part 8) ---
+    ssl_certificate     /etc/letsencrypt/live/shop.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/shop.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;      # disable old, broken versions
+    add_header Strict-Transport-Security "max-age=63072000" always;  # HSTS
+
+    gzip on;                                  # compress text responses (Part 7)
+    gzip_types text/css application/javascript application/json;
+
+    # --- Serve the React build's static files for everything else ---
+    root /var/www/react-build;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;     # SPA fallback: unknown paths go to index.html
+    }
+
+    # --- Proxy /api/ to Spring Boot on plain HTTP, port 8080 ---
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;     # the backend; note: same machine, private
+
+        proxy_set_header Host              $host;              # preserve "shop.com"
+        proxy_set_header X-Real-IP         $remote_addr;       # the client's true IP
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;  # XFF chain (Part 9)
+        proxy_set_header X-Forwarded-Proto $scheme;            # tell Spring "https"
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+
+    # --- A WebSocket endpoint (Part 7) needs the Upgrade dance ---
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;                              # required for upgrade
+        proxy_set_header Upgrade    $http_upgrade;           # carry the Upgrade header
+        proxy_set_header Connection "upgrade";               # keep the connection open
+        proxy_set_header Host       $host;
+        proxy_read_timeout 3600s;                            # long-lived: don't time out
+    }
+}</pre>
+
+<h3>5.1 Walking one request through every directive</h3>
+
+<p>A user clicks "View orders" in the React app. The browser issues <code>GET https://shop.com/api/orders</code>.
+Follow it through the config above:</p>
+
+<ol>
+  <li><strong>DNS &amp; connection (Part 6).</strong> <code>shop.com</code> resolves to <code>203.0.113.10</code>
+  — the Nginx box. The browser opens a TCP connection to port 443.</li>
+  <li><strong>TLS handshake (Part 8) — terminated at Nginx.</strong> Nginx presents
+  <code>fullchain.pem</code>, completes the handshake, and from here on holds the decrypted plaintext. The crypto
+  cost is paid <em>once, here</em>. Spring Boot will never see a byte of TLS.</li>
+  <li><strong>Path matching.</strong> The path is <code>/api/orders</code>. Nginx checks its
+  <code>location</code> blocks: it matches <code>location /api/</code>, not <code>location /</code>. (Had the path
+  been <code>/dashboard</code>, the <code>location /</code> block would serve <code>index.html</code> from disk and
+  Spring Boot would never be involved — that is rule (c), static serving, in action.)</li>
+  <li><strong>The proxy_pass.</strong> Nginx opens its <em>own</em> plaintext HTTP/1.1 connection to
+  <code>127.0.0.1:8080</code> and replays the request there. Two separate connections now exist: browser↔Nginx
+  (HTTPS/HTTP-2) and Nginx↔Spring (plain HTTP/1.1).</li>
+  <li><strong>The headers — why each line exists:</strong>
+    <ul>
+      <li><code>Host: $host</code> — without this, the backend would see <code>Host: 127.0.0.1</code> and any
+      code that builds absolute URLs or does virtual-hosting would break. We forward the original
+      <code>shop.com</code>.</li>
+      <li><code>X-Real-IP: $remote_addr</code> — the single true client IP, handed to the app cleanly.</li>
+      <li><code>X-Forwarded-For: $proxy_add_x_forwarded_for</code> — appends the client IP to any existing
+      <strong>XFF</strong> (X-Forwarded-For) chain (Part 9). Spring sees <code>198.51.100.7</code>, not
+      <code>127.0.0.1</code>. <strong>This is the answer to "how do I get the real client IP behind a proxy" —
+      it does not happen by default; you must forward it.</strong></li>
+      <li><code>X-Forwarded-Proto: $scheme</code> — tells Spring the <em>original</em> scheme was
+      <code>https</code>, even though the proxy↔app hop is plain <code>http</code>. Without it, Spring thinks the
+      request was HTTP and builds <code>http://</code> redirect URLs — which then break in the HTTPS browser.</li>
+    </ul>
+  </li>
+  <li><strong>Response back.</strong> Spring returns <code>200 OK</code> + JSON over the plaintext hop. Nginx
+  re-encrypts it into the TLS session and (because <code>gzip on</code>) compresses it. The browser receives
+  encrypted, compressed JSON. It never knew Spring Boot, port 8080, or <code>127.0.0.1</code> existed.</li>
+</ol>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — make Spring trust the forwarded headers</div>
+  <p>Forwarding <code>X-Forwarded-Proto</code> is only half the fix. By default Spring Boot ignores those headers
+  for safety (a client could forge them). You must opt in so the framework rebuilds correct <code>https://</code>
+  URLs and reports the real client IP. One line in <code>application.properties</code>:</p>
+  <pre class="code"># application.properties — trust the proxy's forwarded headers
+server.forward-headers-strategy=framework
+# (use FRAMEWORK behind your own Nginx; use NATIVE behind a cloud LB/Tomcat valve)</pre>
+  <p>With this set, <code>ServletUriComponentsBuilder</code>, OAuth2 redirect URIs, and
+  <code>request.getRemoteAddr()</code> all reflect the original <code>https://shop.com</code> request instead of
+  the internal <code>http://127.0.0.1:8080</code> hop. Forgetting this is the single most common "my OAuth login
+  redirects to <code>http://</code> and breaks" bug behind a reverse proxy.</p>
+</div>
+
+<h3>5.2 What the browser sees vs what Spring sees</h3>
+
+<table>
+  <tr><th></th><th>The browser's view</th><th>Spring Boot's view</th></tr>
+  <tr><td><strong>Address</strong></td><td><code>https://shop.com</code> (port 443)</td><td><code>http://127.0.0.1:8080</code></td></tr>
+  <tr><td><strong>Protocol</strong></td><td>HTTPS, HTTP/2, encrypted</td><td>Plain HTTP/1.1, no TLS</td></tr>
+  <tr><td><strong>Who's calling</strong></td><td>Talking to "shop.com"</td><td>Request from <code>127.0.0.1</code> — true client IP only via XFF</td></tr>
+  <tr><td><strong>Origin (Part 7)</strong></td><td>One origin: <code>https://shop.com</code></td><td>N/A — never deals with the browser directly</td></tr>
+  <tr><td><strong>Certs</strong></td><td>Validates shop.com's cert</td><td>Has no certificate, knows nothing of TLS</td></tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — this dissolves CORS entirely</div>
+  <p>Recall the CORS pain from Part 7: a React app on <code>https://shop.com</code> calling an API on
+  <code>https://api.shop.com:8443</code> is <em>cross-origin</em> (different host/port), so the browser demands
+  preflight <code>OPTIONS</code> requests and <code>Access-Control-Allow-Origin</code> headers. With this reverse
+  proxy, the React app and the API are served from the <strong>same origin</strong> —
+  <code>https://shop.com</code> for the page, <code>https://shop.com/api/...</code> for the calls. Same scheme,
+  same host, same port. The browser's same-origin policy is satisfied, no preflight fires, and you can delete all
+  your CORS configuration. The reverse proxy didn't "allow" CORS — it made the request <em>not cross-origin in the
+  first place.</em> Verify it from the terminal:</p>
+  <pre class="code"># Both come from the same origin now — no CORS headers needed
+$ curl -I https://shop.com/                 # → 200, serves index.html (React)
+$ curl -s https://shop.com/api/orders | jq  # → JSON from Spring Boot, same origin
+# What the browser cannot do — reach the backend directly:
+$ curl http://203.0.113.10:8080/api/orders  # → connection refused (app binds 127.0.0.1)</pre>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Nginx sits in front. It handles the padlock (HTTPS), hands out your React files directly, and forwards only
+    the <code>/api</code> calls to Spring Boot. The browser sees one secure website; Spring Boot sees a simple
+    plain-HTTP request next door. Because everything is on one address, the CORS headache disappears.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p><code>location</code> blocks route by path: <code>/</code> serves the SPA from <code>root</code> with an
+    <code>index.html</code> fallback; <code>/api/</code> uses <code>proxy_pass</code> to the backend. TLS
+    terminates at <code>listen 443 ssl</code>. <code>proxy_set_header</code> injects <code>Host</code> and
+    <code>X-Forwarded-*</code> so the app reconstructs the original request, and
+    <code>server.forward-headers-strategy</code> tells Spring to trust them.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The trailing slash semantics of <code>proxy_pass</code> matter: <code>proxy_pass http://host:8080;</code>
+    (no URI) passes the full original path; <code>proxy_pass http://host:8080/;</code> (with URI) strips the
+    matched <code>location</code> prefix. <code>X-Forwarded-Proto</code> trust must be paired with stripping any
+    client-supplied <code>X-Forwarded-*</code> at the edge, or a malicious client spoofs its own source IP and
+    scheme. HTTP/2 to the client plus HTTP/1.1 keepalive to the upstream is the standard high-throughput shape.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="upstreams">6. Upstream pools — the proxy and the load balancer are one box</h2>
+
+<p>So far the proxy forwarded to a single backend, <code>127.0.0.1:8080</code>. Real systems run several app
+instances. Nginx's <code>upstream</code> block defines a <em>pool</em>, and suddenly your reverse proxy is also a
+load balancer — because it is choosing, per request, which healthy backend to forward to. These were never two
+different boxes; they are two hats on the same box.</p>
+
+<pre class="code"># Define a pool of Spring Boot instances, then proxy to the pool by name
+upstream spring_backend {
+    least_conn;                       # algorithm (Part 9): fewest active conns wins
+    # default is round-robin; ip_hash gives sticky sessions by client IP
+
+    server 10.0.1.11:8080 max_fails=3 fail_timeout=15s;   # passive health check
+    server 10.0.1.12:8080 max_fails=3 fail_timeout=15s;
+    server 10.0.1.13:8080 max_fails=3 fail_timeout=15s;
+
+    keepalive 32;                     # reuse up to 32 warm conns to upstreams (Parts 4/7)
+}
+
+server {
+    listen 443 ssl http2;
+    server_name shop.com;
+    # ... ssl + static config as before ...
+
+    location /api/ {
+        proxy_pass http://spring_backend;     # forward to the POOL, not one host
+        proxy_http_version 1.1;               # required to actually reuse keepalive
+        proxy_set_header Connection "";        # clear "close" so the conn is reused
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}</pre>
+
+<p>Three things in that block map directly onto Part 9:</p>
+
+<ul>
+  <li><strong>The algorithm.</strong> <code>least_conn</code> sends each request to the instance with the fewest
+  active connections; the default is <strong>round robin</strong> (rotate evenly); <code>ip_hash</code> routes a
+  given client IP to the same backend (sticky sessions). These are the exact L7 algorithms from Part 9 — because
+  this <em>is</em> an L7 load balancer.</li>
+  <li><strong>Health checks.</strong> Open-source Nginx does <em>passive</em> health checks: if a backend fails
+  <code>max_fails</code> times within <code>fail_timeout</code>, Nginx stops sending to it for a while. It notices
+  failures only by trying. <em>Active</em> health checks (Nginx proactively pinging a <code>/health</code>
+  endpoint on a timer — the Part 9 ideal) require Nginx Plus (paid) or a tool like HAProxy.</li>
+  <li><strong>Keepalive to upstreams.</strong> <code>keepalive 32</code> holds a pool of warm TCP connections to
+  the backends so Nginx doesn't pay a fresh TCP handshake (Part 4) on every forwarded request — the
+  connection-reuse idea from Parts 4 and 7, applied to the proxy↔app hop. This alone can dramatically cut backend
+  latency under load.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — say it plainly</div>
+  <p><strong>A reverse proxy and a load balancer are the same box wearing two hats.</strong> "Load balancer"
+  emphasizes the distribution-and-health job; "reverse proxy" is the broader gateway role (TLS, caching, routing,
+  headers, security) that <em>includes</em> distribution. An L7 load balancer is a reverse proxy that happens to
+  be configured mainly to spread load. The same Nginx does both at once. Part 9 and Part 10 describe one piece of
+  infrastructure from two angles, not two separate things you bolt together.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="three-tools">7. The three tools — Nginx, HAProxy, Traefik</h2>
+
+<p>Three reverse proxies dominate the backend world, each with a distinct personality. Knowing <em>which</em> to
+reach for — and why — is a real interview signal. Here's a character sketch, config style, and snippet for each.</p>
+
+<h3>7.1 Nginx — the default workhorse</h3>
+
+<p><strong>Character:</strong> written in C, event-driven (one process handles thousands of connections without a
+thread each), and battle-tested since 2004. Nginx is simultaneously a web server, a reverse proxy, a load
+balancer, and a static-file server — which is exactly why it's the default front for almost everything. Its
+configuration is <em>declarative</em>: you write <code>server</code> / <code>location</code> / <code>upstream</code>
+blocks in a file and reload them atomically with <code>nginx -s reload</code> (no dropped connections).</p>
+
+<p>Nginx is also the standard front for Node and Python apps. A FastAPI app runs under an <strong>ASGI</strong>
+(Asynchronous Server Gateway Interface) server like <code>uvicorn</code>; a Flask/Django app runs under a
+<strong>WSGI</strong> (Web Server Gateway Interface) server like <code>gunicorn</code>; Node/Express listens on a
+port directly. In every case Nginx sits in front and proxies to it:</p>
+
+<pre class="code"># FastAPI behind Nginx:  uvicorn runs the ASGI app on 8000, Nginx fronts it
+#   $ uvicorn main:app --host 127.0.0.1 --port 8000 --workers 4
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;          # FastAPI/uvicorn (or Node/Express, or gunicorn)
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}</pre>
+
+<p><strong>Strengths:</strong> ubiquitous, fast, sips memory, superb at static files and TLS termination, endless
+documentation. <strong>Weaknesses:</strong> config is static (a reload is needed when backends change — painful in
+dynamic container worlds), active health checks and rich metrics are paywalled in Nginx Plus, and complex routing
+logic gets verbose.</p>
+
+<h3>7.2 HAProxy — the load-balancing specialist</h3>
+
+<p><strong>Character:</strong> HAProxy (High Availability Proxy) is the surgeon of pure load balancing and proxying.
+It is exceptional at both L4 (raw TCP) and L7 (HTTP), has the best-in-class health checking and a famously
+detailed real-time <em>stats page</em>, and is what you reach for when distribution and observability are the
+whole point. Its config model is <code>frontend</code> (what to listen on) / <code>backend</code> (where to send)
+/ <code>acl</code> (rules), and it reads top-to-bottom like a routing program:</p>
+
+<pre class="code"># /etc/haproxy/haproxy.cfg  — path routing with an ACL
+frontend https_in
+    bind *:443 ssl crt /etc/haproxy/certs/shop.pem      # TLS termination here too
+    acl is_api path_beg /api                            # ACL: does path start with /api ?
+    use_backend spring_api if is_api                    # if so, send to API pool
+    default_backend react_static                        # otherwise, the static pool
+
+backend spring_api
+    balance leastconn                                   # algorithm (Part 9)
+    option httpchk GET /actuator/health                 # ACTIVE health check — HAProxy's strength
+    server app1 10.0.1.11:8080 check                    # 'check' = actively probe this server
+    server app2 10.0.1.12:8080 check
+    server app3 10.0.1.13:8080 check
+
+backend react_static
+    server web1 10.0.1.20:80 check</pre>
+
+<p><strong>Where it shines:</strong> high-performance pure load balancing, TCP (L4) proxying of non-HTTP protocols
+(database connections, message brokers), and environments that demand precise health checking and deep traffic
+metrics out of the box — all free in the open-source version, unlike Nginx. <strong>Trade-off:</strong> it is
+purely a proxy/LB — it does <em>not</em> serve static files itself, so you still need something behind it for that.</p>
+
+<h3>7.3 Traefik — the cloud-native, dynamic one</h3>
+
+<p><strong>Character:</strong> Traefik was built for the container era. Its superpower is <strong>dynamic service
+discovery</strong>: instead of you editing a static config file and reloading, Traefik <em>watches</em> your
+platform — Docker, or Kubernetes (Part 12) — and auto-configures itself from labels and metadata as containers
+come and go. Start a new container with the right labels and Traefik is routing to it seconds later, no reload, no
+file edit. It also does automatic HTTPS: point it at Let's Encrypt and it obtains and renews certificates via
+<strong>ACME</strong> (Automatic Certificate Management Environment) on its own (Part 8).</p>
+
+<pre class="code"># docker-compose.yml — Traefik configures itself FROM these labels (no static file)
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--providers.docker=true"                       # watch Docker for services
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.email=ops@shop.com"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"   # auto Let's Encrypt
+    ports: ["443:443"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+
+  api:
+    image: shop/spring-api:latest                       # your Spring Boot service
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`shop.com`) &amp;&amp; PathPrefix(`/api`)"
+      - "traefik.http.routers.api.tls.certresolver=le"  # auto-HTTPS for this route
+      - "traefik.http.services.api.loadbalancer.server.port=8080"</pre>
+
+<p><strong>Why it fits containers:</strong> in Docker/Kubernetes, backends are ephemeral — they scale up, scale
+down, and get new IPs constantly. A static Nginx file can't keep up; Traefik's whole design is to track that
+churn automatically. <strong>Trade-off:</strong> for a fixed fleet of long-lived servers, that dynamism is
+overhead you don't need, and Nginx/HAProxy are leaner and more predictable.</p>
+
+<h3>7.4 The others, in one line each</h3>
+
+<ul>
+  <li><strong>Envoy</strong> — modern, programmable (configured by a control plane via API, not files); the
+  high-performance <em>data plane</em> of service meshes. You'll meet it as the sidecar proxy in Part 13.</li>
+  <li><strong>Caddy</strong> — automatic HTTPS by default with the simplest config of all; great for small
+  deployments and hobby projects.</li>
+  <li><strong>Apache httpd</strong> — the original web server (1995); still widespread, especially in legacy and
+  PHP shops, but largely superseded by Nginx for new reverse-proxy work.</li>
+</ul>
+
+<div class="figure-title">TABLE — the four proxies compared</div>
+<table>
+  <tr><th>Tool</th><th>Primary role</th><th>Config model</th><th>Dynamic?</th><th>Auto-TLS</th><th>L4 / L7</th><th>Best fit</th></tr>
+  <tr><td><strong>Nginx</strong></td><td>Web server + reverse proxy + static</td><td>Declarative files, reload</td><td>No (static)</td><td>No (add certbot)</td><td>L7 + L4 stream</td><td>The default front for any app; static + TLS</td></tr>
+  <tr><td><strong>HAProxy</strong></td><td>Load balancer / proxy specialist</td><td>frontend / backend / acl</td><td>No (static)</td><td>No</td><td>L4 + L7</td><td>High-perf LB, health checks, TCP proxying</td></tr>
+  <tr><td><strong>Traefik</strong></td><td>Cloud-native edge router</td><td>Labels / API, auto-discovered</td><td>Yes</td><td>Yes (ACME)</td><td>L7 (+ some L4)</td><td>Docker / Kubernetes where backends churn</td></tr>
+  <tr><td><strong>Envoy</strong></td><td>Mesh data plane / edge proxy</td><td>Dynamic API (xDS)</td><td>Yes</td><td>Via control plane</td><td>L4 + L7</td><td>Service meshes, programmable routing (Part 13)</td></tr>
+</table>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Nginx is the go-to all-rounder — web server and proxy in one. HAProxy is the specialist for spreading load
+    and watching server health. Traefik is the one that auto-configures itself when you use Docker/Kubernetes, so
+    you don't hand-edit files as containers start and stop.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Nginx and HAProxy read static config and reload on change; HAProxy has free active health checks and a stats
+    page, Nginx adds first-class static serving. Traefik and Envoy are dynamic: Traefik discovers routes from
+    Docker/K8s labels and does ACME auto-TLS; Envoy is driven by a control plane over its xDS API and powers
+    service meshes.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The real axis is <em>static vs dynamic configuration</em>. Static (Nginx/HAProxy) is simpler to reason
+    about and audit but needs external automation to track ephemeral backends. Dynamic (Traefik/Envoy) trades that
+    for a moving config surface and a control plane to secure. In Kubernetes the Ingress controller is often Nginx
+    or Traefik <em>generating</em> config from the API (Part 12), and the mesh sidecar is Envoy fed by Istio's
+    control plane (Part 13) — same proxies, different config sources.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="disambiguation">8. Reverse proxy vs load balancer vs API gateway vs CDN</h2>
+
+<p>Here is the disambiguation table every engineer wants, because these four words get used interchangeably and
+it drives people mad. The honest truth, stated up front: <strong>all four are reverse-proxy-shaped
+intermediaries.</strong> They are the same fundamental thing — a box that fronts servers and relays traffic —
+specialized toward different emphases. The words describe <em>intent</em>, not incompatible hardware.</p>
+
+<table>
+  <tr><th>Thing</th><th>Core emphasis</th><th>Adds on top of "reverse proxy"</th><th>Operates at</th><th>Course part</th></tr>
+  <tr><td><strong>Reverse proxy</strong></td><td>The general gateway role</td><td>(the baseline: TLS, routing, headers, caching, the single front door)</td><td>One site / one DC</td><td>This part</td></tr>
+  <tr><td><strong>Load balancer</strong></td><td>Distribution + health</td><td>Spreading requests across instances, health checks, failover</td><td>One pool</td><td>Part 9</td></tr>
+  <tr><td><strong>API gateway</strong></td><td>Per-API control</td><td>Auth, rate-limit, request transformation, response aggregation, per-route policy, API keys</td><td>Many APIs</td><td>Part 13</td></tr>
+  <tr><td><strong>CDN</strong></td><td>Geographic caching at the edge</td><td>Hundreds of caching reverse proxies placed physically near users worldwide</td><td>The planet</td><td>Part 14</td></tr>
+</table>
+
+<p>Read the table as a stack of increasing scope. A <strong>load balancer</strong> is a reverse proxy that
+emphasizes spreading load across a pool and routing around dead instances — the Part 9 view. An <strong>API
+gateway</strong> is a reverse proxy that adds per-API smarts: it authenticates the caller, enforces a rate limit,
+maybe rewrites the request, maybe fans one request out to three backend services and stitches the responses
+together (aggregation) — Part 13 builds this. A <strong>CDN</strong> (Content Delivery Network) is a
+<em>geographically distributed</em> fleet of caching reverse proxies sitting at the edge, close to users, so a
+request from Mumbai is served from a Mumbai cache instead of crossing an ocean — Part 14, and the latency payoff
+ties straight back to Part 1.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — one box can be all four at once</div>
+  <p>A single Nginx instance can simultaneously be a reverse proxy (fronting your app), a load balancer
+  (<code>upstream</code> with three backends), an API gateway (checking an auth header and rate-limiting), and an
+  edge cache (<code>proxy_cache</code>) — see the next section. The four words are not four boxes you buy and
+  chain together; they are four <em>jobs</em> the same proxy-shaped box can do. When someone asks "is this a load
+  balancer or a reverse proxy?", the honest answer is "yes" — it depends which job you're emphasizing. The terms
+  describe what you're using it <em>for</em>, not mutually exclusive product categories.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the front desk's many duties</div>
+  <p>Back to the building's front desk. The same receptionist <em>distributes</em> visitors to whoever's free
+  (load balancing), <em>checks IDs and enforces the visitor policy</em> (API gateway), and <em>keeps a stack of
+  the most-requested brochures right on the counter</em> so they don't fetch them from the back each time
+  (caching). Open a branch office in every city and station a receptionist at each, all sharing the brochures —
+  now you have a CDN. It was one role — "the front desk" — all along; we just named its sub-duties.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="caching">9. Caching at the proxy</h2>
+
+<p>One of the proxy's most valuable jobs deserves its own section: caching. Because every response already passes
+through the proxy, it is the natural place to <em>remember</em> a response and serve the next identical request
+without ever bothering the backend. This is both a latency weapon (Part 1) and an origin-protection weapon (it
+shields your app from load), and it's the conceptual bridge to the CDN in Part 14.</p>
+
+<pre class="code"># Define a cache zone, then turn it on for a location
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=api_cache:50m
+                 max_size=2g inactive=10m;
+
+server {
+    listen 443 ssl http2;
+    server_name shop.com;
+
+    location /api/products {
+        proxy_pass http://spring_backend;
+        proxy_cache api_cache;
+        proxy_cache_key "$scheme$host$request_uri";        # what makes a response unique
+        proxy_cache_valid 200 60s;                          # cache 200 OK for 60 seconds
+        proxy_cache_use_stale error timeout updating;       # serve stale if backend is down
+        add_header X-Cache-Status $upstream_cache_status;   # HIT / MISS / EXPIRED (debugging)
+    }
+}</pre>
+
+<p>The moving parts, each tied to an earlier chapter:</p>
+
+<ul>
+  <li><strong>Cache-Control respect (Part 7).</strong> By default Nginx honours the origin's
+  <code>Cache-Control</code> and <code>Expires</code> headers — if Spring Boot says <code>Cache-Control:
+  no-store</code>, the proxy won't cache it. The HTTP caching headers from Part 7 are the contract; the proxy is
+  one of the parties that obeys them.</li>
+  <li><strong>The cache key.</strong> <code>proxy_cache_key</code> defines what makes two requests "the same."
+  By default scheme + host + URI. Get this wrong (e.g. ignore a query param that changes the response) and you
+  serve user A's data to user B — caching's classic footgun.</li>
+  <li><strong>stale-while-revalidate.</strong> <code>proxy_cache_use_stale ... updating</code> lets the proxy
+  serve a slightly-stale cached copy <em>instantly</em> while it refreshes the entry in the background — users
+  never wait for a slow origin, and the origin sees only one refresh request instead of a stampede.</li>
+  <li><strong>Micro-caching.</strong> Even a <strong>1-second</strong> cache (<code>proxy_cache_valid 200 1s</code>)
+  on a hot, mostly-read endpoint can collapse thousands of requests per second down to one hit on the backend per
+  second. Tiny TTLs, enormous origin relief — a favourite trick for traffic spikes.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — caching is a latency AND a load weapon</div>
+  <p>A cache hit is served from the proxy's RAM/disk in microseconds, skipping the backend, the database, and any
+  cross-service calls — the full Part 1 latency story, collapsed to nearly zero. Simultaneously, every hit is a
+  request your app and database <em>never see</em>, which is origin protection. Push that cache geographically
+  close to users and you have a CDN (Part 14): caching reverse proxies at the edge, attacking distance itself.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="security-ops">10. Security &amp; ops realities</h2>
+
+<p>The reverse proxy is the natural home for every cross-cutting concern — the choke point from §1, now wearing a
+security hat. Because it is the <em>only</em> thing exposed to the Internet, hardening it hardens everything
+behind it.</p>
+
+<h3>10.1 Hide the app — bind it to localhost</h3>
+
+<p>The most important security move is also the simplest, and it calls straight back to Part 5's bind-address
+discussion. Your app should bind to <code>127.0.0.1</code> (loopback), not <code>0.0.0.0</code> (all interfaces).
+Then the <em>only</em> way to reach it is through the proxy on the same machine — it is literally unreachable from
+the network.</p>
+
+<pre class="code"># Spring Boot — bind to loopback only; nothing on the network can reach 8080
+server.address=127.0.0.1
+server.port=8080
+# Now: curl from another machine to this host:8080  yields  connection refused.
+# The reverse proxy on 127.0.0.1 is the ONLY thing that can talk to the app.</pre>
+
+<h3>10.2 The rest of the proxy's security toolkit</h3>
+
+<pre class="code"># Rate limiting + request size limits + header hygiene, all at the edge
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;   # 10 req/s per client IP
+
+server {
+    listen 443 ssl http2;
+    server_name shop.com;
+
+    client_max_body_size 5m;                  # reject uploads over 5 MB (block abuse)
+    server_tokens off;                        # hide "nginx/1.25.3" version banner
+    add_header Strict-Transport-Security "max-age=63072000" always;   # HSTS (Part 8)
+
+    location /api/ {
+        limit_req zone=api_limit burst=20 nodelay;          # enforce the rate limit
+        proxy_pass http://spring_backend;
+        proxy_set_header X-Request-Id $request_id;          # tag every request (Part 7)
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}</pre>
+
+<ul>
+  <li><strong>Rate limiting</strong> (<code>limit_req</code>) — cap how fast any one client IP can hit you,
+  blunting brute-force and abuse before it reaches the app.</li>
+  <li><strong>Request size limits</strong> (<code>client_max_body_size</code>) — reject oversized bodies at the
+  door instead of letting the app buffer a 2 GB upload into memory.</li>
+  <li><strong>Header sanitization</strong> — <code>server_tokens off</code> hides your software version; the
+  proxy can strip dangerous inbound headers and the app's leaky outbound ones.</li>
+  <li><strong>TLS policy &amp; HSTS centralization (Part 8)</strong> — cipher suites, TLS versions, and the
+  <code>Strict-Transport-Security</code> header are set in <em>one</em> place and apply to every service behind
+  the proxy. Upgrade your TLS posture once, for everyone.</li>
+  <li><strong>Centralized access logs with request IDs (Part 7)</strong> — <code>X-Request-Id</code> generated at
+  the edge flows through every downstream service, so one ID traces a request across your whole architecture
+  (this is the seed of distributed tracing, Part 13).</li>
+  <li><strong>Request buffering</strong> — Nginx absorbs a slow client's dribbled bytes and only forwards the
+  request to the app once it's complete, so slow clients (slowloris) can't tie up scarce backend threads.</li>
+</ul>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — one request ID, end to end</div>
+  <p>A user reports "my checkout failed at 14:32." With <code>X-Request-Id</code> set at the proxy, that request
+  carried <code>req-7f3a9c</code> through Nginx → orders-service → payment-service → the database. You grep that
+  one ID across all log streams and reconstruct the entire path of the failed request in seconds, instead of
+  guessing which of millions of log lines belong together. The proxy minted the ID at the one place every request
+  passes through — exactly why cross-cutting concerns live there.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Only the proxy faces the Internet; the app hides on <code>127.0.0.1</code> where no outsider can reach it.
+    The proxy is also where you block abusers (rate limits), reject giant uploads, hide your software version, and
+    stamp each request with an ID so you can trace it later.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Binding the app to loopback removes it from the network entirely; the proxy on the same host is its only
+    reachable peer. At the edge, <code>limit_req</code>, <code>client_max_body_size</code>,
+    <code>server_tokens off</code>, centralized TLS/HSTS, and an injected <code>X-Request-Id</code> implement
+    rate-limiting, size caps, banner hiding, uniform crypto policy, and traceability once for all backends.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The proxy is the trust boundary: it must <em>strip</em> client-supplied <code>X-Forwarded-*</code> and
+    <code>X-Request-Id</code> on ingress (or an attacker spoofs source IPs and trace IDs) and re-inject its own.
+    Buffering decouples client and upstream timelines, defeating slowloris but adding memory pressure under load —
+    tunable via <code>proxy_request_buffering</code>. Layering a WAF (ModSecurity, cloud WAF) here gives one place
+    to enforce OWASP rules; the cost is that the proxy becomes a high-value target and a potential bottleneck, so
+    it must itself be made redundant (Part 9's "who balances the balancer" — usually DNS or anycast).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="where-it-sits">11. Where it sits in the journey</h2>
+
+<p>Zoom out to the whole request path and place the reverse proxy in it. This is the shape every later chapter
+fills in with specifics.</p>
+
+<div class="figure-title">Fig 10.5 — DNS to public proxy to private app instances</div>
+<pre class="diagram">
+   user        ┌──────────┐   resolve shop.com    ┌──────────┐
+   types  ───► │ browser  │ ────────────────────► │   DNS    │  Part 6
+   shop.com    └────┬─────┘   to 203.0.113.10      └──────────┘
+                    │
+                    │  HTTPS to the public IP (Part 8)
+                    ▼
+   ┌───────────── PUBLIC ──────────────────────────────────────────────────┐
+   │                       ┌──────────────────────┐                         │
+   │                       │   REVERSE PROXY       │  the only door:         │
+   │                       │   (Nginx / ALB / ...) │  TLS · routing · LB     │
+   │                       └──────────┬───────────┘                         │
+   └──────────────────────────────────┼────────────────────────────────────┘
+                                       │  plain HTTP, private network
+   ┌───────────── PRIVATE ─────────────┼────────────────────────────────────┐
+   │         ┌──────────────┐  ┌───────┴──────┐  ┌────────────────┐         │
+   │         │ app instance │  │ app instance │  │ app instance   │         │
+   │         │ 10.0.1.11    │  │ 10.0.1.12    │  │ 10.0.1.13      │         │
+   │         └──────────────┘  └──────────────┘  └────────────────┘         │
+   └───────────────────────────────────────────────────────────────────────┘
+
+   the proxy lives in PUBLIC space; the apps live in PRIVATE space,
+   reachable only through the proxy. (This public/private split is Part 11.)
+</pre>
+
+<p>That single shape — public proxy in front, private apps behind, DNS pointing at the proxy — is the skeleton of
+nearly every production deployment. What changes between chapters is <em>what the proxy is made of</em>:</p>
+
+<ul>
+  <li>In <strong>AWS (Part 11)</strong>, the reverse proxy might be a managed <strong>ALB</strong> (Application
+  Load Balancer — an L7 reverse proxy AWS runs for you), or your own Nginx on an EC2 instance, sitting in a
+  <em>public subnet</em> while the app instances live in a <em>private subnet</em> — exactly the public/private
+  split drawn above.</li>
+  <li>In <strong>Kubernetes (Part 12)</strong>, the reverse proxy is the <strong>Ingress controller</strong> —
+  which, you'll see, is literally an Nginx or Traefik configured automatically from the cluster's API. Ingress
+  controllers <em>are</em> reverse proxies.</li>
+  <li>In a <strong>microservices mesh (Part 13)</strong>, reverse proxies multiply: an API gateway at the edge,
+  and an Envoy sidecar proxy next to every service. The proxy pattern goes from one box to one-per-service.</li>
+  <li>The <strong>full end-to-end journeys (Part 14)</strong> trace a request through all of these at once.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="interview">12. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>What is the difference between a forward proxy and a reverse proxy? Give an example of each.</summary>
+    <p>Both are intermediaries that relay traffic, but they sit on opposite sides and act for opposite parties. A
+    <strong>forward proxy</strong> sits in front of <em>clients</em>, is configured by the client/its admin, and
+    represents the client to the Internet — the destination server sees the proxy's IP, not the real user. Example:
+    a corporate egress proxy (Squid) that filters and logs employee web traffic. A <strong>reverse proxy</strong>
+    sits in front of <em>servers</em>, is set up by the server operator, and represents the servers to the
+    Internet — clients think they're talking to the real server but reach the proxy, which forwards to a hidden
+    backend. Example: Nginx in front of Spring Boot. One-liner: forward = "for the client, hides the client";
+    reverse = "for the server, hides the servers." Crucially, clients are <em>configured</em> for a forward proxy
+    but reach a reverse proxy simply because DNS points the hostname at it.</p>
+  </details>
+
+  <details><summary>Why would you put Nginx in front of a Spring Boot app?</summary>
+    <p>To move every messy edge concern out of the app: (1) <strong>TLS termination</strong> — Nginx holds the
+    cert and does the crypto once, so Spring speaks plain HTTP; (2) <strong>serve static content</strong> — Nginx
+    hands out the React build directly instead of burning JVM threads on files; (3) <strong>load balancing</strong>
+    across multiple Spring instances via an <code>upstream</code> pool; (4) <strong>one origin / unified
+    domain</strong> — the SPA at <code>/</code> and the API at <code>/api</code> share a host, which dissolves
+    CORS; (5) <strong>security</strong> — hide the app on <code>127.0.0.1</code>, rate-limit, cap body size, hide
+    the version banner; (6) <strong>buffering</strong> to protect the app from slow clients; (7)
+    <strong>centralized</strong> logging, request IDs, gzip, and HTTP/2 at the edge. The app stays simple; the
+    proxy absorbs the production concerns.</p>
+  </details>
+
+  <details><summary>How does a reverse proxy relate to a load balancer? Are they different things?</summary>
+    <p>They are the same box wearing two hats, not different boxes. A <em>load balancer</em> emphasizes one job —
+    distributing requests across a pool of instances and routing around unhealthy ones. A <em>reverse proxy</em> is
+    the broader gateway role (TLS, routing, caching, header manipulation, security) that <em>includes</em>
+    distribution. An L7 load balancer <em>is</em> a reverse proxy configured mainly to spread load; one Nginx with
+    an <code>upstream</code> block is doing both simultaneously. They describe emphasis, not mutually exclusive
+    products. (An L4 load balancer is a thinner case — it proxies the TCP stream without reading HTTP, so it's a
+    "reverse proxy" in the loosest sense but doesn't do the L7 gateway work.)</p>
+  </details>
+
+  <details><summary>How do you preserve the real client IP through a reverse proxy?</summary>
+    <p>It does <em>not</em> happen automatically — by default the backend sees the proxy's IP (e.g.
+    <code>127.0.0.1</code>), because the proxy opened a fresh connection to it. You must forward the original IP in
+    a header: <code>proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;</code> (appends to the XFF chain)
+    and/or <code>X-Real-IP</code>. Then the application must be told to <em>trust</em> those headers — in Spring
+    Boot, <code>server.forward-headers-strategy=framework</code> — so <code>getRemoteAddr()</code>, logging, and
+    rate-limiting see the true client. Security note: the edge proxy must strip any client-supplied
+    <code>X-Forwarded-For</code> first, or a client can spoof its own IP.</p>
+  </details>
+
+  <details><summary>How does putting the app behind a reverse proxy solve CORS?</summary>
+    <p>It doesn't "allow" CORS — it removes the cross-origin situation entirely. CORS only triggers when the
+    browser page and the API are on different origins (scheme/host/port). If Nginx serves the React app at
+    <code>https://shop.com/</code> and proxies the API at <code>https://shop.com/api/</code>, both are the
+    <em>same</em> origin — same scheme, host, and port. The browser's same-origin policy is satisfied, no preflight
+    <code>OPTIONS</code> fires, and you can delete all CORS headers and config. Path-based routing through one
+    proxy hostname is the cleanest way to make a SPA and its API same-origin.</p>
+  </details>
+
+  <details><summary>How does TLS termination at the proxy work, and what does the backend see?</summary>
+    <p>The reverse proxy holds the TLS certificate and private key and is the endpoint of the client's TLS
+    handshake (Part 8). It decrypts incoming requests and re-encrypts outgoing responses. From there it forwards
+    requests to the backend over plain HTTP (often on a private network or loopback), so the backend never does
+    any crypto and never holds a cert. Benefits: certificates live in one place, the expensive crypto is
+    centralized (and can be hardware-accelerated), and TLS policy is uniform. The proxy adds
+    <code>X-Forwarded-Proto: https</code> so the app knows the <em>original</em> request was HTTPS. The hop
+    between proxy and backend is plaintext, which is fine inside a trusted network; "re-encrypt" / mutual-TLS
+    modes exist when that hop must also be secured.</p>
+  </details>
+
+  <details><summary>How does a reverse proxy proxy a WebSocket connection?</summary>
+    <p>A WebSocket (Part 7) starts as an HTTP request with <code>Upgrade: websocket</code> and
+    <code>Connection: Upgrade</code> headers, then switches the TCP connection to the WebSocket protocol. A reverse
+    proxy must explicitly support this: in Nginx you set <code>proxy_http_version 1.1;</code>, forward
+    <code>proxy_set_header Upgrade $http_upgrade;</code> and <code>proxy_set_header Connection "upgrade";</code>,
+    and raise <code>proxy_read_timeout</code> because the connection is long-lived and otherwise idle. With those,
+    the proxy passes the upgrade handshake through and then relays the bidirectional frames transparently. Forget
+    them and the upgrade fails or the socket drops after the default idle timeout.</p>
+  </details>
+
+  <details><summary>Nginx vs HAProxy vs Traefik — when do you pick each?</summary>
+    <p><strong>Nginx</strong>: the default all-rounder — web server, reverse proxy, static file server, and L7/L4
+    proxy in one, with declarative config; pick it as the standard front for almost any app, especially when you
+    also need to serve static files and terminate TLS. <strong>HAProxy</strong>: the load-balancing/proxy
+    specialist with the best free active health checks, a great stats page, and strong L4 (TCP) proxying; pick it
+    for high-performance pure load balancing or proxying non-HTTP protocols. <strong>Traefik</strong>: cloud-native
+    with dynamic service discovery from Docker/Kubernetes labels and automatic Let's Encrypt; pick it in container
+    environments where backends constantly come and go and you don't want to hand-edit config. (Bonus: Envoy for
+    service meshes; Caddy for dead-simple auto-HTTPS.)</p>
+  </details>
+
+  <details><summary>Why does a reverse proxy usually make things faster, not slower?</summary>
+    <p>Although it adds a hop, the net effect is almost always faster because: (1) <strong>caching</strong> serves
+    hits in microseconds without touching the backend; (2) <strong>TLS offload</strong> moves expensive crypto off
+    the app and can use optimized/accelerated libraries; (3) <strong>upstream keepalive</strong> reuses warm
+    connections to backends, skipping repeated TCP/TLS handshakes; (4) <strong>buffering</strong> frees backend
+    threads from slow clients; (5) <strong>compression and HTTP/2/3</strong> at the edge cut bytes and round trips.
+    The extra in-data-center hop costs sub-millisecond latency (Part 1), dwarfed by these savings. It slows things
+    only if badly misconfigured (e.g. caching disabled, no keepalive, or itself under-provisioned).</p>
+  </details>
+
+  <details><summary>What does <code>X-Forwarded-Proto</code> do and why does Spring Boot need it?</summary>
+    <p>It tells the backend the scheme of the <em>original</em> client request. Since TLS terminates at the proxy,
+    the proxy↔app hop is plain <code>http</code>; without this header the app believes the whole request was HTTP
+    and builds <code>http://</code> redirect and absolute URLs — which then break in the user's HTTPS browser
+    (mixed-content errors, broken OAuth redirects). The proxy sends <code>X-Forwarded-Proto: https</code>, and
+    once Spring is configured to trust it (<code>server.forward-headers-strategy=framework</code>),
+    <code>ServletUriComponentsBuilder</code> and redirect logic correctly emit <code>https://</code>. It's the
+    standard fix for "my login redirects to http and fails behind a proxy."</p>
+  </details>
+
+  <details><summary>Reverse proxy, API gateway, and CDN — how do they differ?</summary>
+    <p>All three are reverse-proxy-shaped; they differ by emphasis and scope. A <strong>reverse proxy</strong> is
+    the general single-front-door role (TLS, routing, headers, caching). An <strong>API gateway</strong> (Part 13)
+    is a reverse proxy specialized for APIs — it adds authentication, rate-limiting, request/response
+    transformation, aggregation across services, and per-route policy. A <strong>CDN</strong> (Part 14) is a
+    globally distributed fleet of <em>caching</em> reverse proxies placed near users, so content is served from a
+    nearby edge instead of the distant origin — attacking latency via geography. One Nginx can act as all three at
+    small scale; at large scale you use purpose-built products, but the underlying pattern is identical.</p>
+  </details>
+
+  <details><summary>Clients must be configured to use a reverse proxy — true or false?</summary>
+    <p>False — that's the forward-proxy property. Clients are <em>not</em> configured for a reverse proxy and
+    usually don't know it exists. They simply resolve the service's hostname via DNS (Part 6), and that DNS record
+    points at the reverse proxy's IP. The client connects to what it believes is the real server. The
+    configuration burden is entirely on the server operator. (Contrast: a forward proxy <em>requires</em> client
+    configuration — browser proxy settings, system env vars, or a PAC file.)</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">13. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "A proxy and a reverse proxy are the same thing."</strong><br>
+  ✅ "Proxy" alone usually means a <em>forward</em> proxy — it sits in front of clients and acts for the client.
+  A reverse proxy sits in front of servers and acts for the servers. They're mirror images on opposite ends of the
+  conversation: one hides the client from the server, the other hides the servers from the client. Same mechanism
+  (relaying), opposite direction and opposite beneficiary.</p>
+
+  <p><strong>❌ "A reverse proxy and a load balancer are different boxes you chain together."</strong><br>
+  ✅ They're the same box wearing two hats. An L7 load balancer <em>is</em> a reverse proxy whose emphasis is
+  distributing load; a reverse proxy with an <code>upstream</code> pool <em>is</em> load balancing. One Nginx does
+  both at once. The words describe which job you're highlighting, not separate appliances. They are not mutually
+  exclusive.</p>
+
+  <p><strong>❌ "Clients must be configured to use a reverse proxy."</strong><br>
+  ✅ Clients are never configured for it and usually don't know it's there. DNS points the hostname at the proxy's
+  IP, the client connects believing it's the real server, and the proxy forwards to a hidden backend. Client
+  configuration is a <em>forward</em>-proxy thing.</p>
+
+  <p><strong>❌ "Adding a reverse proxy slows everything down — it's an extra hop."</strong><br>
+  ✅ It almost always speeds things up. Caching serves hits in microseconds, TLS offload and upstream keepalive cut
+  handshake costs, buffering frees backend threads, and edge compression/HTTP-2 reduce bytes and round trips. The
+  in-data-center hop it adds is sub-millisecond — dwarfed by those savings. It's slow only when misconfigured.</p>
+
+  <p><strong>❌ "Nginx can't load-balance — that's only for AWS ALB / hardware boxes."</strong><br>
+  ✅ Nginx (and HAProxy, Traefik, Envoy) are full L4/L7 load balancers via their <code>upstream</code>/
+  <code>backend</code> pools, with round-robin, least-connections, and IP-hash algorithms and health checks. An
+  ALB is just a managed reverse proxy AWS runs for you; software proxies do the identical job, often on your own
+  EC2 box (Part 11).</p>
+
+  <p><strong>❌ "The app server sees the real client's IP through a proxy by default."</strong><br>
+  ✅ By default it sees the <em>proxy's</em> IP, because the proxy opened a new connection to it. You must forward
+  the original IP via <code>X-Forwarded-For</code>/<code>X-Real-IP</code> <em>and</em> tell the app to trust those
+  headers (<code>server.forward-headers-strategy</code> in Spring). Forgetting this is why "all my users appear to
+  come from 127.0.0.1" in the logs.</p>
+
+  <p><strong>❌ "The backend still does TLS — the proxy just passes encryption through."</strong><br>
+  ✅ With TLS <em>termination</em> (the common setup), the proxy decrypts at the edge and talks plain HTTP to the
+  backend, which holds no certificate and does no crypto. (Passthrough and re-encrypt modes exist, but the default
+  reason to use a proxy is precisely to <em>remove</em> TLS from the app.)</p>
+
+  <p><strong>❌ "A reverse proxy is only needed for big, multi-server systems."</strong><br>
+  ✅ Even a single app on one server benefits enormously: HTTPS termination, static serving, security shielding
+  (bind app to <code>127.0.0.1</code>), buffering, gzip, and one clean origin. The reverse proxy is "the missing
+  half of production" the framework tutorial skipped — useful from instance number one.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You arrived from <a href="part09.html"><strong>Part 9 — Load Balancers</strong></a>, where one box spread
+  traffic across instances; you now see that box was a <em>reverse proxy</em> all along, and that distribution is
+  just one of its seven jobs alongside TLS termination, static serving, single-origin routing, security shielding,
+  edge protocol handling, and cross-cutting concerns. You built the canonical Browser → Nginx → Spring Boot stack
+  and watched one request thread through every directive. The natural next question is <em>where this proxy
+  physically lives</em>: in a real cloud, it sits in a public subnet with a public IP while your app instances hide
+  in a private subnet — and the cloud even offers a managed reverse proxy (the ALB) so you don't run Nginx
+  yourself. That whole world — VPCs, subnets, security groups, public vs private, EC2, and the ALB — is next:
+  <a href="part11.html"><strong>Part 11 — Cloud Networking (AWS)</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part09.html"><span class="dir">← Previous</span><span class="t">Part 9: Load Balancers</span></a>
+  <a href="part11.html"><span class="dir">Next →</span><span class="t">Part 11: Cloud Networking (AWS)</span></a>
+</div>
+
+</main>
+</body>
+</html>

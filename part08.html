@@ -1,0 +1,1572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 8: HTTPS &amp; TLS — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html" class="active"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 8 of 15</p>
+<h1>HTTPS &amp; TLS — Locking the Conversation</h1>
+<p class="lede">In Part 7 you read raw HTTP messages: methods, headers, cookies, bodies — all of it plain text.
+Now confront the uncomfortable truth: every one of those bytes crosses dozens of networks owned by strangers,
+readable and editable by anyone along the path. This part builds, from zero, the machinery that fixes that —
+encryption, key exchange, certificates, and the TLS handshake — until you can narrate exactly what happens in
+the half-second after you type <code>https://</code>.</p>
+
+<div class="osi-badge">OSI: Layer 5/6-ish — TLS lives between TCP (L4) and HTTP (L7); the layers blur here</div>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#plaintext">The problem: HTTP is a postcard</a></li>
+    <li><a href="#goals">The three security goals</a></li>
+    <li><a href="#encryption">Encryption from zero</a></li>
+    <li><a href="#symmetric">Symmetric encryption</a></li>
+    <li><a href="#asymmetric">Asymmetric encryption</a></li>
+    <li><a href="#diffie-hellman">Diffie–Hellman &amp; forward secrecy</a></li>
+    <li><a href="#hashing">Hashing &amp; integrity</a></li>
+    <li><a href="#signatures">Digital signatures</a></li>
+    <li><a href="#ssl-vs-tls">SSL vs TLS — names &amp; layers</a></li>
+    <li><a href="#certificates">Certificates &amp; the chain of trust</a></li>
+    <li><a href="#cas">Certificate Authorities</a></li>
+    <li><a href="#validation">What the browser actually validates</a></li>
+    <li><a href="#tls12">The TLS 1.2 handshake</a></li>
+    <li><a href="#tls13">The TLS 1.3 handshake</a></li>
+    <li><a href="#sni-alpn">SNI &amp; ALPN</a></li>
+    <li><a href="#amazon">Full journey: https://www.amazon.com</a></li>
+    <li><a href="#backend">TLS in your backend</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="plaintext">1. The problem: HTTP is a postcard</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this part exists</div>
+  <p>Part 1 warned you that a WAN (Wide Area Network) is <strong>hostile territory</strong>: your data crosses
+  infrastructure owned by strangers — your coffee shop, their ISP (Internet Service Provider), a backbone
+  carrier, an IXP (Internet Exchange Point), Amazon's edge network. Part 7 showed you that an HTTP request is
+  just readable text: <code>GET /api/orders</code>, a <code>Cookie:</code> header carrying your session, maybe a
+  JSON body with a password in it. Put those two facts together: <strong>every byte of every HTTP message is
+  readable, recordable, and editable by every network it crosses.</strong> This is problem #9 from Part 1's
+  ten problems — the trust problem — and TLS (Transport Layer Security) is its answer.</p>
+</div>
+
+<p>Make it visceral. You open your laptop in a coffee shop and log in to a site over plain HTTP. Your request
+hops through the shop's Wi-Fi access point, the shop's router, their ISP, a metro exchange, a backbone carrier,
+and the server's hosting provider — easily 10–20 distinct devices owned by five or six organizations you have
+never heard of. Every single one of them sees this, verbatim:</p>
+
+<div class="figure-title">Fig 8.1 — Attack #1: eavesdropping (passive — just read the wire)</div>
+<pre class="diagram">
+  YOU                    COFFEE-SHOP WI-FI                    SERVER
+   │                            │                                │
+   │   POST /login HTTP/1.1     │                                │
+   │   Host: shop.example.com   │      ...same bytes, hop        │
+   │   username=priya           │      after hop after hop...    │
+   │   password=Hunter2!        │ ──────────────────────────────►│
+   │ ──────────────────────────►│                                │
+   │                            │                                │
+   │                      ┌─────┴──────┐                         │
+   │                      │  ATTACKER   │  a laptop on the same  │
+   │                      │  (passive)  │  Wi-Fi, radio in       │
+   │                      │ reads every │  monitor mode, running │
+   │                      │ byte as it  │  Wireshark. No hacking │
+   │                      │ flies past  │  required — just       │
+   │                      └────────────┘   listening.            │
+</pre>
+
+<p>This is not theoretical. In Part 2 you ran Wireshark to watch packets on your own machine. Run it on any
+<em>shared</em> network — open Wi-Fi, or any Wi-Fi where you know the password, which is every café and hotel —
+and plain-HTTP traffic from other people appears on your screen: URLs, headers, cookies, form fields,
+passwords. Radio is a broadcast medium (Part 1's physics section); "sending" on Wi-Fi means shouting into a
+room, and encryption is the only thing that makes shouting safe.</p>
+
+<div class="callout history">
+  <div class="callout-title">📜 The Firesheep moment (2010)</div>
+  <p>For years, big sites encrypted only their <em>login</em> page — the password was protected, but the
+  session cookie (Part 7) that the login produced was then sent over plain HTTP with every subsequent request.
+  In October 2010, developer Eric Butler released <strong>Firesheep</strong>, a Firefox extension that sat on a
+  shared Wi-Fi network, sniffed those cookies out of the air, and showed a sidebar with the name and photo of
+  every person browsing Facebook or Twitter nearby. <em>Double-click a face and you were logged in as them.</em>
+  One click. No skill required. It was downloaded hundreds of thousands of times in days, and it did exactly
+  what it was designed to do: shame the industry. Within months the big platforms began moving to HTTPS for
+  <em>every</em> request, not just login — the start of the "HTTPS everywhere" era that, combined with free
+  certificates (section 11), pushed the web from ~40% encrypted in 2015 to ~95%+ today.</p>
+</div>
+
+<p>Eavesdropping is only the polite attack. Networks in the middle can also <strong>change</strong> what passes
+through them — and real companies did this as a business model: several ISPs and hotel/airline Wi-Fi providers
+were caught injecting their own advertising banners and tracking scripts into plain-HTTP pages their customers
+were reading. The page that arrived was not the page the server sent:</p>
+
+<div class="figure-title">Fig 8.2 — Attack #2: tampering (active — modify in transit)</div>
+<pre class="diagram">
+  SERVER sends:                  ISP "value-added" proxy             YOU receive:
+  ┌────────────────────┐         ┌──────────────────┐         ┌─────────────────────┐
+  │ 200 OK             │         │ rewrite the HTML │         │ 200 OK              │
+  │ ...the article...  │ ──────► │ on the way past: │ ──────► │ ...the article...   │
+  │                    │         │ + ad banner      │         │ + AD INJECTED HERE  │
+  │                    │         │ + tracking JS    │         │ + tracker.js        │
+  └────────────────────┘         └──────────────────┘         └─────────────────────┘
+
+      neither you nor the server can tell this happened — plain HTTP
+      carries no tamper-evidence whatsoever
+</pre>
+
+<p>And the third attack: why bother reading or editing traffic when you can simply <strong>pretend to be the
+server</strong>? On an open network, the attacker controls DNS answers (Part 6) and routing; nothing in plain
+HTTP proves that the machine answering to <code>shop.example.com</code> is actually the shop:</p>
+
+<div class="figure-title">Fig 8.3 — Attack #3: impersonation (be the server)</div>
+<pre class="diagram">
+   YOU                                        ATTACKER's laptop
+    │   DNS: where is shop.example.com?              │
+    │ ───────────────────────────────────►  "me! 192.0.2.66"
+    │                                                │
+    │   POST /login  username + password             │
+    │ ───────────────────────────────────►  a pixel-perfect fake
+    │                                        login page. Your real
+    │   "200 OK, welcome back!"              credentials are now
+    │ ◄───────────────────────────────────   the attacker's.
+</pre>
+
+<p>Combine impersonation in <em>both directions</em> and you get the canonical network attack, the one every
+security mechanism in this part is measured against — <strong>MITM (Man-In-The-Middle)</strong>. The attacker
+inserts themselves between you and the real server and relays traffic both ways, reading and editing at will.
+The devastating property: <strong>both ends see a perfectly normal conversation.</strong></p>
+
+<div class="figure-title">Fig 8.4 — The Man-In-The-Middle: both victims see a normal conversation</div>
+<pre class="diagram">
+   YOU                        ATTACKER                        REAL SERVER
+    │                            │                                │
+    │  "Hi server!"              │                                │
+    │ ──────────────────────────►│  "Hi server!" (relayed)        │
+    │                            │ ──────────────────────────────►│
+    │                            │                                │
+    │                            │          "Hi client!" (real)   │
+    │  "Hi client!" (relayed)    │ ◄──────────────────────────────│
+    │ ◄──────────────────────────│                                │
+    │                            │                                │
+    │  password, cookies, data   │   reads everything,            │
+    │ ──────────────────────────►│   alters anything,             │
+    │                            │   forwards the rest ──────────►│
+    │                            │                                │
+    │   to YOU it looks like the server.                          │
+    │   to the SERVER it looks like you.                          │
+</pre>
+
+<p>Hold these three attacks in your head — <strong>eavesdropping, tampering, impersonation</strong> — because
+TLS is not one defense; it is three defenses bundled, one per attack. That mapping is the next section.</p>
+
+<!-- ============================================================ -->
+<h2 id="goals">2. The three security goals (and the one that is not)</h2>
+
+<p>Security engineers compress the requirements into three properties. Each one neutralizes exactly one of the
+attacks above, and each is implemented by a different cryptographic mechanism — this table is the skeleton of
+the entire part:</p>
+
+<table>
+  <tr><th>Goal</th><th>Plain-English promise</th><th>Defeats</th><th>Mechanism</th><th>Built from (section)</th></tr>
+  <tr><td><strong>Confidentiality</strong></td><td>Nobody in the middle can <em>read</em> the data</td><td>Eavesdropping</td><td>Encryption with session keys</td><td>Symmetric crypto (§4) + key exchange (§6)</td></tr>
+  <tr><td><strong>Integrity</strong></td><td>Nobody in the middle can <em>change</em> the data undetected</td><td>Tampering</td><td>MACs / AEAD — tamper-evidence on every record</td><td>Hashing (§7)</td></tr>
+  <tr><td><strong>Authenticity</strong></td><td>You are talking to the <em>real</em> server, not a look-alike</td><td>Impersonation / MITM</td><td>Certificates + digital signatures</td><td>Signatures (§8) + certificates (§10–11)</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>All three goals are necessary, and authenticity is the one beginners forget. Encryption without
+  authentication is <strong>worthless against a MITM</strong>: you would just establish a beautifully encrypted
+  connection… directly to the attacker, who decrypts, reads, re-encrypts, and forwards. Most of TLS's apparent
+  complexity — certificates, chains, authorities — exists to answer one question: <em>whose key am I actually
+  encrypting to?</em></p>
+  <p>Also note what is <strong>not</strong> on the list: <strong>availability</strong>. TLS does not keep your
+  service up — an attacker who can drop your packets can still deny service, and a DDoS does not care about your
+  certificates. Availability is the job of Parts 9–13 (load balancers, redundancy, autoscaling), not of
+  cryptography.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="encryption">3. Encryption from zero</h2>
+
+<p>You need exactly four words of vocabulary, and none of the math. (True to this course's style: we will build
+<em>intuition</em> for the crypto, and treat the algorithms as trustworthy black boxes — which is precisely how
+you should treat them in production code, too. Never write your own.)</p>
+
+<ul>
+  <li><strong>Plaintext</strong> — the original, readable data. Your HTTP request.</li>
+  <li><strong>Ciphertext</strong> — the scrambled, unreadable output that actually crosses the network.</li>
+  <li><strong>Cipher</strong> — the algorithm that converts between the two. Public, standardized, heavily studied.</li>
+  <li><strong>Key</strong> — the secret input that makes <em>your</em> scrambling unique. A key is just a number — typically 128 or 256 random bits.</li>
+</ul>
+
+<p>One principle governs the whole field, formulated by the cryptographer Auguste Kerckhoffs in 1883:
+<strong>a system must remain secure even if everything about it except the key is public knowledge.</strong>
+Security lives in the key, never in the secrecy of the algorithm. This is why AES's full specification is a
+public document anyone can read, and why "we use a proprietary secret algorithm" is the reddest of red flags —
+secret algorithms get no peer review, and history shows they fall fast. The entire design question of TLS
+therefore reduces to: <em>how do two machines get a shared secret key, and which public algorithms do they run
+with it?</em></p>
+
+<!-- ============================================================ -->
+<h2 id="symmetric">4. Symmetric encryption — one key, blazing fast, one fatal flaw</h2>
+
+<p><strong>Symmetric encryption</strong> uses a single shared key for both directions: the same key that
+encrypts also decrypts. Both parties must hold an identical copy.</p>
+
+<div class="figure-title">Fig 8.5 — Symmetric encryption: the same key locks and unlocks</div>
+<pre class="diagram">
+        ALICE                                              BOB
+   key: 7f3a...c9 (shared)                        key: 7f3a...c9 (same!)
+          │                                                │
+   "GET /api/orders"                                       │
+          │  encrypt with key                              │
+          ▼                                                │
+   9e02ba6611f0d3...  ────── ciphertext crosses ──────►    │
+                              the hostile network          │ decrypt with key
+                                                           ▼
+   an eavesdropper sees only                        "GET /api/orders"
+   random-looking bytes
+</pre>
+
+<p>The reigning symmetric cipher is <strong>AES (Advanced Encryption Standard)</strong> — standardized by the US
+NIST in 2001 after a public worldwide competition (Kerckhoffs would approve). You will meet it as
+<code>AES-128</code> or <code>AES-256</code> (the key size in bits; both are beyond brute force — 2<sup>128</sup>
+is a number with 38 digits) combined with a <em>mode of operation</em> such as <strong>GCM (Galois/Counter
+Mode)</strong>, which we will demystify in section 7. Read <code>AES_128_GCM</code> as "AES with a 128-bit key,
+run in GCM mode" — that string appears verbatim inside TLS cipher suites later.</p>
+
+<p>Symmetric crypto's superpower is <strong>speed</strong>. Modern CPUs have dedicated silicon for it —
+<strong>AES-NI (AES New Instructions)</strong>, hardware instructions that encrypt multiple gigabytes per second
+per core. Encrypting your API traffic costs roughly 1–2% CPU; for bulk data movement it is effectively free.
+This matters for a misconception we will kill later: "TLS is too slow" stopped being true around 2010.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the fatal flaw: key distribution</div>
+  <p>Symmetric encryption has a chicken-and-egg problem that motivates <em>everything else in this part</em>:
+  both sides need the same secret key <strong>before</strong> they can talk securely. But your browser and
+  <code>amazon.com</code> have never met. The only channel between them is the network itself — the very wire
+  the attacker is reading. Send the key over that wire in plaintext and the eavesdropper grabs it and decrypts
+  everything after. Encrypt the key… with what key? You cannot bootstrap a shared secret over a public channel
+  using symmetric tools alone. For most of human history this was solved by couriers with briefcases. The web
+  needed something better, and the next two sections are the two breakthroughs (both from the 1970s) that
+  provide it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="asymmetric">5. Asymmetric encryption — the padlock and the key</h2>
+
+<p>The first breakthrough: what if encrypting and decrypting used <strong>different</strong> keys? In
+<strong>asymmetric (public-key) cryptography</strong>, every participant generates a mathematically linked
+<strong>key pair</strong>:</p>
+
+<ul>
+  <li>The <strong>public key</strong> — shared with the entire world, printed on billboards if you like. It can <strong>encrypt</strong> messages (and, later, <strong>verify</strong> signatures).</li>
+  <li>The <strong>private key</strong> — never leaves your machine, ever. It is the only thing that can <strong>decrypt</strong> what the public key encrypted (and the only thing that can <strong>sign</strong>).</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the padlock-and-key mailbox</div>
+  <p>Imagine you hand out thousands of identical open <strong>padlocks</strong>, free, to anyone who asks — but
+  you keep the <strong>one key</strong> that opens them locked in your desk. Anyone in the world can put a
+  message in a box, snap one of your padlocks shut on it, and mail it to you. Snapping a padlock shut requires
+  no secret — that is the public key. But once snapped, <em>not even the sender</em> can reopen the box. Only
+  you can, with the one key you never gave anyone — the private key. Key distribution is solved: the thing you
+  distribute (open padlocks) is useless for reading mail; the thing that reads mail (your key) is never
+  distributed. An eavesdropper who intercepts a padlock can send you secure mail — but cannot open anyone
+  else's.</p>
+</div>
+
+<div class="figure-title">Fig 8.6 — Asymmetric encryption: public key locks, private key unlocks</div>
+<pre class="diagram">
+   ANYONE ON EARTH                                    SERVER (key owner)
+        │                                                   │
+        │   server's PUBLIC key: freely published           │
+        │ ◄─────────────────────────────────────────────────│
+        │                                                   │
+   "secret message"                                         │
+        │  encrypt with server's public key                 │
+        ▼                                                   │
+   c41a99...e2  ───────────────────────────────────────►    │
+                                                            │ decrypt with
+   eavesdropper holds the public key too —                  │ PRIVATE key
+   it is useless for decrypting. one-way door.              ▼
+                                                     "secret message"
+</pre>
+
+<p>Two algorithm families carry the world's asymmetric load — know their names and one-line characters:</p>
+
+<ul>
+  <li><strong>RSA (Rivest–Shamir–Adleman, 1977)</strong> — the venerable original; security rests on the difficulty of factoring enormous numbers. Big keys (2048–4096 bits), slow, utterly battle-tested. Still the most common key type inside certificates.</li>
+  <li><strong>Elliptic-curve cryptography</strong> — the modern family: same security from far smaller, faster keys (256 bits). You will meet it as <strong>ECDHE (Elliptic Curve Diffie–Hellman Ephemeral)</strong> for key agreement (next section), <strong>ECDSA (Elliptic Curve Digital Signature Algorithm)</strong> and <strong>Ed25519</strong> for signatures (Ed25519 is also what your modern SSH keys use).</li>
+</ul>
+
+<p>So why not simply encrypt the whole HTTP conversation with the server's public key and be done? Because of
+the catch: asymmetric operations are <strong>100–1000× slower</strong> than symmetric ones — heavyweight math on
+huge numbers, with no AES-NI-style hardware shortcut, plus message-size limits and other practical constraints.
+Public-key crypto is a scalpel, not a conveyor belt.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — real systems are hybrid</div>
+  <p>Every serious protocol — TLS, SSH, Signal — uses the same two-phase pattern:
+  <strong>asymmetric cryptography briefly, at the start, to agree on a small shared secret; then symmetric
+  cryptography (AES) for the actual conversation.</strong> The expensive scalpel solves key distribution once
+  per connection; the cheap conveyor belt encrypts the gigabytes. When you see the TLS handshake in section 13,
+  it is exactly this: a short asymmetric ceremony whose only output is a symmetric session key.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Symmetric encryption: one shared key, like a house key both of you copy — fast, but how do strangers
+    share it safely? Asymmetric encryption: a public padlock anyone can snap shut and a private key only you
+    hold — solves the sharing problem, but it is slow. Real systems use the padlock once to exchange a house
+    key, then use the house key for everything.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Symmetric (AES-128/256, usually in GCM mode) gives multi-GB/s throughput via AES-NI but requires
+    pre-shared keys. Asymmetric (RSA, elliptic-curve) splits encrypt/verify (public) from decrypt/sign
+    (private), enabling secure first contact at 100–1000× the CPU cost. TLS is hybrid: public-key operations
+    bootstrap a per-connection symmetric session key. Kerckhoffs's principle throughout: algorithms public,
+    keys secret.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>In modern TLS the server's asymmetric key pair is used for <em>authentication only</em> (signing the
+    handshake), not for encrypting application data and — since TLS 1.3 — not even for encrypting the key
+    exchange. Session keys come from ephemeral Diffie–Hellman (next section), precisely so that compromise of
+    the long-term private key does not decrypt recorded traffic. Also on the horizon: elliptic-curve and RSA
+    math both fall to large quantum computers, which is why TLS deployments are already rolling out hybrid
+    post-quantum key exchange (e.g. X25519 combined with ML-KEM) — the symmetric layer (AES) is essentially
+    fine as-is.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="diffie-hellman">6. Diffie–Hellman — agreeing on a secret in public</h2>
+
+<p>The second 1970s breakthrough is stranger and, for modern TLS, more important. <strong>Diffie–Hellman key
+agreement</strong> (Whitfield Diffie and Martin Hellman, 1976) lets two strangers, shouting across a room full
+of eavesdroppers, <em>compute</em> a shared secret that the eavesdroppers cannot derive — without ever
+transmitting the secret at all. No padlocks shipped, nothing secret crosses the wire. It sounds impossible.
+The classic paint-mixing analogy shows why it is not:</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — mixing paint in public</div>
+  <p>Mixing paint is a <strong>one-way operation</strong>: trivial to do, practically impossible to undo — you
+  cannot look at a bucket of olive-green and recover the exact two colors that made it. Diffie–Hellman is
+  built on a mathematical operation with the same property (easy forward, infeasible backward). Alice and Bob
+  agree — publicly — on a common starting color. Each then mixes in a private color they tell no one. They swap
+  the resulting mixtures <em>in full view of the eavesdropper</em>, and each mixes their own private color into
+  the mixture they received. Both now hold the same three-part blend: common + Alice's + Bob's. The eavesdropper
+  holds the common color and both intermediate mixtures — but without the ability to <em>un-mix</em>, cannot
+  produce the final blend.</p>
+</div>
+
+<div class="figure-title">Fig 8.7 — Diffie–Hellman as paint mixing (eavesdropper sees everything crossing the wire)</div>
+<pre class="diagram">
+        ALICE                     public wire                      BOB
+          │                            │                            │
+          │      common paint: YELLOW (public, everyone sees it)    │
+          │◄───────────────────────────┼───────────────────────────►│
+          │                            │                            │
+   + secret RED                        │                     + secret BLUE
+   = ORANGE mix                        │                     = GREEN mix
+          │                            │                            │
+          │  ORANGE ──────────────────►│◄────────────────── GREEN   │
+          │          (swap mixtures — eavesdropper copies both)     │
+          │                            │                            │
+   GREEN + secret RED                  │            ORANGE + secret BLUE
+          │                            │                            │
+          ▼                            │                            ▼
+   ███ YELLOW+RED+BLUE ███             │             ███ YELLOW+BLUE+RED ███
+        SAME COLOR  ◄──────── identical secret ────────►  SAME COLOR
+                                       │
+        eavesdropper has: YELLOW, ORANGE, GREEN
+        needs RED or BLUE to finish — but un-mixing paint is infeasible
+</pre>
+
+<p>In the real protocol the "colors" are numbers, the "mixing" is modular exponentiation (classic DH) or
+elliptic-curve point math (ECDH — Elliptic Curve Diffie–Hellman, the version everything uses today), and the
+final shared color becomes the input from which the AES session keys are derived. The eavesdropper sees the
+public parameters and both public "mixtures" (called <em>key shares</em>) and can do nothing with them.</p>
+
+<h3>6.1 Ephemeral keys and forward secrecy</h3>
+
+<p>Now the detail with enormous real-world consequences. The "E" in <strong>ECDHE</strong> stands for
+<strong>ephemeral</strong>: both sides generate a <em>brand-new</em> DH key pair for every connection and throw
+it away when the connection closes. The secret colors live in RAM for the duration of one session, then cease
+to exist. This buys a property called <strong>forward secrecy</strong>:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — forward secrecy</div>
+  <p><strong>Forward secrecy means yesterday's recorded traffic stays unreadable even if the server's long-term
+  private key leaks tomorrow.</strong> Threat model: a well-resourced adversary records your ciphertext for
+  years (storage is cheap), then later steals or compels the server's private key. In old-style TLS — where the
+  client encrypted the session key directly with the certificate's RSA public key — that stolen key
+  retroactively decrypts <em>every recorded session ever</em>. With ephemeral Diffie–Hellman, the certificate's
+  key never encrypts anything; each session's secret came from throwaway key shares that no longer exist.
+  There is nothing to steal. This is why <strong>TLS 1.3 made ephemeral key exchange mandatory</strong> and
+  deleted the old RSA key-transport mode entirely — and it should also reshape your intuition: the certificate's
+  job is <em>identity</em>, not encryption. Hold that thought for section 10.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Diffie–Hellman lets two strangers create a shared secret by exchanging "mixtures" that are useless to
+    eavesdroppers — like mixing paint: easy to combine, impossible to separate. Doing it with fresh throwaway
+    values every session ("ephemeral") means even a future theft of the server's keys cannot unlock past
+    conversations.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Each side picks a random private value, derives a public key share, and combines its private value with
+    the peer's share; the math guarantees both arrive at the same shared secret while observers cannot. TLS
+    runs this as ECDHE over curves like X25519, feeds the result through a key-derivation function (HKDF), and
+    produces separate AES keys per direction. Ephemeral = per-connection key pairs = forward secrecy; mandatory
+    in TLS 1.3.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>DH alone is unauthenticated — an active MITM can run two separate DH exchanges, one with each victim
+    (the paint analogy has no defense against someone who intercepts and re-mixes). That is why TLS pairs ECDHE
+    with a certificate <em>signature over the handshake transcript</em>: the key exchange provides secrecy, the
+    signature proves which endpoint you exchanged with. Forward secrecy also changed operations: TLS-inspecting
+    middleboxes that relied on holding the server's RSA key to passively decrypt traffic stopped working with
+    TLS 1.3, forcing enterprises to explicit MITM proxies with their own internal CA (Certificate Authority) —
+    you will recognize this as your corporate laptop's "weird root certificate."</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="hashing">7. Hashing — the fingerprint function</h2>
+
+<p>Third tool. A <strong>cryptographic hash function</strong> takes any input — one byte or a 4 GB file — and
+produces a fixed-size <em>digest</em> (for <strong>SHA-256</strong> — Secure Hash Algorithm, 256-bit variant —
+always exactly 32 bytes). Three properties make it a fingerprint:</p>
+
+<ul>
+  <li><strong>Fixed size, any input</strong> — the digest length never changes.</li>
+  <li><strong>One-way</strong> — given a digest, finding an input that produces it is computationally infeasible. It is a meat grinder: sausage from pig, never pig from sausage.</li>
+  <li><strong>Avalanche effect</strong> — flip a single bit of input and roughly half the output bits flip; digests of near-identical inputs look totally unrelated.</li>
+</ul>
+
+<div class="figure-title">Fig 8.8 — The avalanche effect: one character changes everything</div>
+<pre class="diagram">
+   input: "transfer 100.00 to account 4471"
+      │
+      ▼  SHA-256
+   a3f1c2…  9b07e4d5512aa1…  (32 bytes)
+
+   input: "transfer 900.00 to account 4471"     ◄── one digit changed
+      │
+      ▼  SHA-256
+   7c0d98…  e2b6f00134cd77…  (utterly different digest)
+
+   same input → always same digest    different input → unrecognizably different digest
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the wax seal</div>
+  <p>A medieval letter was folded and sealed with <strong>wax pressed with the sender's ring</strong>. The seal
+  does not hide the contents (that is encryption's job) — it makes <em>tampering evident</em>: any attempt to
+  open and alter the letter breaks the seal, and only the ring's owner can re-impress it. A <strong>MAC
+  (Message Authentication Code)</strong> is a wax seal for bytes: a hash computed over the message <em>plus the
+  shared secret key</em>, stamped onto every TLS record. The receiver recomputes it; if even one bit was altered
+  in transit, the avalanche effect makes the seal mismatch screamingly obvious, and the connection is killed.
+  An attacker cannot forge a fresh seal without the ring — the key.</p>
+</div>
+
+<p>One honest paragraph on the acronyms you will see. <strong>HMAC (Hash-based Message Authentication Code)</strong>
+is the classic keyed-hash construction (it is also what you use to verify webhook signatures from Stripe or
+GitHub — same wax seal, different letter). Older TLS encrypted the data and <em>separately</em> attached an
+HMAC. Modern TLS instead uses <strong>AEAD (Authenticated Encryption with Associated Data)</strong> ciphers —
+this is what the <strong>GCM</strong> in <code>AES_128_GCM</code> means: one integrated mode that
+<strong>encrypts AND authenticates in a single pass</strong>, producing ciphertext plus a built-in
+authentication tag. Confidentiality and integrity, one operation, fewer ways to combine the pieces wrongly
+(several historical TLS attacks exploited exactly those bad combinations). TLS 1.3 permits <em>only</em> AEAD
+ciphers.</p>
+
+<!-- ============================================================ -->
+<h2 id="signatures">8. Digital signatures — the atom certificates are built from</h2>
+
+<p>Now run asymmetric crypto <em>backwards</em> and something wonderful falls out. Encryption used the public
+key to lock and the private key to unlock. Flip it: what if the <strong>private</strong> key transforms a
+message, and the <strong>public</strong> key checks the transformation? Then anyone holding your public key can
+verify that the transformation was made by your private key — i.e., <strong>by you</strong> — because nobody
+else could have produced it.</p>
+
+<p>That is a <strong>digital signature</strong>. The intuition-level recipe (real schemes like RSA-PSS, ECDSA
+and Ed25519 differ in details, but this is the right mental model):</p>
+
+<div class="figure-title">Fig 8.9 — Signing and verifying</div>
+<pre class="diagram">
+   SIGNER (holds private key)                 VERIFIER (holds public key)
+        │                                            │
+   document ──► SHA-256 ──► digest                   │  receives: document + signature
+        │                     │                      │
+        │      "encrypt" digest with                 │  1. SHA-256(document) ──► digest A
+        │       PRIVATE key = SIGNATURE              │  2. check signature with
+        │                     │                      │     PUBLIC key ──► digest B
+        └──── send document + signature ───────────► │  3. digest A == digest B ?
+                                                     │
+                                              match    ──► signed by the private-key
+                                                           holder, unmodified since
+                                              mismatch ──► forged OR tampered. reject.
+</pre>
+
+<p>Why hash first? Speed and size: asymmetric math on a 32-byte digest instead of a 2 MB document. The
+avalanche effect guarantees the digest <em>is</em> the document for integrity purposes. A valid signature
+proves two things at once:</p>
+
+<ul>
+  <li><strong>Authenticity</strong> — the private-key holder, and only them, produced it.</li>
+  <li><strong>Integrity</strong> — the document has not changed by a single bit since signing (else the digests diverge).</li>
+</ul>
+
+<p>And a bonus third: <strong>non-repudiation</strong> — the signer cannot later deny signing, because nobody
+else <em>could</em> have. (A MAC cannot give you this: both ends share the MAC key, so either could have
+produced any given seal. Signatures are asymmetric; the power to sign is not shared.)</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A digital signature is <strong>a verifiable claim bound to a key pair</strong>: "the holder of private key
+  X vouches for exactly these bytes." Everything in the next three sections — certificates, certificate chains,
+  Certificate Authorities, the trust decisions your browser makes 100 times a day — is just this atom,
+  composed: documents that say "this public key belongs to this domain name," signed by parties you already
+  trust. Understand Fig 8.9 and you understand PKI (Public Key Infrastructure).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ssl-vs-tls">9. SSL vs TLS — one protocol, two names, and a layer question</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — from SSL to TLS</div>
+  <p>The web's first commercial boom (1994–95) needed credit-card numbers to cross the wire, so
+  <strong>Netscape</strong> built <strong>SSL (Secure Sockets Layer)</strong>. SSL 1.0 was so flawed it never
+  shipped; SSL 2.0 (1995) and SSL 3.0 (1996) carried the early web but are now thoroughly broken — the 2014
+  <strong>POODLE</strong> attack (Padding Oracle On Downgraded Legacy Encryption) was SSL 3.0's final nail, and
+  both versions are formally prohibited today. Standardization passed to the <strong>IETF (Internet Engineering
+  Task Force)</strong>, which — partly to neutralize vendor branding — renamed the protocol <strong>TLS
+  (Transport Layer Security)</strong>: TLS 1.0 (1999, a light revision of SSL 3.0), TLS 1.1 (2006), TLS 1.2
+  (2008 — the long-reigning workhorse, still everywhere), and TLS 1.3 (2018, RFC 8446 — a genuine redesign:
+  leaner, faster, with every known-weak option amputated). So: <strong>SSL is the dead ancestor, TLS is the
+  living protocol</strong> — yet the industry still says "SSL certificate," "SSL termination," and names
+  libraries OpenSSL. Treat every modern utterance of "SSL" as a fossil phrase meaning TLS. An "SSL certificate"
+  is a TLS certificate; there is no difference, and the certificate is version-agnostic anyway.</p>
+</div>
+
+<table>
+  <tr><th>Version</th><th>Year</th><th>Status today</th><th>One-line verdict</th></tr>
+  <tr><td>SSL 2.0 / 3.0</td><td>1995 / 1996</td><td>Prohibited</td><td>Broken (POODLE et al.) — must be disabled everywhere</td></tr>
+  <tr><td>TLS 1.0 / 1.1</td><td>1999 / 2006</td><td>Deprecated (2021)</td><td>Browsers and PCI compliance reject them</td></tr>
+  <tr><td>TLS 1.2</td><td>2008</td><td>Fully supported</td><td>Fine when configured well (ECDHE + AEAD only)</td></tr>
+  <tr><td>TLS 1.3</td><td>2018</td><td>Current standard</td><td>Faster, simpler, forward secrecy mandatory — prefer it</td></tr>
+</table>
+
+<p><strong>HTTPS (HyperText Transfer Protocol Secure)</strong> is not a new protocol: it is literally
+<strong>HTTP over TLS over TCP</strong> — the exact same messages you dissected in Part 7, fed through a TLS
+layer before touching the socket, on port <strong>443</strong> instead of 80 (the well-known ports from
+Part 5). Where does that layer "live"?</p>
+
+<div class="figure-title">Fig 8.10 — Where TLS sits: a secure pipe between TCP and HTTP</div>
+<pre class="diagram">
+   WITHOUT TLS  (http://, port 80)        WITH TLS  (https://, port 443)
+
+   ┌──────────────────────────┐           ┌──────────────────────────┐
+   │  HTTP        (Layer 7)   │           │  HTTP        (Layer 7)   │  unchanged!
+   ├──────────────────────────┤           ├──────────────────────────┤
+   │                          │           │  TLS    (Layer "5/6")    │ ◄── encrypts/
+   │                          │           ├──────────────────────────┤     decrypts
+   │  TCP         (Layer 4)   │           │  TCP         (Layer 4)   │  unchanged
+   ├──────────────────────────┤           ├──────────────────────────┤
+   │  IP          (Layer 3)   │           │  IP          (Layer 3)   │  unchanged
+   ├──────────────────────────┤           ├──────────────────────────┤
+   │  Ethernet/Wi-Fi (L2/L1)  │           │  Ethernet/Wi-Fi (L2/L1)  │  unchanged
+   └──────────────────────────┘           └──────────────────────────┘
+
+   HTTP hands plaintext down ──► TLS encrypts ──► TCP carries ciphertext
+   TCP delivers ciphertext  ──► TLS decrypts ──► HTTP receives plaintext
+</pre>
+
+<p>Which OSI layer is that, exactly? Here is the honest answer, continuing Part 2's reality check about Layers
+5 and 6: <strong>the OSI layers blur here, and that is fine.</strong> TLS establishes and manages a session
+(very Layer 5), transforms data representation by encrypting it (very Layer 6), yet rides directly on TCP
+(Layer 4) and is configured by application-layer software (Layer 7). Textbooks file it under "5/6"; the IETF —
+which never adopted OSI's seven layers anyway — just calls it "above the transport, below the application," and
+its own name says Transport Layer Security. The pragmatic model to carry: <strong>TLS is a transparent secure
+pipe inserted between TCP and HTTP.</strong> HTTP does not know it is being encrypted; TCP does not know what
+it is carrying; both behave exactly as Parts 4 and 7 taught you. (This layering independence is precisely why
+the same TLS protects SMTP, IMAP, PostgreSQL connections, and gRPC without modification — and why Part 9 can
+casually "terminate" it at a load balancer.)</p>
+
+<!-- ============================================================ -->
+<h2 id="certificates">10. Certificates — the chain of trust</h2>
+
+<p>Sections 4–8 built the toolbox: fast symmetric encryption, key agreement that defeats eavesdroppers, seals
+that defeat tampering, signatures that prove identity. One gap remains, and it is the MITM-shaped gap from
+section 2: when your browser receives "the server's public key," <strong>how does it know the key belongs to
+amazon.com and not to the attacker relaying in the middle?</strong> A key is just a number; numbers carry no
+name tags. The answer is a document that <em>binds</em> a public key to a name, vouched for by someone you
+already trust: a <strong>certificate</strong>.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — sealed envelope, signature, and a notarized ID</div>
+  <p>A stranger hands you a sealed envelope (encryption) with a signature on the flap (integrity, authenticity
+  of the <em>sender's key</em>). But a signature only proves "the same entity who holds this pen signed this" —
+  it does not prove <em>who that entity is</em>. For that, humans invented the notarized ID: a document that
+  says "this photo, this name, this person," issued and stamped by an authority everyone already recognizes —
+  a passport office. You trust the stranger's claimed name not because of anything they say, but because a
+  <em>third party you already trust</em> examined them and put its un-forgeable stamp on the binding. An X.509
+  certificate is exactly a notarized ID for a public key: "this public key ↔ this domain name," stamped — that
+  is, digitally signed (section 8) — by a Certificate Authority your browser already trusts. The envelope, the
+  signature, and the notarized ID together give you all three goals from section 2.</p>
+</div>
+
+<p>Certificates use a format called <strong>X.509</strong>. Run
+<code>openssl x509 -in cert.pem -text</code> against any site's certificate and you get something like this —
+these are the fields that matter, annotated:</p>
+
+<pre class="code">Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 04:a1:b2:9e:77:03:c5:51:0e:de
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=US, O=Let's Encrypt, CN=R11        ── WHO vouches (the CA)
+        Validity
+            Not Before: May 14 09:12:00 2026 GMT     ── validity window:
+            Not After : Aug 12 09:11:59 2026 GMT     ── expired = rejected
+        Subject: CN=api.example.com                  ── WHO this identifies
+        Subject Public Key Info:
+            Public Key Algorithm: id-ecPublicKey     ── the public key being
+                Public-Key: (256 bit, P-256 curve)      bound to the name
+        X509v3 extensions:
+            X509v3 Subject Alternative Name:         ── SANs: the names that
+                DNS:api.example.com,                    ACTUALLY count today
+                DNS:www.example.com, DNS:example.com
+            X509v3 Extended Key Usage:
+                TLS Web Server Authentication
+            Authority Information Access:
+                OCSP - URI:http://r11.o.lencr.org    ── revocation check URL
+    Signature Algorithm: sha256WithRSAEncryption
+    Signature Value:
+        8a:3f:9c:41:d2:...                           ── the CA's signature over
+                                                        EVERYTHING above
+</pre>
+
+<p>Read it as a sentence: <em>"Let's Encrypt asserts that this public key belongs to api.example.com (and
+www.example.com and example.com), from May 14 to August 12, 2026 — signed, Let's Encrypt."</em> Two details
+backend engineers must internalize:</p>
+
+<ul>
+  <li><strong>SAN (Subject Alternative Name) is the field that matters.</strong> Historically the hostname lived in the Subject's CN (Common Name); today browsers <em>ignore CN entirely</em> and match the URL's hostname against the SAN list only. A cert is valid for exactly the names enumerated there. "Certificate is valid but browser rejects it" is very often "the hostname you used is not in the SANs."</li>
+  <li><strong>The signature covers everything.</strong> Change one bit — extend the expiry, add a SAN — and the CA's signature no longer verifies (avalanche effect, section 7). A certificate is tamper-proof, which is why it can safely travel over the untrusted network during the handshake.</li>
+</ul>
+
+<h3>10.1 But who vouches for the voucher? The chain</h3>
+
+<p>Verifying example.com's certificate requires the <em>issuer's</em> public key. Where does that come from?
+Another certificate — which is signed by yet another issuer. The recursion must stop somewhere, and it stops at
+a <strong>root certificate</strong>: self-signed (it vouches for itself), and trusted not because of any
+signature but because it is <strong>pre-installed in your operating system's or browser's trust store</strong> —
+a curated list of roughly 150 root CAs that ships with Windows, macOS, Android, iOS, Firefox, and the JVM
+(Java Virtual Machine — its copy lives in a file called <code>cacerts</code>; remember that name for
+section 17).</p>
+
+<div class="figure-title">Fig 8.11 — The chain of trust: leaf ← intermediate ← root</div>
+<pre class="diagram">
+  ┌────────────────────────────┐
+  │  ROOT CA certificate       │   self-signed; private key in an offline
+  │  "ISRG Root X1"            │   vault, used a handful of times a year
+  │  ships pre-installed in    │ ◄────────────── TRUSTED BY FIAT:
+  │  OS / browser trust store  │                 it is in your trust store
+  └─────────────┬──────────────┘
+                │  root's private key SIGNS the intermediate's cert
+                ▼
+  ┌────────────────────────────┐
+  │  INTERMEDIATE CA cert      │   online, does the day-to-day signing;
+  │  "Let's Encrypt R11"       │   if compromised, revoke and replace it
+  │  issuer: ISRG Root X1      │   WITHOUT touching the sacred root
+  └─────────────┬──────────────┘
+                │  intermediate's private key SIGNS your cert
+                ▼
+  ┌────────────────────────────┐
+  │  LEAF certificate          │   the one your server presents;
+  │  CN/SAN: api.example.com   │   contains your server's public key
+  │  issuer: Let's Encrypt R11 │
+  └────────────────────────────┘
+
+  VERIFICATION walks UPWARD: check leaf's signature with intermediate's
+  public key ──► check intermediate's signature with root's public key ──►
+  root is in my trust store ──► chain valid, identity established
+</pre>
+
+<p>Why the middle layer? <strong>Roots stay offline.</strong> A root CA's private key is the crown jewel — if
+it leaks, every certificate under it becomes forgeable and removing the root breaks half the web. So root keys
+live in HSMs (Hardware Security Modules) in physical vaults, powered off, and are used only to sign a few
+intermediate certificates. The intermediates do the millions of daily leaf signings; if one is compromised, it
+alone is revoked and replaced. Your server is expected to send the leaf <em>plus the intermediates</em> during
+the handshake (the root is never sent — the client already has it). The classic outage: "works in Chrome,
+fails from Java/curl" because the server sent only the leaf and Chrome papered over it by fetching the missing
+intermediate while stricter clients refused — always configure the <em>full chain</em> (<code>fullchain.pem</code>,
+not <code>cert.pem</code>).</p>
+
+<!-- ============================================================ -->
+<h2 id="cas">11. Certificate Authorities — the trust business</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why trust anchors must exist</div>
+  <p>Could we do without CAs (Certificate Authorities)? Consider the alternatives. <strong>Option A: exchange
+  keys in person.</strong> Perfect security, zero scale — you cannot fly to Seattle to swap USB sticks with
+  Amazon before shopping. <strong>Option B: trust-on-first-use (TOFU)</strong> — accept whatever key the server
+  shows the first time and alarm if it ever changes. This is exactly what SSH does (that "fingerprint…
+  (yes/no)?" prompt on first connect, and the scary @@@ WARNING when a host key changes). TOFU is honest about
+  its failure mode: it is blind on first contact — if the MITM is present at first connect, you trusted the
+  attacker, and it cannot distinguish "server legitimately re-keyed" from "attack in progress." Tolerable for
+  engineers connecting to their own servers; useless for two billion browsers visiting millions of new sites
+  daily. <strong>Option C</strong> is the web's answer: pre-install a small set of professional verifiers —
+  trust anchors — and have them vouch for everyone else. Centralized trust is the engineering compromise that
+  scales; the rest of this section is how it works and how it fails.</p>
+</div>
+
+<h3>11.1 How issuance actually works</h3>
+
+<p>You cannot buy trust for a domain you do not control — the CA's whole job is verifying control. The flow,
+which you will run yourself someday:</p>
+
+<ol>
+  <li><strong>Generate a key pair</strong> on your server. The private key never leaves it — not even the CA sees it.</li>
+  <li><strong>Create a CSR (Certificate Signing Request)</strong>: a small signed file containing your public key and the names you want (<code>api.example.com</code>…). Send it to the CA.</li>
+  <li><strong>The CA challenges you to prove domain control</strong>, one of two classic ways:
+    <ul>
+      <li><strong>HTTP challenge</strong> — "place this random token at <code>http://api.example.com/.well-known/acme-challenge/…</code>." Only someone controlling the server answering for that name can.</li>
+      <li><strong>DNS challenge</strong> — "create a TXT record <code>_acme-challenge.api.example.com</code> with this random value." Part 6 promised those odd TXT records would matter; this is where. (DNS challenge is also the only way to get wildcard certs.)</li>
+    </ul></li>
+  <li><strong>The CA signs your certificate</strong> with its intermediate key and hands it back. You install cert + chain next to your private key. Done.</li>
+</ol>
+
+<p>Until 2015 this cost real money and manual effort, so half the web stayed on HTTP. Then
+<strong>Let's Encrypt</strong> — a nonprofit CA — made certificates <strong>free</strong> and defined
+<strong>ACME (Automatic Certificate Management Environment)</strong>, a protocol that automates the entire flow
+above. A client like <code>certbot</code> (or Caddy, or Traefik, or your Kubernetes cert-manager) requests,
+proves, installs, and — because Let's Encrypt certs deliberately live only <strong>90 days</strong> — renews on
+a timer, forever, with no human involved. Today Let's Encrypt issues for hundreds of millions of domains; ACME
+is the single biggest reason the web went from mostly-HTTP to mostly-HTTPS.</p>
+
+<p>Vocabulary you will meet when buying or auditing certs:</p>
+
+<ul>
+  <li><strong>DV (Domain Validation)</strong> — proves domain control only (the challenges above). What Let's Encrypt issues; what almost everyone needs.</li>
+  <li><strong>OV / EV (Organization / Extended Validation)</strong> — the CA additionally verifies the legal entity behind the domain. EV once turned the address bar green with the company name; browsers removed that UI (users ignored it), so EV is now mostly a compliance checkbox.</li>
+  <li><strong>Wildcard certificate</strong> — SAN of <code>*.example.com</code> matches <code>api.example.com</code> and <code>www.example.com</code> but — one level only — <strong>not</strong> <code>a.b.example.com</code> and not the bare <code>example.com</code> (so real wildcard certs carry both <code>*.example.com</code> and <code>example.com</code> as SANs).</li>
+  <li><strong>CAA (Certification Authority Authorization)</strong> — the DNS record from Part 6's tease: <code>example.com. CAA 0 issue "letsencrypt.org"</code> tells <em>every other CA on Earth</em> "refuse to issue for this domain." CAs are required to check it. Cheap, set-and-forget protection against mis-issuance.</li>
+</ul>
+
+<h3>11.2 When the trust business fails</h3>
+
+<div class="callout history">
+  <div class="callout-title">📜 DigiNotar, 2011 — what CA compromise looks like</div>
+  <p>DigiNotar was a small Dutch CA whose systems were breached in 2011; the intruder issued themselves more
+  than 500 fraudulent certificates, including one for <code>*.google.com</code> that was then used to MITM the
+  Gmail traffic of an estimated 300,000 users in Iran. Browser vendors responded with the death penalty:
+  every DigiNotar root was ripped out of every trust store within days, instantly invalidating all its
+  certificates — and the company was bankrupt within the month. The lesson is structural, not historical: any
+  one of the ~150 trusted roots can technically sign for <em>any domain on Earth</em>, so the system is only as
+  strong as its sloppiest member.</p>
+</div>
+
+<p>Two mechanisms now contain that structural risk. <strong>Certificate Transparency (CT)</strong>: since 2018,
+browsers require every certificate to be published in public, append-only, cryptographically verifiable logs
+before they will accept it. Anyone can watch the logs — and companies do, with automated monitors that alarm
+the moment <em>any</em> CA anywhere issues a certificate for their domains. Mis-issuance can no longer be
+quiet, which changes the game from "prevent" (impossible) to "detect within minutes" (routine). Try it
+yourself: <code>crt.sh</code> lets you search the CT logs for any domain — including yours.</p>
+
+<p>And <strong>revocation</strong> — honestly, the weakest part of the system. In theory a compromised cert is
+revoked via <strong>CRLs (Certificate Revocation Lists)</strong> — periodically downloaded blocklists — or
+<strong>OCSP (Online Certificate Status Protocol)</strong>, a live "is this cert still good?" query to the CA.
+In practice both leak: CRLs are stale by design, OCSP adds latency and a privacy hole (the CA learns what you
+visit), and because CAs go down, browsers treat OCSP failure as a soft pass — an attacker who can MITM you can
+usually also block the revocation check. The industry's pragmatic conclusion: <strong>make certificates so
+short-lived that revocation barely matters</strong> — 90 days today, with maximum validity already legislated
+down toward ~47 days by 2029. Short-lived + automated beats long-lived + revocable.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — certificate expiry, a top-5 outage class</div>
+  <p>On 3 February 2020, <strong>Microsoft Teams went down worldwide for hours because one TLS certificate
+  expired</strong> — every client suddenly refused to talk to a server presenting an out-of-validity cert.
+  Spotify, LinkedIn, Cisco gear, GitHub integrations, national COVID apps — the postmortem archives are full of
+  identical incidents, and "the cert expired" reliably makes every list of most common self-inflicted outages.
+  The fix is operational, not cryptographic: <strong>automate renewal</strong> (ACME everywhere, or AWS ACM — Certificate
+  Manager — which auto-renews, section 17) and <strong>monitor expiry independently</strong> (alert at 30/14/7 days —
+  your monitoring stack and even <code>openssl s_client</code> in a cron job can do it). If a human has to
+  remember your renewals, you have already scheduled an outage.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A certificate is an ID card for a website: "this public key belongs to this domain," stamped by a
+    Certificate Authority your device already trusts. Authorities prove you own a domain by making you place a
+    secret file or DNS record, sign your certificate for ~90 days, and tools renew it automatically. Browsers
+    check the stamp chain up to a built-in list of trusted roots.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>X.509 leaf certs bind SANs to a public key, signed by an intermediate whose cert is signed by an offline
+    root pre-installed in trust stores. Issuance: key pair + CSR + domain-control challenge (HTTP file or DNS
+    TXT) via ACME. CT logs make all issuance public; CAA restricts which CAs may issue; revocation
+    (CRL/OCSP) is best-effort, so validity keeps shrinking. Servers must serve leaf + intermediates, in order.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Treat PKI (Public Key Infrastructure) as a distributed system with failure modes: trust-store divergence
+    (JVM cacerts vs OS store vs Docker base image — "works in browser, fails in Java" is usually a missing
+    intermediate or stale cacerts), cross-signing and root rotation (Let's Encrypt's old root expiring in 2021
+    broke millions of legacy Android devices and embedded clients), and clock skew (cert validation needs
+    correct time — a server with a drifted clock rejects valid certs, one reason NTP matters). Mature orgs run
+    CT monitoring, CAA, ACME with two CAs configured for failover, and expiry alerting as standard hygiene.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="validation">12. What the browser actually validates</h2>
+
+<p>Every HTTPS connection, your browser runs this checklist in milliseconds. Knowing it cold is the difference
+between guessing and diagnosing when a TLS error appears:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 The padlock checklist — all must pass</div>
+  <ul>
+    <li>✅ <strong>Chain verifies</strong> — every signature in leaf → intermediate → root checks out, and the root is in my trust store.</li>
+    <li>✅ <strong>Validity window</strong> — today is between notBefore and notAfter for every cert in the chain.</li>
+    <li>✅ <strong>Hostname matches</strong> — the hostname I typed appears in the leaf's SAN list (wildcards: one level).</li>
+    <li>✅ <strong>Not revoked</strong> — best-effort OCSP/CRL check (soft-fail, as admitted above).</li>
+    <li>✅ <strong>Acceptable cryptography</strong> — modern signature/hash algorithms (SHA-1 certs are dead), adequate key sizes, a protocol version ≥ TLS 1.2, plus a valid CT proof.</li>
+    <li>…and only then does the handshake proceed and the padlock render.</li>
+  </ul>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — what the padlock does NOT mean</div>
+  <p>The padlock asserts exactly one sentence: <strong>"your connection to the domain in the address bar is
+  encrypted, tamper-evident, and really terminates at a server that proved control of that domain."</strong>
+  It says <em>nothing</em> about whether that domain is honest. <code>arnazon-secure-login.com</code> can hold a
+  perfectly valid, free, padlock-producing certificate — phishing sites overwhelmingly use HTTPS now, because
+  certificates are free and users were trained to look for the lock. The padlock authenticates the
+  <em>connection</em>, not the <em>business</em>. Verify the domain name; the padlock cannot do it for you.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="tls12">13. The TLS 1.2 handshake — the classic two-round-trip dance</h2>
+
+<p>Time to assemble every piece into the protocol itself. TLS 1.2 (2008) is no longer the latest, but learn it
+first: it is still everywhere in enterprise, and 1.3 only makes sense as a critique of it. The handshake is a
+negotiation — client and server agree on algorithms, authenticate, and derive keys — and like Part 4's TCP
+handshake, it is best read as a ladder:</p>
+
+<div class="figure-title">Fig 8.12 — TLS 1.2 full handshake: 2 round trips before any HTTP</div>
+<pre class="diagram">
+   CLIENT (browser)                              SERVER (api.example.com:443)
+        │                                                  │
+        │  (TCP three-way handshake already done — Part 4) │
+        │                                                  │
+        │ 1. ClientHello                                   │
+        │    • versions I speak (max TLS 1.2)              │
+        │    • 30-ish cipher suites I support              │
+        │    • SNI: api.example.com   (§15)                │
+        │    • client random (28 random bytes)             │
+        │ ────────────────────────────────────────────►    │
+        │                                                  │
+        │                       2. ServerHello             │
+        │                          • chosen: TLS 1.2 +     │
+        │                            ONE cipher suite      │
+        │                          • server random         │
+        │                       3. Certificate             │
+        │                          • leaf + intermediates  │
+        │                       4. ServerKeyExchange       │
+        │                          • ECDHE params + share  │
+        │                          • SIGNED with the       │
+        │                            certificate's key ◄── │ ◄── authentication
+        │                       5. ServerHelloDone         │     happens HERE
+        │    ◄────────────────────────────────────────     │
+        │                                                  │
+        │ [client verifies chain §12, verifies signature]  │
+        │                                                  │
+        │ 6. ClientKeyExchange (client's ECDHE share)      │
+        │ 7. ChangeCipherSpec ("switching to encrypted")   │
+        │ 8. Finished (MAC over the whole transcript)      │
+        │ ────────────────────────────────────────────►    │
+        │                                                  │
+        │                       9. ChangeCipherSpec        │
+        │                      10. Finished                │
+        │    ◄────────────────────────────────────────     │
+        │                                                  │
+        │ ════════ encrypted application data ════════►    │
+        │            GET /api/orders … (Part 7)            │
+</pre>
+
+<p>Three annotations worth tattooing on:</p>
+
+<ul>
+  <li><strong>Authentication happens at step 4, not step 3.</strong> Anyone can replay amazon.com's certificate — it is public. What an impersonator <em>cannot</em> do is produce the signature over the fresh ECDHE parameters and both randoms, because that requires the certificate's <em>private</em> key. The signed ServerKeyExchange is the moment "this peer holds the private key matching the certed public key" is proven, and the randoms make it un-replayable.</li>
+  <li><strong>The Finished messages</strong> each carry a MAC over the entire handshake transcript, computed with the new session keys — proof that both sides derived the same keys <em>and</em> that no MITM downgraded or edited any earlier handshake message. Tamper-evidence applied to the negotiation itself.</li>
+  <li><strong>Count the round trips: two</strong>, before a single HTTP byte. Recall Part 4's RTT (round-trip time) arithmetic: at 70 ms RTT (roughly Mumbai ↔ Singapore), TCP costs 70 ms, TLS 1.2 costs 140 ms — <strong>210 ms of pure ceremony before the request even departs</strong>, then 70 ms more for the response. Protocol designers stare at that number with hatred; section 14 is what the hatred produced.</li>
+</ul>
+
+<h3>13.1 Decoding a cipher suite, character by character</h3>
+
+<p>The "cipher suite" the handshake negotiates is a fixed menu of the four tools you now know. The strings look
+like keyboard-mashing until you read them in segments:</p>
+
+<div class="figure-title">Fig 8.13 — A TLS 1.2 cipher suite, decoded</div>
+<pre class="diagram">
+   TLS _ ECDHE _ RSA _ WITH _ AES_128_GCM _ SHA256
+         ──┬──   ─┬─          ─────┬─────   ──┬───
+           │      │                │          │
+           │      │                │          └─ HASH for key derivation
+           │      │                │             and transcript MACs:
+           │      │                │             SHA-256  (§7)
+           │      │                │
+           │      │                └─ BULK CIPHER for the actual data:
+           │      │                   AES, 128-bit key, GCM mode
+           │      │                   = AEAD: encrypt + authenticate (§4, §7)
+           │      │
+           │      └─ AUTHENTICATION: server proves identity with an
+           │         RSA signature (its certificate holds an RSA key) (§8)
+           │
+           └─ KEY AGREEMENT: Elliptic-Curve Diffie–Hellman, Ephemeral
+              = forward secrecy (§6)
+</pre>
+
+<p>Read any suite the same way: <em>how do we agree on keys / how does the server prove itself / what encrypts
+the data / what hashes the transcript</em>. A suite starting <code>TLS_RSA_WITH_…</code> (no ECDHE — the client
+encrypts the session key with the cert's RSA key) is the forward-secrecy-free dinosaur that 1.3 exterminated.</p>
+
+<!-- ============================================================ -->
+<h2 id="tls13">14. The TLS 1.3 handshake — one round trip, almost everything encrypted</h2>
+
+<p>TLS 1.3 (2018, RFC 8446) is a ruthless redesign with two obsessions: <strong>remove round trips</strong> and
+<strong>remove foot-guns</strong>. The trick for the first: since every modern connection was going to use
+ECDHE anyway, the client stops asking permission — it sends its DH key share <em>optimistically, inside the
+very first message</em>:</p>
+
+<div class="figure-title">Fig 8.14 — TLS 1.3 full handshake: 1 round trip, encryption starts immediately</div>
+<pre class="diagram">
+   CLIENT (browser)                              SERVER (api.example.com:443)
+        │                                                  │
+        │ 1. ClientHello                                   │
+        │    • cipher suites, SNI, ALPN, random            │
+        │    • key_share: client's ECDHE share,            │
+        │      sent OPTIMISTICALLY up front                │
+        │ ────────────────────────────────────────────►    │
+        │                                                  │
+        │              [server computes shared secret NOW] │
+        │                                                  │
+        │                  2. ServerHello + key_share      │
+        │                  ┌───────────────────────────┐   │
+        │                  │ EVERYTHING BELOW ALREADY  │   │
+        │                  │ ENCRYPTED with handshake  │   │
+        │                  │ keys:                     │   │
+        │                  │  3. EncryptedExtensions   │   │
+        │                  │     (ALPN result, etc.)   │   │
+        │                  │  4. Certificate (chain)   │   │
+        │                  │  5. CertificateVerify     │   │
+        │                  │     signature over the    │   │
+        │                  │     transcript ◄── auth   │   │
+        │                  │  6. Finished              │   │
+        │                  └───────────────────────────┘   │
+        │    ◄────────────────────────────────────────     │
+        │                                                  │
+        │ [verify chain + signature]                       │
+        │ 7. Finished                                      │
+        │ ════ encrypted GET /api/orders attached! ════►   │
+        │                                                  │
+        │    ◄════════ encrypted response ═════════════    │
+</pre>
+
+<p>One round trip. The client's <code>Finished</code> and its first HTTP request travel together. And notice
+the box: because both sides can compute the shared secret immediately after the key shares cross,
+<strong>everything after ServerHello is already encrypted — including the certificate itself</strong>. A
+passive observer of a TLS 1.3 handshake no longer even learns which certificate was served. The differences,
+tabulated:</p>
+
+<table>
+  <tr><th></th><th>TLS 1.2 (2008)</th><th>TLS 1.3 (2018)</th></tr>
+  <tr><td><strong>Full handshake cost</strong></td><td>2 RTT</td><td><strong>1 RTT</strong> (resumption: 0-RTT possible)</td></tr>
+  <tr><td><strong>Key exchange</strong></td><td>ECDHE <em>or</em> static RSA key transport</td><td>Ephemeral DH only — <strong>forward secrecy mandatory</strong></td></tr>
+  <tr><td><strong>Cipher menu</strong></td><td>Hundreds of suites incl. legacy junk (CBC, RC4, 3DES, SHA-1…)</td><td><strong>Five AEAD suites</strong>; every known-weak option deleted</td></tr>
+  <tr><td><strong>Certificate visibility</strong></td><td>Sent in plaintext</td><td><strong>Encrypted</strong></td></tr>
+  <tr><td><strong>Negotiation attack surface</strong></td><td>Downgrade tricks, renegotiation bugs</td><td>Simplified state machine + downgrade protection baked in</td></tr>
+  <tr><td><strong>Suite naming</strong></td><td><code>TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256</code></td><td>Just <code>TLS_AES_128_GCM_SHA256</code> — key exchange and auth negotiated separately</td></tr>
+</table>
+
+<p>About that <strong>0-RTT</strong> teaser: a client that has connected before can send "early data" — an HTTP
+request encrypted under a key from the <em>previous</em> session — with its very first packet, zero round trips
+of ceremony. The catch, in one sentence: 0-RTT early data can be <strong>replayed</strong> by an attacker who
+recorded it (the server cannot tell a replay from the original), so it is only safe for idempotent requests
+(Part 7's vocabulary — GETs, never payments) and many deployments simply leave it off.</p>
+
+<h3>14.1 Session resumption — why it matters at scale</h3>
+
+<p>Even 1-RTT handshakes carry real cost at scale: the asymmetric math (the certificate signature, the DH
+computation) is the most CPU-expensive thing a TLS server does. So TLS lets a server hand the client an
+encrypted <strong>session ticket</strong> — a resumable snapshot of the established keys. On the next
+connection the client presents the ticket and both sides skip certificate exchange and verification entirely
+(1.3 still folds in a fresh DH for forward secrecy). For a browser loading a site, or a mobile app reconnecting
+on every network blip, or a service mesh making millions of short connections, resumption plus connection reuse
+(Part 7's keep-alive) is the difference between TLS being free and TLS being your CPU bill. CDNs (Content
+Delivery Networks) and load balancers (Part 9) lean on it heavily.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The handshake is: hello + "here's what I speak" → "here's my choice + my ID card + proof I own it" →
+    both compute the same secret key → everything after is encrypted. TLS 1.2 needs two round trips of this;
+    TLS 1.3 compresses it to one by sending key material optimistically, and repeat visits can skip most of it
+    with a saved ticket.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>1.2: ClientHello/ServerHello negotiate a suite; the cert authenticates via the signature on
+    ServerKeyExchange's ECDHE params; ClientKeyExchange completes DH; Finished MACs the transcript. 2 RTT.
+    1.3: key_share in ClientHello enables encryption from ServerHello onward; CertificateVerify signs the
+    transcript; 1 RTT; static RSA, weak ciphers, and plaintext certs are gone; resumption via tickets, 0-RTT
+    with replay caveats.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The transcript signature (CertificateVerify) is what binds the DH exchange to the certified identity —
+    without it, ECDHE is MITM-able (§6 advanced). Downgrade protection: a 1.3 server forced to answer 1.2
+    embeds a sentinel in its random that 1.3 clients detect. Performance realities: handshake CPU is dominated
+    by the server's signature (ECDSA P-256 ≫ RSA-2048 for signing speed — one reason for EC certs), session
+    tickets shift state to clients but rotate ticket keys or you quietly weaken forward secrecy, and QUIC
+    (HTTP/3, teased in Part 7) embeds this exact TLS 1.3 handshake inside the transport to merge TCP+TLS setup
+    into one round trip.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sni-alpn">15. SNI and ALPN — two tiny extensions that run the modern web</h2>
+
+<p>Two ClientHello extensions appeared repeatedly above; both exist to solve multi-tenancy, and both echo
+problems you have already met.</p>
+
+<p><strong>SNI (Server Name Indication).</strong> Part 6 showed many names resolving to one IP; Part 7's
+<code>Host</code> header showed how plain HTTP picks the right site on a shared server. But TLS has a
+bootstrap problem the Host header cannot solve: <strong>the server must present a certificate — the right
+certificate — before any HTTP exists</strong>, in its very first reply. Which of its 5,000 tenants' certs
+should a CDN edge present? SNI is the answer: the client puts the hostname it wants <strong>in plaintext in
+the ClientHello</strong>, and the server uses it to select the matching certificate. Every ALB (Application
+Load Balancer), CDN, and shared host depends on it — it is why one IP can serve a million HTTPS sites:</p>
+
+<div class="figure-title">Fig 8.15 — SNI: one IP, many certificates, the client names its target</div>
+<pre class="diagram">
+                                        ┌──────────────────────────────┐
+   CLIENT                               │  CDN edge / ALB at 192.0.2.7 │
+     │                                  │                              │
+     │  ClientHello                     │   certificate rack:          │
+     │  SNI: shop.example.com  ───────► │   ┌ www.example.org    ┐     │
+     │      (PLAINTEXT — the network    │   ├ shop.example.com ◄─┼── picks
+     │       sees this hostname)        │   ├ api.partner.net    ┤   this one
+     │                                  │   └ blog.example.io    ┘     │
+     │  ◄─── ServerHello + the cert for shop.example.com               │
+</pre>
+
+<p>The privacy nuance: SNI means an on-path observer (the coffee shop, the ISP, a national firewall) learns
+<em>which hostname</em> you are visiting even though everything else is encrypted — and indeed SNI is exactly
+what most network-level filters key on. The fix in deployment is <strong>ECH (Encrypted ClientHello)</strong>:
+the real ClientHello is encrypted to a key published in DNS, hiding the hostname too — one line to remember,
+still rolling out.</p>
+
+<p><strong>ALPN (Application-Layer Protocol Negotiation).</strong> Part 7 ended with HTTP/2 — but how do client
+and server agree to speak h2 instead of HTTP/1.1 without a wasted round trip of asking? They piggyback on the
+handshake: the ClientHello lists protocols (<code>h2, http/1.1</code>), the server's reply picks one, and by the
+time the tunnel opens both sides already know what dialect flows inside it. In practice, <strong>HTTP/2 is only
+ever negotiated this way</strong> — browsers do not speak h2 over plaintext — so HTTPS is effectively the price
+of admission for HTTP/2's multiplexing. When you curl with <code>-v</code> and see
+<code>ALPN: server accepted h2</code>, this is what happened.</p>
+
+<!-- ============================================================ -->
+<h2 id="amazon">16. The whole course in half a second: https://www.amazon.com</h2>
+
+<p>You now hold Parts 1–8. Stitch them together and narrate, step by step, what happens between pressing Enter
+and seeing a page — this is the walkthrough that interview question #1 ("what happens when you type a URL?")
+dreams of. Browser: fresh start, nothing cached. Network: 30 ms RTT to everything (Amazon has edges near you —
+Part 1's latency table).</p>
+
+<ol>
+  <li><strong>Parse the URL.</strong> Scheme <code>https</code> → TLS expected, default port <strong>443</strong> (Part 5). Hostname <code>www.amazon.com</code> → needs resolving.</li>
+  <li><strong>DNS (Part 6).</strong> Stub resolver → recursive resolver → (cache miss: root → .com TLD → Amazon's authoritative servers). Answer: <code>www.amazon.com is at 205.251.242.103</code>.</li>
+  <li><strong>TCP handshake (Part 4).</strong> SYN ──► SYN-ACK ◄── ACK ──► to 205.251.242.103:443 from an ephemeral port (Part 5). One RTT. A byte pipe now exists — carrying nothing yet.</li>
+  <li><strong>ClientHello.</strong> The browser sends: TLS 1.3 (and 1.2 fallback), its cipher suites, <strong>SNI: www.amazon.com</strong>, <strong>ALPN: h2, http/1.1</strong>, client random, and an optimistic X25519 <strong>key_share</strong> (§14).</li>
+  <li><strong>ServerHello.</strong> Amazon's endpoint picks TLS 1.3, <code>TLS_AES_128_GCM_SHA256</code>, returns its own key_share.</li>
+  <li><strong>Both ends compute the shared secret</strong> (Diffie–Hellman, §6) and derive handshake keys. Everything from here is ciphertext to the network.</li>
+  <li><strong>EncryptedExtensions:</strong> among them, <strong>ALPN verdict: h2</strong> — the conversation inside will be HTTP/2 (Part 7).</li>
+  <li><strong>Certificate:</strong> leaf with <code>SAN: www.amazon.com, amazon.com, …</code> issued by a DigiCert intermediate, plus that intermediate (§10).</li>
+  <li><strong>CertificateVerify:</strong> a signature over the entire handshake transcript, made with the leaf's private key — the moment of authentication (§13–14).</li>
+  <li><strong>Finished (server).</strong> Server's transcript MAC; its half of the handshake is done.</li>
+  <li><strong>The browser validates (§12):</strong> chain signatures up to a DigiCert root in the OS trust store ✅ validity window ✅ <code>www.amazon.com</code> in SANs ✅ revocation best-effort ✅ CT proof ✅.</li>
+  <li><strong>Finished (client) ──►</strong> and with it, immediately…</li>
+  <li><strong>…the first encrypted request:</strong> HTTP/2 connection preface and <code>GET / HTTP/2</code> with all the Part 7 headers — inside the tunnel. Total TLS ceremony: <strong>one round trip</strong>.</li>
+  <li><strong>Amazon responds:</strong> encrypted <code>200 OK</code>, HTML streaming over h2.</li>
+  <li><strong>Subresources:</strong> CSS, JS, images multiplex over the <em>same</em> connection (h2, Part 7) — no new handshakes for this origin.</li>
+  <li><strong>A session ticket arrives</strong> and is stored: the next visit can resume (§14.1), and the next page navigation reuses this very connection.</li>
+  <li><strong>HSTS header noted</strong> (<code>Strict-Transport-Security</code>, §17): the browser will refuse plain HTTP to this domain for the next year.</li>
+  <li><strong>Render.</strong> Padlock displayed — meaning exactly, and only, what §12 said it means.</li>
+</ol>
+
+<div class="figure-title">Fig 8.16 — The full opening: DNS + TCP + TLS 1.3 + first HTTP/2 exchange</div>
+<pre class="diagram">
+  BROWSER            DNS RESOLVER         205.251.242.103:443 (Amazon edge)
+     │                    │                         │
+     │  A? www.amazon.com │                         │      DNS
+     │ ──────────────────►│  (recursion, Part 6)    │   ~0–30 ms
+     │ ◄────────────────── 205.251.242.103          │
+     │                    │                         │
+     │  SYN ────────────────────────────────────►   │      TCP
+     │  ◄──────────────────────────────── SYN-ACK   │    30 ms
+     │  ACK ────────────────────────────────────►   │
+     │                                              │
+     │  ClientHello  SNI=www.amazon.com             │
+     │               ALPN=h2  key_share ─────────►  │      TLS 1.3
+     │  ◄───────── ServerHello + key_share          │    30 ms
+     │  ◄───────── ╔═ encrypted: EncExt(h2), Cert,  │
+     │             ║  CertVerify, Finished ═════╗   │
+     │  [verify chain, SAN, validity]           ║   │
+     │  Finished + ╔═ GET / HTTP/2 ═══════════► ║   │      HTTP
+     │  ◄══════════ 200 OK, HTML ═══════════════╝   │    30 ms
+     │  ◄══════════ session ticket (resume later)   │
+     │                                              │
+     │   ══ double lines = ciphertext on the wire ══│
+</pre>
+
+<p>The budget, totaled — and the reason protocol engineers obsess over round trips:</p>
+
+<table>
+  <tr><th>Step</th><th>Cost at 30 ms RTT</th><th>Running total</th><th>How it shrinks</th></tr>
+  <tr><td>DNS resolution</td><td>0–30 ms</td><td>30 ms</td><td>Caching at every layer (Part 6) → usually ~0</td></tr>
+  <tr><td>TCP handshake</td><td>30 ms</td><td>60 ms</td><td>Connection reuse (keep-alive); QUIC merges with TLS</td></tr>
+  <tr><td>TLS 1.3 handshake</td><td>30 ms</td><td>90 ms</td><td>Would be 60 ms on TLS 1.2; 0-RTT resumption → ~0</td></tr>
+  <tr><td>HTTP request + response</td><td>30 ms</td><td><strong>120 ms</strong></td><td>The only part the user actually wanted</td></tr>
+  <tr><td><em>Repeat request, warm connection</em></td><td><em>30 ms</em></td><td>—</td><td><em>Everything above amortized away</em></td></tr>
+</table>
+
+<p>Three-quarters of the cold-start time is ceremony — which is why TLS 1.3's saved round trip, session
+resumption, connection reuse, and CDN edges (terminating TLS 30 ms from you instead of 200 ms — Part 9's
+world) are collectively worth billions of user-seconds per day.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 What did the coffee-shop attacker see this time?</div>
+  <p>Replay section 1's eavesdropper against this connection. They observed: the <strong>DNS query</strong> for
+  www.amazon.com (plaintext, unless you use encrypted DNS), the <strong>IP addresses and ports</strong> on every
+  packet (Layer 3/4 headers cannot be encrypted — routers need them), the <strong>SNI hostname</strong>
+  www.amazon.com in the ClientHello, and the <strong>sizes and timing</strong> of the encrypted records. They
+  did <em>not</em> see: the path (<code>/</code> or <code>/order-history</code>?), any header, any cookie, any
+  body, or even the certificate (TLS 1.3 encrypts it). So an observer learns <em>that</em> you visited
+  amazon.com and roughly how much you transferred — but nothing about <em>what you did there</em>. Metadata is
+  visible; content is not. Keep this precise split in mind for the misconceptions section.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="backend">17. TLS in YOUR backend — termination, dev certs, and debugging</h2>
+
+<p>Everything so far described the browser-to-server story. Now the part you own: where does TLS live in a
+backend architecture, and what do you do when it breaks at 2 a.m.?</p>
+
+<h3>17.1 Where to terminate TLS — the three patterns</h3>
+
+<p>"Terminating" TLS means being the endpoint that holds the private key, performs the handshake, and decrypts.
+Three placements cover essentially all real systems:</p>
+
+<div class="figure-title">Fig 8.17 — Three termination patterns</div>
+<pre class="diagram">
+ (a) EDGE TERMINATION — the standard pattern
+     internet ══ HTTPS ══► ┌─────────────┐ ── plain HTTP ──► ┌──────────┐
+                           │ ALB / Nginx │                   │ Spring   │
+        cert lives here ──►│ (terminates)│ inside the VPC    │ Boot app │
+                           └─────────────┘                   └──────────┘
+
+ (b) END-TO-END TLS — encrypted all the way to the app
+     internet ══ HTTPS ══► ┌─────────────┐ ══ HTTPS again ═► ┌──────────┐
+                           │     ALB     │                   │ app with │
+                           │ (terminates │    re-encrypted   │ its own  │
+                           │ + re-dials) │                   │ keystore │
+                           └─────────────┘                   └──────────┘
+
+ (c) mTLS — BOTH sides present certificates (machine identity)
+     ┌──────────┐ ══ each proves itself to the other ══ ┌──────────┐
+     │ service A│ ◄───── client cert  +  server cert ──►│ service B│
+     └──────────┘     no cert = connection refused      └──────────┘
+</pre>
+
+<p><strong>(a) Edge termination</strong> is the default you will meet everywhere: a load balancer or reverse
+proxy at the boundary holds the certificate, terminates TLS, and forwards <em>plain HTTP</em> to your apps over
+the private network (an AWS VPC — Virtual Private Cloud, Part 11). On AWS the certificate comes from
+<strong>ACM (AWS Certificate Manager)</strong> — free, validated via exactly the DNS challenge from §11.1, and
+<strong>auto-renewing forever</strong>, which deletes the Teams-outage class of §11.2 — attached to an ALB with
+a few clicks. The trade-offs, honestly: your apps never touch keystores (huge operational win), the LB can
+inspect, route on, and log the decrypted HTTP (Part 9 needs this for L7 routing), and handshake CPU is
+offloaded; in exchange, traffic between LB and app is plaintext, so you are trusting the VPC's network
+isolation — fine for most threat models, not for all.</p>
+
+<p><strong>(b) End-to-end TLS</strong> keeps ciphertext flowing to the app itself — required in regulated
+environments (payments, health) where "plaintext anywhere" fails audit. Spring Boot terminates TLS natively
+with a <strong>PKCS12 keystore</strong> (a password-protected bundle holding private key + cert chain):</p>
+
+<pre class="code"># application.properties — Spring Boot serving HTTPS itself
+server.port=8443
+server.ssl.enabled=true
+server.ssl.key-store=classpath:keystore.p12
+server.ssl.key-store-type=PKCS12
+server.ssl.key-store-password=${KEYSTORE_PASSWORD}
+server.ssl.key-alias=api
+# modern protocols only
+server.ssl.enabled-protocols=TLSv1.3,TLSv1.2</pre>
+
+<p><strong>(c) mTLS (mutual TLS)</strong> flips one default: in everything so far, only the <em>server</em>
+proved its identity (your browser never showed a certificate). In mTLS the server demands a client certificate
+too, and verifies it against a private CA — both sides authenticate. This is machine-to-machine identity:
+service A <em>cryptographically is</em> service A, no shared API key to leak. Managing certs for hundreds of
+services by hand is misery, which is why service meshes issue, rotate, and verify them automatically — that
+story, and zero-trust networking with it, is Part 13's.</p>
+
+<h3>17.2 Self-signed certificates in dev — and the right way to trust them</h3>
+
+<p>For <code>localhost</code> work you do not need a CA; you can sign your own certificate (you become a
+one-machine CA nobody trusts — yet):</p>
+
+<pre class="code"># option 1: keytool (ships with the JDK) — straight into a PKCS12 keystore
+keytool -genkeypair -alias dev -keyalg RSA -keysize 2048 \
+  -storetype PKCS12 -keystore keystore.p12 -validity 365 \
+  -dname "CN=localhost" -ext "SAN=dns:localhost,ip:127.0.0.1"
+
+# option 2: openssl — key + cert as separate PEM files
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout dev.key -out dev.crt -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"</pre>
+
+<p>Point your app at it and every client immediately complains — <em>correctly</em>: the chain ends at a root
+no trust store contains. The browser shows the "Your connection is not private" interstitial; curl says
+<code>self-signed certificate</code> and suggests <code>-k</code>. <strong><code>curl -k</code> (and its cousins
+— <code>verify=False</code> in Python requests, <code>rejectUnauthorized: false</code> in Node,
+<code>InsecureSkipVerify</code> in Go) disables certificate validation entirely</strong> — acceptable for a
+one-off local poke, a disaster as a habit, because the same flag that accepts your dev cert accepts a MITM's.
+These flags have an unerring tendency to get committed and ride to production.</p>
+
+<p>The <em>right</em> fix: leave validation on, and teach your trust store about your CA — the same mechanism
+the OS uses for the 150 real roots:</p>
+
+<pre class="code"># JVM: import into cacerts (the JVM trust store) — Java 9+
+keytool -importcert -alias local-dev -cacerts \
+  -storepass changeit -file dev.crt
+# (or keep a separate store and point the JVM at it:
+#  -Djavax.net.ssl.trustStore=devtrust.p12)
+
+# Node.js: append extra trusted CAs without touching code
+NODE_EXTRA_CA_CERTS=/home/you/dev.crt node server.js
+
+# or skip all of this: mkcert creates a local CA, installs it into your
+# OS, browser, and Java trust stores, and issues localhost certs in 2 commands
+mkcert -install
+mkcert localhost 127.0.0.1</pre>
+
+<p>This distinction — <em>disable validation</em> vs <em>extend trust</em> — also explains the corporate-proxy
+mystery: when builds fail with <code>unable to find valid certification path</code> only on the office network,
+your company's TLS-inspecting proxy (a sanctioned MITM, §6 advanced) is re-signing traffic with its internal
+CA, and that CA is in your OS store but not in the JVM's <code>cacerts</code> or Node's bundle. Same fix:
+import the corporate root, don't disable validation.</p>
+
+<h3>17.3 The #1 debugging tool: openssl s_client</h3>
+
+<p>When TLS misbehaves, do not guess from browser errors — look at the actual handshake. <code>openssl
+s_client</code> is curl-for-TLS (note <code>-servername</code>: that sets the SNI, and forgetting it against a
+multi-tenant host fetches the <em>wrong certificate</em> — a classic self-inflicted mystery):</p>
+
+<pre class="code">$ openssl s_client -connect api.example.com:443 -servername api.example.com
+CONNECTED(00000003)
+depth=2 C = US, O = Internet Security Research Group, CN = ISRG Root X1
+verify return:1                          ── root: found in trust store ✓
+depth=1 C = US, O = Let's Encrypt, CN = R11
+verify return:1                          ── intermediate verifies ✓
+depth=0 CN = api.example.com
+verify return:1                          ── leaf verifies ✓
+---
+Certificate chain                        ── what the server actually SENT:
+ 0 s:CN = api.example.com                   leaf…
+   i:C = US, O = Let's Encrypt, CN = R11
+ 1 s:C = US, O = Let's Encrypt, CN = R11    …plus intermediate. if entry 1
+   i:C = US, O = ISRG Root X1               is missing: incomplete chain —
+---                                         the "works in Chrome, fails in
+Server certificate                          Java" outage from §10.1
+subject=CN = api.example.com
+issuer=C = US, O = Let's Encrypt, CN = R11
+---
+New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384   ── negotiated version+suite
+Server public key is 256 bit
+---
+Verify return code: 0 (ok)               ── THE verdict line. 0 = trusted.
+                                            10 = expired. 18 = self-signed.
+                                            21 = can't verify first cert
+                                                 (missing intermediate)</pre>
+
+<p>Read it bottom-up when triaging: <strong>Verify return code</strong> first, then the chain block to see what
+the server served, then validity dates via <code>-showcerts</code> piped to <code>openssl x509 -noout
+-dates</code>. Those four lines of muscle memory resolve the majority of real-world TLS incidents — which are
+overwhelmingly expired certs, missing intermediates, SNI mismatches, and trust-store gaps, not cryptography.</p>
+
+<h3>17.4 HSTS and mixed content — the browser-side guardrails</h3>
+
+<p><strong>HSTS (HTTP Strict Transport Security)</strong> closes the last plaintext gap. A user who types
+<code>amazon.com</code> gets one plain-HTTP request before the redirect to HTTPS — one chance for a MITM to
+intercept and keep them on attacker-controlled plaintext (the classic "SSL stripping" attack). The fix is a
+response header from Part 7's collection: <code>Strict-Transport-Security: max-age=31536000;
+includeSubDomains</code> — "browser, for the next year, refuse to speak plain HTTP to this domain at all,
+upgrade every URL to HTTPS before sending." First-visit exposure remains, so browsers ship a built-in
+<em>preload list</em> of domains that are HSTS from birth; you can submit yours.</p>
+
+<p>And the one every React developer has met: <strong>mixed content</strong>. A page loaded over HTTPS may not
+quietly fetch over HTTP — an attacker who controls one plaintext script controls the whole "secure" page, so
+the browser blocks it:</p>
+
+<pre class="code">Mixed Content: The page at 'https://app.example.com/' was loaded over
+HTTPS, but requested an insecure XMLHttpRequest endpoint
+'http://api.example.com/orders'. This request has been blocked; the
+content must be served over HTTPS.</pre>
+
+<p>That console error is not a CORS problem and no fetch option fixes it: the API must be HTTPS (in dev, via
+the trust-store setup of §17.2; in prod, via the ALB of §17.1). Relative URLs and <code>https://</code>
+absolute URLs in your React <code>fetch</code> calls prevent it by construction.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>In real deployments the load balancer usually holds the certificate and "terminates" TLS; your app
+    receives plain HTTP inside the private network. For local dev you sign your own certificate and teach your
+    tools to trust it (don't just turn verification off). When TLS breaks, <code>openssl s_client</code> shows
+    you exactly what the server presented and why it was rejected.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Patterns: edge termination (ACM cert on ALB, plaintext in VPC — operationally simplest, enables L7
+    routing), end-to-end (Spring Boot PKCS12 keystore via <code>server.ssl.*</code> — compliance), mTLS (both
+    sides present certs — machine identity). Trust-store reality: JVM <code>cacerts</code>, Node's bundle +
+    <code>NODE_EXTRA_CA_CERTS</code>, and OS stores are separate lists that drift. HSTS pins browsers to
+    HTTPS; mixed-content blocking stops HTTPS pages calling HTTP APIs.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Termination choice is a threat-model decision: plaintext-in-VPC assumes network isolation holds, which
+    zero-trust architectures explicitly refuse — hence mesh-issued mTLS everywhere (Part 13) with SPIFFE-style
+    workload identities and certificates rotated hourly. Watch the operational sharp edges: ALBs re-encrypting
+    to backends often skip hostname verification (know what your LB actually checks), session-ticket keys and
+    OCSP stapling need rotation/monitoring, and every TLS-terminating hop is a place where client IP and
+    protocol metadata must be re-conveyed (X-Forwarded-For and friends — Part 10's problem).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">18. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>Explain the TLS handshake to a junior engineer.</summary>
+    <p>Frame it as three jobs: agree on algorithms, prove the server's identity, and create a shared secret key.
+    The client opens with ClientHello ("here's what I can speak, here's the hostname I want — SNI — and here's
+    my half of a key exchange"); the server answers with its choice, its certificate chain, its half of the key
+    exchange, and a signature made with the certificate's private key proving it really owns that identity. The
+    client verifies the chain up to a trusted root and checks the hostname, both sides combine the key-exchange
+    halves (Diffie–Hellman) into the same session key, exchange Finished checksums of the whole conversation to
+    detect tampering, and then switch to fast symmetric encryption (AES) for the actual HTTP. TLS 1.3 does all
+    of that in one round trip; 1.2 took two.</p>
+  </details>
+
+  <details><summary>How does the browser know the certificate is real and not forged?</summary>
+    <p>It verifies a chain of digital signatures: the leaf certificate is signed by an intermediate CA, the
+    intermediate by a root CA, and the root is pre-installed in the OS/browser trust store — trusted by fiat.
+    Signatures are unforgeable without the signer's private key, and any modification breaks them. The browser
+    additionally checks the validity window, that the URL's hostname appears in the SAN list, revocation
+    (best-effort OCSP/CRL), algorithm strength, and Certificate Transparency proof. Crucially, the certificate
+    alone proves nothing — anyone can replay a public cert — so the handshake also requires a fresh signature
+    (CertificateVerify / signed key-exchange params) that only the holder of the matching private key can
+    produce.</p>
+  </details>
+
+  <details><summary>Symmetric vs asymmetric encryption — and why does TLS use both?</summary>
+    <p>Symmetric uses one shared key for encrypt and decrypt (AES) — extremely fast, hardware-accelerated, but
+    requires both parties to already share a secret, which strangers on a public network cannot do. Asymmetric
+    uses a key pair — public key encrypts/verifies, private key decrypts/signs (RSA, elliptic curves) — solving
+    first contact, but it is 100–1000× slower. TLS is a hybrid: asymmetric crypto runs briefly during the
+    handshake to authenticate the server and agree on a session key; symmetric AES then encrypts the actual
+    data. Scalpel for the introduction, conveyor belt for the conversation.</p>
+  </details>
+
+  <details><summary>What is forward secrecy and why did TLS 1.3 make it mandatory?</summary>
+    <p>Forward secrecy means past recorded traffic stays undecryptable even if the server's long-term private
+    key is later stolen. It comes from ephemeral Diffie–Hellman: every connection derives its keys from fresh,
+    throwaway key shares that are destroyed afterwards, so the certificate's key never encrypts anything — it
+    only signs. Old TLS allowed static RSA key transport, where the session key was encrypted under the
+    certificate's key; one key theft retroactively exposed years of recorded ciphertext. TLS 1.3 deleted that
+    mode entirely: ephemeral (EC)DHE is the only option.</p>
+  </details>
+
+  <details><summary>What changed between TLS 1.2 and TLS 1.3?</summary>
+    <p>Speed: 1.3 finishes the full handshake in 1 RTT (vs 2) by sending key shares optimistically, and
+    supports 0-RTT resumption (with a replay caveat limiting it to idempotent requests). Security: static RSA
+    key exchange removed (forward secrecy mandatory), all legacy ciphers gone (only five AEAD suites remain),
+    the certificate and most handshake messages are themselves encrypted, and downgrade protection is built in.
+    Simplicity: a far smaller negotiation surface, which killed whole families of 1.2-era attacks.</p>
+  </details>
+
+  <details><summary>What does the browser padlock NOT guarantee?</summary>
+    <p>It does not vouch for the site's honesty, safety, or legal legitimacy — only that the connection is
+    encrypted, integrity-protected, and terminates at a server that proved control of the domain in the address
+    bar. A phishing site at a look-alike domain can carry a perfectly valid free certificate and show the same
+    padlock. It also does not hide <em>that</em> you visited the site (DNS, SNI, and IPs are visible to the
+    network) and says nothing about what the site does with your data after it arrives.</p>
+  </details>
+
+  <details><summary>Where would you terminate TLS in a typical AWS architecture, and why?</summary>
+    <p>Default: at the edge — an ALB with a free, auto-renewing ACM certificate — then plain HTTP to services
+    inside the VPC. This centralizes certificate management, removes keystores from apps, offloads handshake
+    CPU, and lets the load balancer route on decrypted HTTP (paths, headers — needed for L7 routing). Mention
+    the trade-off: plaintext inside the VPC means trusting network isolation, so compliance-heavy or zero-trust
+    environments re-encrypt to the backends (end-to-end TLS) or run mesh-issued mTLS between services. The
+    strong answer presents it as a threat-model decision, not a single right answer.</p>
+  </details>
+
+  <details><summary>What is SNI and why do multi-tenant platforms need it?</summary>
+    <p>Server Name Indication: the client states the hostname it wants inside the ClientHello, in plaintext,
+    <em>before</em> the server must choose a certificate. Without it, a server could present only one
+    certificate per IP address — impossible for CDNs, ALBs, and shared hosts serving thousands of domains from
+    one IP (the TLS-era version of Part 7's Host header, which arrives too late because it is inside the
+    encrypted channel). Privacy note: SNI leaks the hostname to on-path observers; Encrypted ClientHello (ECH)
+    is the emerging fix.</p>
+  </details>
+
+  <details><summary>What is mTLS and when would you use it?</summary>
+    <p>Mutual TLS: both sides present and verify certificates, not just the server — so the client is
+    cryptographically authenticated too. Use it for machine-to-machine identity: service-to-service calls in a
+    microservices fleet, partner API integrations, IoT devices — anywhere "which workload is calling me?" must
+    be answered without bearer secrets that can leak. Operationally it demands a private CA plus issuance and
+    rotation automation, which is exactly what service meshes provide out of the box (sidecars handle mTLS
+    transparently).</p>
+  </details>
+
+  <details><summary>Decode TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.</summary>
+    <p>Four segments: <strong>ECDHE</strong> — key agreement via Elliptic-Curve Diffie–Hellman, Ephemeral, so
+    the session has forward secrecy; <strong>RSA</strong> — the server authenticates with an RSA signature (its
+    certificate holds an RSA key); <strong>AES_128_GCM</strong> — the bulk data is encrypted with 128-bit AES
+    in GCM mode, an AEAD that encrypts and authenticates in one pass; <strong>SHA256</strong> — the hash used
+    for key derivation and handshake integrity. Bonus: explain why TLS 1.3 names are shorter
+    (TLS_AES_128_GCM_SHA256) — key exchange and authentication are negotiated separately there.</p>
+  </details>
+
+  <details><summary>How does Let's Encrypt verify you own a domain before issuing a certificate?</summary>
+    <p>Via ACME challenges proving domain control: HTTP-01 — serve a CA-chosen token at
+    <code>/.well-known/acme-challenge/</code> on the domain, proving you control the web server the name points
+    to; or DNS-01 — publish a CA-chosen value in a TXT record at <code>_acme-challenge.domain</code>, proving
+    you control the DNS zone (required for wildcards). The client (certbot, Caddy, cert-manager) automates
+    challenge, issuance, installation, and — since certs last 90 days — renewal. CAA records constrain which
+    CAs may issue at all, and every issued cert lands in public Certificate Transparency logs.</p>
+  </details>
+
+  <details><summary>Production is throwing TLS errors right now. Walk me through your debugging.</summary>
+    <p>First classify the error: expired, hostname mismatch, untrusted chain, or protocol failure — then go
+    look at reality with <code>openssl s_client -connect host:443 -servername host</code>. Check the Verify
+    return code (0 ok; 10 expired; 21 missing intermediate; 18 self-signed), the chain block for whether the
+    server sends leaf + intermediates, the SANs and dates via <code>-showcerts</code> + <code>openssl x509
+    -noout -dates</code>. Classic causes in rough order: certificate expired (renewal automation broke),
+    incomplete chain (works in Chrome, fails in Java/curl), SNI mismatch (client not sending the right
+    hostname, wrong cert returned), trust-store gaps (JVM cacerts vs OS, corporate MITM proxy), and clock skew
+    on the client. The discipline: never "fix" it with verification-off flags.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">19. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "HTTPS hides which site I'm visiting."</strong><br>
+  ✅ The network still sees your DNS lookups, the destination IP on every packet, and the hostname in plaintext
+  SNI — observers (ISPs, firewalls) know <em>that</em> you visited amazon.com and when. What HTTPS hides is the
+  content: paths, query strings, headers, cookies, bodies. Encrypted DNS and ECH narrow the metadata leak but
+  the IP always shows.</p>
+
+  <p><strong>❌ "The padlock means the site is trustworthy."</strong><br>
+  ✅ The padlock means the <em>connection</em> is secure to whoever controls that domain. Phishing sites use
+  valid HTTPS routinely — certificates are free and automated. The padlock cannot evaluate intent; check the
+  domain name itself.</p>
+
+  <p><strong>❌ "Certificates encrypt the traffic."</strong><br>
+  ✅ Certificates <em>authenticate</em> — they bind a public key to a name so you know who you exchanged keys
+  with. The encryption keys come from ephemeral Diffie–Hellman during the handshake, and the bulk encryption is
+  symmetric AES. In TLS 1.3 the certificate's key never encrypts anything at all; it only signs.</p>
+
+  <p><strong>❌ "Asymmetric crypto encrypts the whole session."</strong><br>
+  ✅ It is 100–1000× too slow for that. Asymmetric operations appear only in the handshake (authentication
+  signature, key agreement); 99.9%+ of the bytes are encrypted with symmetric AES-GCM at hardware speed. TLS is
+  hybrid by design.</p>
+
+  <p><strong>❌ "SSL and TLS are different live protocols — and an 'SSL certificate' is a special kind."</strong><br>
+  ✅ SSL (2.0/3.0) is dead and prohibited; TLS is its renamed successor and the only thing running. "SSL
+  certificate," "SSL termination," and OpenSSL are fossil vocabulary. Certificates themselves are
+  protocol-version-agnostic X.509 documents — there is no SSL cert vs TLS cert.</p>
+
+  <p><strong>❌ "TLS is too slow / too expensive to run everywhere."</strong><br>
+  ✅ A 2010 belief. AES-NI makes bulk encryption ~1–2% CPU; TLS 1.3 costs one round trip once, and session
+  resumption plus connection reuse amortize even that to near zero. Google reported single-digit-percent
+  overhead enabling HTTPS for Gmail back in 2010 — on today's hardware it is noise. The web is ~95% HTTPS
+  precisely because the cost argument died.</p>
+
+  <p><strong>❌ "A valid certificate means the company is legitimate."</strong><br>
+  ✅ A DV certificate proves exactly one fact: control of a domain name at issuance time, verified by an
+  automated file-or-TXT-record challenge. No human checked a business license. OV/EV certs add organization
+  vetting, but browsers no longer visually distinguish them — so no user can tell. Legitimacy is simply not a
+  property the certificate system asserts.</p>
+
+  <p><strong>❌ "We're behind a load balancer that does HTTPS, so encryption is someone else's problem."</strong><br>
+  ✅ Termination at the edge is a <em>decision</em>, with a consequence you own: plaintext between the LB and
+  your app. Know whether your threat model accepts that, whether compliance does, and what headers
+  (X-Forwarded-Proto) tell your app it was originally HTTPS — Spring Security and cookie <code>Secure</code>
+  flags depend on getting that right.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p><strong>Backwards:</strong> Part 7's plaintext HTTP messages now travel inside an encrypted, authenticated
+  tunnel: TLS rides on Part 4's TCP, is found via Part 6's DNS (which also proves domain control for issuance —
+  those TXT records — and constrains issuers via CAA), presents certificates selected by SNI (Part 6's
+  many-names-one-IP, solved at a new layer), and negotiates Part 7's HTTP/2 via ALPN. Problem #9 of Part 1's
+  ten — trust — is answered. <strong>Forwards:</strong> §17's diagrams quietly introduced the next protagonist:
+  the thing standing at the edge, holding the certificate, terminating TLS, and fanning requests out to many
+  servers. What exactly is it balancing, how does it decide, and what happens when a server behind it dies?
+  That is <a href="part09.html"><strong>Part 9 — Load Balancers</strong></a>, where Part 1's scale problem
+  finally gets its answer.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part07.html"><span class="dir">← Previous</span><span class="t">Part 7: HTTP</span></a>
+  <a href="part09.html"><span class="dir">Next →</span><span class="t">Part 9: Load Balancers</span></a>
+</div>
+
+</main>
+</body>
+</html>

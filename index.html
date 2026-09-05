@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Networking for Backend Engineers — Complete Course</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+  <div class="hero">
+    <div class="tagline">A 15-part course · zero networking knowledge assumed</div>
+    <h1>Networking for Backend Engineers</h1>
+    <p>You already write Spring Boot controllers, Node.js services, React apps and FastAPI endpoints.
+    This course explains everything that happens <strong>underneath</strong> them — from electrical pulses on a wire
+    to Kubernetes Ingress — building intuition first, technical depth second.</p>
+    <p style="margin-bottom:0;">By the end you will be able to trace a single browser click through every cable, router,
+    load balancer, proxy, and pod it touches — and answer interview questions about each step.</p>
+  </div>
+
+  <h2 style="margin-top:10px;">How this course teaches</h2>
+  <p>Every chapter follows the same rules: <strong>why before how</strong>, real-world analogies, ASCII packet
+  diagrams, examples from your actual stack (Spring Boot, Node.js, React, FastAPI, PostgreSQL, Redis, Kafka,
+  Docker, Kubernetes, AWS), and — after every major topic — explanations at three depths plus interview
+  questions and misconception-busting. These colored boxes appear throughout:</p>
+
+  <div class="legend-grid">
+    <div class="legend-item" style="border-color:#2563eb;background:#eff6ff;"><b>🧭 Why this exists</b>The problem a concept was invented to solve.</div>
+    <div class="legend-item" style="border-color:#6b7280;background:#f8fafc;"><b>📜 What came before</b>History: what existed earlier, and what breaks without this.</div>
+    <div class="legend-item" style="border-color:#d97706;background:#fffbeb;"><b>🌍 Analogy</b>A real-world mental model you already understand.</div>
+    <div class="legend-item" style="border-color:#0d9488;background:#f0fdfa;"><b>🧪 Real example</b>Concrete walk-throughs: curl, Spring Boot, AWS, kubectl.</div>
+    <div class="legend-item" style="border-color:#16a34a;background:#f0fdf4;"><b>🟢🟡🔴 Three levels</b>Beginner → Intermediate → Advanced explanation of each topic.</div>
+    <div class="legend-item" style="border-color:#7c3aed;background:#f5f3ff;"><b>🎤 Interview questions</b>Click a question to reveal a thorough answer. Test yourself first.</div>
+    <div class="legend-item" style="border-color:#dc2626;background:#fef2f2;"><b>❌ Misconceptions</b>Myths engineers actually believe, corrected.</div>
+    <div class="legend-item" style="border-color:#059669;background:#ecfdf5;"><b>🔑 Key point</b>If you remember one thing from a section, it is this.</div>
+  </div>
+
+  <h2>The big picture you are about to learn</h2>
+  <p>This single diagram is the whole course. Each part of it is a chapter; by Part 15 you will be able to
+  narrate every arrow from memory.</p>
+
+  <div class="figure-title">Fig 0.1 — One request, fifteen chapters</div>
+  <pre class="diagram">
+ YOUR LAPTOP                                          THE INTERNET                AWS CLOUD
+┌─────────────────┐                                                  ┌─────────────────────────────────┐
+│  Browser (React)│   "where is api.shop.com?"                       │  VPC 10.0.0.0/16     (Part 11)  │
+│                 │──────────────────────────► DNS resolver          │                                 │
+│  Part 7: HTTP   │◄────────────────────────── "203.0.113.7"         │   ┌──────────────────────────┐  │
+│  Part 8: TLS    │            (Part 6: DNS)                         │   │ Load balancer  (Part 9)  │  │
+└────────┬────────┘                                                  │   └──────────┬───────────────┘  │
+         │ TCP handshake + TLS handshake (Parts 4, 8)                │              ▼                  │
+         ▼                                                           │   ┌──────────────────────────┐  │
+   home Wi-Fi router ──► ISP ──► backbone routers ──► AWS edge ──────┼──►│ Ingress / reverse proxy  │  │
+   (Parts 1–3: frames, IP addresses, NAT, routing)                   │   │ Nginx      (Parts 10,12) │  │
+                                                                     │   └──────────┬───────────────┘  │
+   every hop: IP packets inside Ethernet frames                      │              ▼                  │
+   addressed by IP (Part 3), delivered to a port (Part 5)            │   ┌──────────────────────────┐  │
+                                                                     │   │ Pod: Spring Boot :8080   │  │
+                                                                     │   │ (Part 12: Kubernetes)    │  │
+                                                                     │   └──────────┬───────────────┘  │
+                                                                     │              │ JDBC :5432       │
+                                                                     │              ▼ gRPC / Kafka     │
+                                                                     │   ┌──────────────────────────┐  │
+                                                                     │   │ PostgreSQL · services    │  │
+                                                                     │   │ (Part 13: microservices) │  │
+                                                                     │   └──────────────────────────┘  │
+                                                                     └─────────────────────────────────┘
+        Parts 14–15: walk this entire path end-to-end, then build one unified mental model.
+  </pre>
+
+  <h2>Curriculum</h2>
+  <p>Read in order — every chapter builds on the previous ones. Budget roughly 45–90 minutes per part.</p>
+
+  <div class="card-grid">
+    <a class="card" href="part01.html"><span class="num">PART 01</span><h3>Why Networking Exists</h3><p>What a network is, why computers need them, the fundamental problems of communication, what physically travels on a wire, LAN/WAN/MAN, clients and servers.</p></a>
+    <a class="card" href="part02.html"><span class="num">PART 02</span><h3>The OSI Model</h3><p>The 7-layer master map the rest of the course hangs on: every layer's job, protocols, devices, headers, plus encapsulation and a full packet journey.</p></a>
+    <a class="card" href="part03.html"><span class="num">PART 03</span><h3>IP Addresses (Layer 3)</h3><p>IPv4, IPv6, public vs private, CIDR and subnet math, NAT, routers and routing tables, gateways, ARP — and how your laptop finds Google.</p></a>
+    <a class="card" href="part04.html"><span class="num">PART 04</span><h3>TCP &amp; UDP (Layer 4)</h3><p>Reliability, ordering, acknowledgements, the three-way handshake, retransmission, flow and congestion control, windowing — and when UDP wins.</p></a>
+    <a class="card" href="part05.html"><span class="num">PART 05</span><h3>Ports &amp; Sockets</h3><p>Why 8080, 5432, 6379 and 9092 exist: sockets, the 5-tuple, client vs server ports, and the well-known ports you will meet every day.</p></a>
+    <a class="card" href="part06.html"><span class="num">PART 06</span><h3>DNS</h3><p>The Internet's phonebook: root, TLD and authoritative servers, recursive resolvers, caching, TTL, and every record type from A to PTR.</p></a>
+    <a class="card" href="part07.html"><span class="num">PART 07</span><h3>HTTP</h3><p>The request–response model, statelessness, methods, status codes, headers, cookies, sessions, authentication — with raw HTTP messages.</p></a>
+    <a class="card" href="part08.html"><span class="num">PART 08</span><h3>HTTPS &amp; TLS/SSL</h3><p>Encryption from zero: symmetric vs asymmetric keys, the TLS handshake, certificates and certificate authorities, and a full visit to amazon.com.</p></a>
+    <a class="card" href="part09.html"><span class="num">PART 09</span><h3>Load Balancers</h3><p>Horizontal scaling and high availability: Layer 4 vs Layer 7 balancing, health checks, routing algorithms, AWS ALB and NLB.</p></a>
+    <a class="card" href="part10.html"><span class="num">PART 10</span><h3>Reverse Proxies</h3><p>Forward vs reverse proxies, why every serious deployment has one, and Nginx/HAProxy/Traefik in front of your Spring Boot app.</p></a>
+    <a class="card" href="part11.html"><span class="num">PART 11</span><h3>Cloud Networking (AWS)</h3><p>VPCs, subnets, route tables, internet and NAT gateways, security groups vs NACLs — and a packet's full path from browser to EC2.</p></a>
+    <a class="card" href="part12.html"><span class="num">PART 12</span><h3>Docker &amp; Kubernetes Networking</h3><p>Bridge, host and overlay networks; pod IPs, Services, ClusterIP, NodePort, LoadBalancer and Ingress — and how they map to everything above.</p></a>
+    <a class="card" href="part13.html"><span class="num">PART 13</span><h3>Microservices Networking</h3><p>REST vs gRPC vs message queues, service discovery, API gateways, and service meshes with Istio and Envoy.</p></a>
+    <a class="card" href="part14.html"><span class="num">PART 14</span><h3>Complete Request Journeys</h3><p>Five end-to-end walkthroughs — localhost, ALB+ECS, Kubernetes Ingress, Nginx, CDN — with every layer, protocol, header and device.</p></a>
+    <a class="card" href="part15.html"><span class="num">PART 15</span><h3>Backend Engineer Mastery</h3><p>Everything connected into one mental model: the full OSI mapping table, recurring design themes, a debugging playbook, and an interview gauntlet.</p></a>
+  </div>
+
+  <h2>How to get the most out of it</h2>
+  <ul>
+    <li><strong>Read linearly.</strong> Part 4 assumes Part 3; Part 12 assumes Parts 9–11. The course never uses a term before defining it.</li>
+    <li><strong>Answer interview questions out loud before clicking.</strong> The collapsible answers are written the way a strong candidate would actually respond.</li>
+    <li><strong>Run the commands.</strong> When a chapter shows <code>curl -v</code>, <code>dig</code>, <code>ss</code>, or <code>docker network inspect</code>, run it against your own services — the output will match what you just read.</li>
+    <li><strong>Draw the diagrams from memory.</strong> If you can reproduce Fig 0.1 above with all its labels after Part 15, you have the mental model.</li>
+  </ul>
+
+  <div class="callout connects">
+    <div class="callout-title">🔗 Start here</div>
+    <p>Begin with <a href="part01.html"><strong>Part 1: Why Networking Exists</strong></a> — it starts from two computers and a single wire, and sets up the ten fundamental problems the other fourteen chapters solve.</p>
+  </div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 1: Why Networking Exists — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html" class="active"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 1 of 15</p>
+<h1>Why Networking Exists</h1>
+<p class="lede">You have typed <code>localhost:8080</code> hundreds of times. By the end of this course you will know
+what every character of that URL sets in motion. We start here — before protocols, before models, before
+acronyms — with the most basic question: why do computers talk to each other at all, and what makes that hard?</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#what-is-a-network">What is a network?</a></li>
+    <li><a href="#why-networks">Why do computers need networks?</a></li>
+    <li><a href="#ten-problems">The ten problems every network must solve</a></li>
+    <li><a href="#physical">What physically happens when data is sent</a></li>
+    <li><a href="#internet-vs-network">Internet vs network</a></li>
+    <li><a href="#lan-wan-man">LAN, WAN, MAN</a></li>
+    <li><a href="#client-server">Clients and servers</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="what-is-a-network">1. What is a network?</h2>
+
+<p>Strip away every buzzword and a network is this:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A <strong>network</strong> is two or more computers connected by some physical medium (a cable, a radio signal,
+  a beam of light) plus an <strong>agreed set of rules</strong> for how they exchange data. The connections move the
+  bits; the rules give the bits meaning.</p>
+</div>
+
+<p>That is genuinely all. Everything else in this course — IP addresses, TCP, DNS, load balancers, Kubernetes —
+is engineering layered on top of "connected computers plus rules." The smallest possible network looks like this:</p>
+
+<div class="figure-title">Fig 1.1 — The smallest possible network</div>
+<pre class="diagram">
+     COMPUTER A                                      COMPUTER B
+   ┌─────────────┐                                 ┌─────────────┐
+   │   your      │         one copper cable        │   your      │
+   │   laptop    ├─────────────────────────────────┤   friend's  │
+   │             │    carrying electrical pulses   │   laptop    │
+   └─────────────┘                                 └─────────────┘
+
+            two connected computers  =  a network
+</pre>
+
+<p>Notice that the cable alone is not enough. Suppose computer A puts some electrical pulses on the wire.
+Computer B receives… a series of voltage changes. Immediately, hard questions appear:</p>
+
+<ul>
+  <li>How fast will A send the pulses? If B samples the wire at the wrong speed, it reads garbage.</li>
+  <li>Which voltage means <code>1</code> and which means <code>0</code>?</li>
+  <li>Where does one message end and the next begin?</li>
+  <li>If B was busy and missed some pulses, how does it ask A to repeat them?</li>
+</ul>
+
+<p>Both sides need to agree on the answers <em>before</em> they communicate. That agreement is called a
+<strong>protocol</strong> — the single most important word in this entire course.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a protocol is a shared language plus etiquette</div>
+  <p>Two diplomats meet. Before any real negotiation happens they must settle: which language will we speak?
+  Who speaks first? How do we signal "I didn't catch that, please repeat"? How do we politely end the meeting?
+  None of those rules are the <em>content</em> of the negotiation — but without them, no content can be exchanged.
+  A network protocol is exactly this: a pre-agreed contract about how two machines greet each other, take turns,
+  detect misunderstandings, and say goodbye. When you later meet TCP's "three-way handshake" in Part 4, it is
+  literally two machines performing agreed-upon diplomatic etiquette before talking business.</p>
+</div>
+
+<p>Real networks are rarely two machines and one cable. The moment you have three or more computers, wiring
+every machine to every other machine becomes absurd (10 computers would need 45 cables; 100 computers would
+need 4,950). So real networks put a relay box in the middle:</p>
+
+<div class="figure-title">Fig 1.2 — A typical small network: machines connected through a switch</div>
+<pre class="diagram">
+                         ┌────────────┐
+                         │   SWITCH   │    a box whose only job is to
+                         └─┬────┬───┬─┘    relay messages between its ports
+             ┌─────────────┘    │   └──────────────┐
+             │                  │                  │
+        ┌────┴─────┐       ┌────┴─────┐       ┌────┴─────┐
+        │  laptop  │       │ desktop  │       │ printer  │
+        └──────────┘       └──────────┘       └──────────┘
+
+     every machine plugs into the switch once; the switch forwards
+     each message only toward the machine it is addressed to
+</pre>
+
+<p>So a network has three ingredients, and it is worth memorizing them as a triple:</p>
+
+<ol>
+  <li><strong>Nodes</strong> — the devices: laptops, servers, phones, printers, and also the relay boxes themselves (switches, routers — we will define these precisely in Parts 2 and 3).</li>
+  <li><strong>Links</strong> — the physical media connecting nodes: copper cables, fiber-optic strands, radio waves.</li>
+  <li><strong>Protocols</strong> — the agreed rules that turn raw signals into meaningful conversation.</li>
+</ol>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A network is computers connected together so they can share information, the way a group chat connects
+    people. The "rules of the chat" (who talks, how you know a message arrived) are called protocols.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A network = nodes + links + protocols. Links carry raw signals; protocols define framing (where messages
+    start/end), addressing (who this message is for), and error handling (what to do when bits get corrupted).
+    Intermediate devices like switches relay traffic so that n machines need n cables, not n×(n−1)/2.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Protocols are layered contracts: each layer offers a <em>service</em> to the layer above while hiding its
+    implementation (Part 2 formalizes this as the OSI model). A "network" is therefore best understood not as
+    hardware but as a stack of abstractions, each with its own addressing scheme, failure modes, and
+    service guarantees — and most production debugging is figuring out <em>which layer's contract</em> was violated.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-networks">2. Why do computers need networks?</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>In the 1950s–60s, computers were isolated islands. Moving data between two machines meant writing it to
+  magnetic tape or punch cards and <em>physically carrying it</em> — engineers half-jokingly called this
+  <strong>sneakernet</strong> (the network made of sneakers). A bank's daily transactions would be driven across
+  town in a van. The other model was the <strong>mainframe with terminals</strong>: one giant computer, with dumb
+  screens-and-keyboards wired directly to it. Terminals could not talk to each other, only to the mainframe.
+  If the mainframe died, every terminal in the building went dark — your first encounter with the concept of a
+  <em>single point of failure</em>, which will haunt us all the way to Part 9 (load balancers).</p>
+</div>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why networks exist</div>
+  <p>Computers need networks for five fundamental reasons, and every system you have ever built uses all five:</p>
+  <ol>
+    <li><strong>Sharing data</strong> — a file, a database row, a JSON response. Without a network: tape in a van.</li>
+    <li><strong>Sharing hardware</strong> — one printer, one GPU cluster, one database server used by hundreds of clients instead of one each.</li>
+    <li><strong>Human communication</strong> — email, chat, video. The original killer app of the ARPANET (the Internet's ancestor, defined in section 5) was, surprisingly, email.</li>
+    <li><strong>Distributing work</strong> — splitting one job across many machines because one machine is too small, too slow, or too likely to fail. This is the entire premise of microservices, Kafka, and Kubernetes.</li>
+    <li><strong>Reaching remote services</strong> — using a computer you do not own and will never see. That is the literal definition of "the cloud."</li>
+  </ol>
+</div>
+
+<p>Here is the part that should change how you see your own daily work: <strong>almost nothing you do as a
+backend engineer is local.</strong> Watch a single ordinary minute at your desk:</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — one minute of your day, translated into networking</div>
+  <ul>
+    <li><code>git push</code> — your laptop opens a secure connection (SSH or HTTPS, Parts 4–8) to GitHub's servers and streams compressed objects to them.</li>
+    <li><code>npm install</code> — hundreds of HTTPS requests to <code>registry.npmjs.org</code>, each one a full DNS lookup + connection + download (Parts 6–8). A typical React project's install moves more data than the entire ARPANET carried in its first year.</li>
+    <li>Your Spring Boot app runs <code>orderRepository.findById(42)</code> — Hibernate generates SQL, which travels over a TCP connection (Part 4) to PostgreSQL on port 5432 (Part 5), and rows travel back.</li>
+    <li>Your React dev server hot-reloads — the browser keeps a WebSocket (a long-lived TCP connection) open to <code>localhost:3000</code> and the dev server pushes "something changed" messages through it.</li>
+    <li>You check a dashboard — your browser talks to a load balancer (Part 9) in an AWS data center (Part 11), which talks to a pod (Part 12), which talks to three other services (Part 13).</li>
+  </ul>
+  <p>Even <code>localhost</code> is networking: the request to <code>localhost:8080</code> goes through the full
+  networking machinery of your operating system — it just never reaches a physical cable. (Part 3 explains this
+  "loopback" path.)</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A microservices architecture <em>is</em> a network application. The moment you split a monolith into two
+  services, every function call between them becomes a network conversation — inheriting every problem in the
+  next section. This is why backend engineers cannot treat networking as "the ops team's problem."</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Without networks, computers would exchange data the way people exchanged letters: physically carrying
+    them. Networks let computers share files, printers, databases, and messages instantly — and let you use
+    powerful computers (like AWS servers) that live somewhere else.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Networks enable resource sharing (data, hardware), communication, and distribution of work. Modern
+    backend stacks are network-native: every database query, cache lookup, message publish, and API call is a
+    network round trip with measurable latency and a real failure probability.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Distribution is a trade, not a free win: you exchange the single point of failure and scaling ceiling of
+    one machine for partial failures, latency budgets, and consistency problems spread across many machines.
+    The famous "fallacies of distributed computing" (the network is reliable, latency is zero, bandwidth is
+    infinite…) are all statements about <em>networking</em> — we will meet them properly in Part 13.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ten-problems">3. The ten problems every network must solve</h2>
+
+<p>Now the most important section of this chapter. Pretend networks do not exist and you have been asked to
+design computer-to-computer communication from scratch. Work through what could go wrong between
+"computer A wants to send data" and "computer B correctly receives it," and you will independently re-invent
+the entire curriculum of this course. Every technology in the remaining fourteen parts is the answer to one of
+these ten problems:</p>
+
+<ol>
+  <li><strong>The physics problem.</strong> How do we represent abstract 1s and 0s as something that can physically travel — voltage, light, radio — and be reliably read at the other end?</li>
+  <li><strong>The neighborhood problem.</strong> On a shared medium (one cable, one Wi-Fi channel) with many machines, whose turn is it to transmit, and how do you address a message to one specific neighbor?</li>
+  <li><strong>The global addressing problem.</strong> Among billions of machines on Earth, how do you uniquely name the <em>one</em> machine you want to reach?</li>
+  <li><strong>The pathfinding problem.</strong> There is no direct cable from your laptop to Google. Data must hop through dozens of intermediate devices. Who decides the route, hop by hop?</li>
+  <li><strong>The reliability problem.</strong> Links drop, corrupt, duplicate, and reorder data. If you send three chunks, they may arrive as two chunks, in the wrong order, with flipped bits. Who notices and repairs this?</li>
+  <li><strong>The "which app?" problem.</strong> A machine runs many programs at once — Spring Boot, PostgreSQL, an SSH session. When data arrives at the machine, which program should receive it?</li>
+  <li><strong>The naming problem.</strong> Humans cannot remember numeric machine addresses. How does the name <code>google.com</code> become an address machines can route to?</li>
+  <li><strong>The meaning problem.</strong> Once bytes arrive at the right program, what do they <em>mean</em>? Where does a request start and end? How are a method, a path, headers, and a body encoded?</li>
+  <li><strong>The trust problem.</strong> Data crosses dozens of networks owned by strangers. How do we stop them reading it, tampering with it, or impersonating the server?</li>
+  <li><strong>The scale problem.</strong> One server has finite CPU and can catch fire. How do we serve millions of users from many servers while presenting them as one, and survive any single machine dying?</li>
+</ol>
+
+<p>Here is the map from problem to solution. Bookmark this table — it is the skeleton of your entire mental
+model, and the "OSI layer" column will make sense after Part 2:</p>
+
+<table>
+  <tr><th>#</th><th>Problem</th><th>The question it asks</th><th>Solved by</th><th>Where you learn it</th><th>OSI layer</th></tr>
+  <tr><td>1</td><td>Physics</td><td>How do bits travel?</td><td>Cables, radio, signal encoding, NICs</td><td>Part 1 §4, Part 2</td><td>Layer 1 — Physical</td></tr>
+  <tr><td>2</td><td>Neighborhood</td><td>Who talks on this wire, to which neighbor?</td><td>Ethernet, MAC addresses, switches</td><td>Part 2</td><td>Layer 2 — Data Link</td></tr>
+  <tr><td>3</td><td>Global addressing</td><td>Which machine on Earth?</td><td>IP addresses (IPv4/IPv6)</td><td>Part 3</td><td>Layer 3 — Network</td></tr>
+  <tr><td>4</td><td>Pathfinding</td><td>Which route through the maze?</td><td>Routers, routing tables, gateways</td><td>Part 3</td><td>Layer 3 — Network</td></tr>
+  <tr><td>5</td><td>Reliability</td><td>Did it all arrive, in order, intact?</td><td>TCP (or "don't care": UDP)</td><td>Part 4</td><td>Layer 4 — Transport</td></tr>
+  <tr><td>6</td><td>Which app?</td><td>Which program on the machine?</td><td>Ports and sockets</td><td>Part 5</td><td>Layer 4 — Transport</td></tr>
+  <tr><td>7</td><td>Naming</td><td>How does a name become an address?</td><td>DNS</td><td>Part 6</td><td>Layer 7 — Application</td></tr>
+  <tr><td>8</td><td>Meaning</td><td>What do these bytes say?</td><td>HTTP, gRPC, SQL wire protocols…</td><td>Parts 7, 13</td><td>Layer 7 — Application</td></tr>
+  <tr><td>9</td><td>Trust</td><td>Can strangers read or fake this?</td><td>TLS, certificates</td><td>Part 8</td><td>Layers 5/6 — between Transport and Application</td></tr>
+  <tr><td>10</td><td>Scale</td><td>What if one server isn't enough?</td><td>Load balancers, proxies, cloud, Kubernetes, meshes</td><td>Parts 9–13</td><td>Layers 4 &amp; 7</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Networking looks like a pile of unrelated acronyms until you see that <strong>every technology is an answer
+  to exactly one of these ten problems</strong>. When you meet something new — QUIC, Istio, a NAT gateway — your
+  first question should always be: <em>which of the ten problems is this solving, and what was inadequate about
+  the previous answer?</em> That question is also how this course introduces every single protocol.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the postal system solved the same ten problems</div>
+  <p>Humanity already built a planet-scale message network once: the postal system. It needed physical transport
+  (trucks, planes — problem 1), local delivery rules (the mail carrier's street route — problem 2), global
+  addressing (country/city/street/house — problems 3–4), registered mail with delivery confirmation (problem 5),
+  the recipient's <em>name</em> on the envelope so the right person in the house opens it (problem 6), a phone
+  book mapping names to addresses (problem 7), a shared written language inside the letter (problem 8), sealed
+  envelopes and signatures (problem 9), and sorting centers that scale to billions of letters (problem 10).
+  This analogy is so exact that networking borrowed its vocabulary from it: we literally say packets are
+  <em>addressed</em>, <em>delivered</em>, and <em>routed</em>. We will reuse the postal analogy throughout the course.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="physical">4. What physically happens when one computer sends data to another</h2>
+
+<p>Let's make this concrete and watch real matter move. Your Spring Boot app calls
+<code>restTemplate.getForObject("http://192.168.1.50:8080/api/health", …)</code> targeting another machine on
+your office network. Ignore all the protocol machinery for now (Parts 2–7 cover it) and follow the
+<em>physics</em>:</p>
+
+<h3>4.1 Inside your machine: from memory to the network card</h3>
+
+<p>Your data — the text of the HTTP request — starts as bytes in RAM (Random Access Memory), owned by the JVM
+(Java Virtual Machine). Your program asks the operating system to send it. The OS (operating system) passes the
+bytes to a specific piece of hardware: the <strong>NIC</strong> (Network Interface Card) — the component that
+owns the physical connector or radio antenna. Every laptop has at least two: an Ethernet/Wi-Fi NIC and a
+"virtual" loopback interface used when a machine talks to itself.</p>
+
+<div class="figure-title">Fig 1.3 — The journey out of your computer</div>
+<pre class="diagram">
+   YOUR COMPUTER
+  ┌────────────────────────────────────────────────────────┐
+  │                                                        │
+  │   JVM / your app          operating system             │
+  │  ┌──────────────┐        ┌──────────────────┐          │
+  │  │ bytes in RAM │ ─────► │ network stack     │          │
+  │  │ "GET /api…"  │        │ (chops data into  │          │
+  │  └──────────────┘        │  packets, Part 2) │          │
+  │                          └────────┬─────────┘          │
+  │                                   ▼                    │
+  │                          ┌──────────────────┐          │
+  │                          │ NIC (network     │          │
+  │                          │ interface card)  │          │
+  │                          └────────┬─────────┘          │
+  └───────────────────────────────────┼────────────────────┘
+                                      ▼
+                     electrical pulses on a copper cable
+                     (or radio waves, or light in fiber)
+</pre>
+
+<p>One crucial fact to plant now (Part 2 grows it into the concept of <em>encapsulation</em>): the OS does not
+send your request as one continuous stream. It <strong>chops it into chunks</strong> — called packets — each
+wrapped with addressing information, sent independently, and reassembled at the destination. Like mailing a
+book as a series of numbered envelopes rather than one giant box.</p>
+
+<h3>4.2 On the wire: three ways to physically move a bit</h3>
+
+<p>A bit is an abstraction. To travel, it must become a measurable physical phenomenon. Three media dominate:</p>
+
+<table>
+  <tr><th>Medium</th><th>A bit is…</th><th>Typical use</th><th>Strengths / limits</th></tr>
+  <tr><td><strong>Copper cable</strong> (Ethernet, e.g. Cat6)</td><td>a voltage level / transition</td><td>Offices, homes, inside data-center racks</td><td>Cheap; signal degrades over ~100 m; electrical interference</td></tr>
+  <tr><td><strong>Fiber optic</strong></td><td>a pulse of light in a glass strand</td><td>Between buildings, cities, continents (submarine cables); inside data centers</td><td>Enormous capacity, low loss over km; more fragile/expensive to terminate</td></tr>
+  <tr><td><strong>Radio</strong> (Wi-Fi, 4G/5G)</td><td>a modulated electromagnetic wave</td><td>The last few meters to laptops/phones</td><td>No cables; shared air = interference, variable quality (matters for UDP vs TCP, Part 4)</td></tr>
+</table>
+
+<p>(Wi-Fi, incidentally, is a brand name, not an acronym — it does not stand for "Wireless Fidelity," despite
+the popular myth.) On a copper Ethernet cable, transmitting the bits <code>1 0 1 1 0 1</code> looks roughly
+like this:</p>
+
+<div class="figure-title">Fig 1.4 — Bits as voltage on a wire (simplified)</div>
+<pre class="diagram">
+   bits to send:      1        0        1        1        0        1
+
+                  ┌────────┐         ┌─────────────────┐         ┌────────┐
+   voltage        │        │         │                 │         │        │
+   on the wire ───┘        └─────────┘                 └─────────┘        └──
+                    high      low       high     high      low      high
+
+   the receiving NIC samples the wire on every tick of an agreed clock
+   and converts the voltage levels back into 1s and 0s
+</pre>
+
+<p>Real encodings are cleverer than "high = 1, low = 0" — for instance, if you sent ten thousand zeros in a row,
+the receiver staring at a flat line could lose count. Real schemes (Manchester encoding, 4B/5B and friends)
+guarantee regular voltage <em>transitions</em> so both sides stay synchronized. You never need the details as a
+backend engineer; you need to know the problem exists, because it explains why Layer 1 of the OSI model
+(Part 2) is a genuine engineering discipline and not "just a cable."</p>
+
+<h3>4.3 The two numbers that describe every link: latency and bandwidth</h3>
+
+<p>Two different physical quantities describe how "fast" a network is, and confusing them is the most common
+performance-engineering mistake in backend work:</p>
+
+<ul>
+  <li><strong>Latency</strong> — how long one bit takes to travel from A to B. Determined by <em>distance</em> and the speed of light. Measured in milliseconds (ms).</li>
+  <li><strong>Bandwidth</strong> (more precisely, throughput) — how many bits can be in flight per second. Determined by the <em>width</em> of the channel. Measured in megabits/gigabits per second (Mbps/Gbps).</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the truck full of hard drives</div>
+  <p>A truck carrying 10,000 hard drives from Mumbai to Delhi has <em>astronomical</em> bandwidth — petabytes per
+  trip — but latency of two days. A laser pointer blinked at the moon has near-light-speed latency but carries
+  almost no data. Your fiber connection at home is the same trade viewed from both ends: upgrading from 100 Mbps
+  to 1 Gbps makes <em>downloads</em> 10× faster but makes your API calls to a distant server <strong>zero percent
+  faster</strong>, because each call is tiny and its time is dominated by distance. (AWS's Snowmobile — a literal
+  truck full of storage for petabyte migrations — was this analogy turned into a product.)</p>
+</div>
+
+<p>Light in fiber travels at roughly two-thirds the speed of light in vacuum — about <strong>200,000 km per
+second</strong>, or 200 km per millisecond, and no technology can fix that, because physics. This single fact
+explains an enormous amount of backend architecture:</p>
+
+<table>
+  <tr><th>Path</th><th>Typical round trip (RTT)</th><th>What it means for you</th></tr>
+  <tr><td>Same machine (loopback)</td><td>~0.05 ms</td><td>Why local integration tests feel instant</td></tr>
+  <tr><td>Same data center / AWS Availability Zone</td><td>0.2–1 ms</td><td>Why microservices try to stay in one region</td></tr>
+  <tr><td>Same city</td><td>1–5 ms</td><td>Why CDN edge nodes exist (Part 14)</td></tr>
+  <tr><td>Mumbai ↔ Singapore</td><td>~50–70 ms</td><td>Cross-region calls are 100× a local call</td></tr>
+  <tr><td>India ↔ US East Coast</td><td>~200–250 ms</td><td>Why your US users complain if servers are only in India</td></tr>
+  <tr><td>Anywhere via geostationary satellite</td><td>500–700 ms</td><td>36,000 km up and back — physics, not bad engineering</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A "fast" connection cannot beat distance. One HTTP request that triggers 20 sequential database queries
+  pays the data-center round trip <em>20 times</em>. This is why N+1 query bugs, chatty microservices, and
+  region placement are <em>networking</em> problems wearing application clothes — and why caching (Redis nearby)
+  and CDNs (content physically closer to users) are fundamentally <em>latency</em> weapons, not bandwidth ones.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Data travels as physical signals: electricity in copper, light in glass fiber, radio through air. Your
+    computer's network card translates between bytes in memory and those signals. Data is sent in small chunks
+    (packets), and even at the speed of light, distance takes real time — that delay is called latency.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The OS network stack segments application data into packets and hands them to the NIC, which encodes bits
+    as signal transitions using schemes that preserve clock synchronization. Link quality differs by medium
+    (radio is lossy and shared; fiber is clean and long-reach). Performance is two-dimensional: latency
+    (distance-bound, irreducible below ~1 ms per 100 km of fiber, round trip) and throughput (capacity-bound,
+    upgradeable). RTT (round-trip time) is the unit that dominates request-response workloads.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Once you internalize "every round trip costs an RTT," whole categories of design become obvious: protocol
+    designers fight to remove round trips (TCP+TLS handshake compression in TLS 1.3 and QUIC, Part 8); backend
+    engineers batch and pipeline (JDBC batch inserts, Redis pipelines, HTTP/2 multiplexing); architects place
+    state near compute (same-AZ replicas, edge caching). The bandwidth-delay product (bandwidth × RTT — how many
+    bytes fit "in the pipe") drives TCP window sizing in Part 4. High bandwidth with high latency is common
+    (satellite, cross-continent fiber); the reverse — low latency with low bandwidth — is rare and almost
+    always inside a building.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="internet-vs-network">5. Internet vs network — they are not synonyms</h2>
+
+<p>People say "the network is down" and "the internet is down" interchangeably. They are different things, and
+the difference is the single most beautiful idea in this whole field.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why the Internet exists</div>
+  <p>By the 1970s the world had many networks — university networks, military networks, corporate networks —
+  each speaking its own incompatible protocols. A machine on network A simply could not exchange data with a
+  machine on network B; they were separate universes. The problem to solve was not "build a bigger network" but
+  <strong>"make existing, different networks interoperate."</strong> The solution: a common protocol family that
+  every network could adopt at its edges, plus devices (routers) that pass traffic between networks. The result
+  was called an <em>inter-network</em> — "between networks" — shortened to <strong>internet</strong>. The global,
+  public one we all use is "the Internet" with a capital I.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>The Internet's direct ancestor is <strong>ARPANET</strong> (Advanced Research Projects Agency Network),
+  built by the US Department of Defense's research agency. Its first message was sent on 29 October 1969 between
+  UCLA and Stanford: the operator typed "LOGIN" and the system crashed after "LO" — the Internet's first message
+  was, fittingly, a truncated packet. ARPANET pioneered <em>packet switching</em> (chopping data into
+  independently-routed chunks) as opposed to the telephone system's <em>circuit switching</em> (reserving a
+  dedicated end-to-end line per conversation). Packet switching wins because links sit idle most of the time in
+  a circuit world; packets from thousands of conversations can share the same wire. On 1 January 1983 — "flag
+  day" — ARPANET switched to the TCP/IP protocol family (Parts 3–4), which is the moment the modern Internet was
+  born. Without that shared protocol family, every cross-network message would need translation gateways between
+  every pair of network types — interoperability would have collapsed under its own complexity.</p>
+</div>
+
+<p>So, precisely:</p>
+
+<ul>
+  <li>A <strong>network</strong> is one administrative island: your home Wi-Fi and everything on it; your office floor; one AWS data center's internal fabric.</li>
+  <li>An <strong>internet</strong> (lowercase) is any collection of networks connected by routers so traffic can flow between them.</li>
+  <li><strong>The Internet</strong> (capital I) is the specific, global, public internet — roughly 70,000+ independently-operated networks (each called an <em>autonomous system</em>) that agree to interconnect and speak TCP/IP.</li>
+</ul>
+
+<div class="figure-title">Fig 1.5 — The Internet is a network OF networks</div>
+<pre class="diagram">
+      your home               a coffee shop              an office
+   ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+   │   home LAN   │         │   shop LAN   │         │  office LAN  │
+   │  (your own   │         │              │         │              │
+   │   network)   │         │              │         │              │
+   └──────┬───────┘         └──────┬───────┘         └──────┬───────┘
+          │                        │                        │
+          ▼                        ▼                        ▼
+   ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+   │    ISP A     │         │    ISP B     │         │    ISP C     │
+   │   network    │         │   network    │         │   network    │
+   └──────┬───────┘         └──────┬───────┘         └──────┬───────┘
+          │                        │                        │
+          └───────────┬────────────┴───────────┬────────────┘
+                      ▼                        ▼
+              ┌───────────────┐        ┌───────────────┐
+              │ IXP — internet│        │   backbone    │
+              │ exchange point│════════│   carriers,   │
+              │ (where ISPs   │ fiber  │   submarine   │
+              │  meet to swap │        │   cables      │
+              │  traffic)     │        │               │
+              └───────────────┘        └───────────────┘
+
+     no one owns this. each network is independently operated;
+     they cooperate by speaking one protocol family: TCP/IP
+</pre>
+
+<p>Three named players you will keep meeting:</p>
+
+<ul>
+  <li><strong>ISP</strong> (Internet Service Provider) — the company that connects your network to the rest (Jio, Airtel, Comcast). ISPs themselves buy connectivity from bigger ISPs, forming tiers.</li>
+  <li><strong>IXP</strong> (Internet Exchange Point) — physical buildings where many ISPs plug into a common switch fabric and exchange traffic directly instead of paying intermediaries.</li>
+  <li><strong>Backbone</strong> — the long-haul, very-high-capacity fiber routes (including ~1.5 million km of submarine cables) that carry traffic between cities and continents. When you watch a US-hosted video in India, your bits literally travel through a finger-thick cable lying on the floor of the Arabian Sea.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The Internet is <strong>physical</strong>. "The cloud" is other people's computers in warehouse-sized
+  buildings, reached through glass strands under oceans. There is no magic layer — which is precisely why
+  region choice, availability zones, and CDNs (all later parts) matter: they are decisions about <em>where on
+  Earth</em> your bytes live relative to your users.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A network is one connected group of computers, like your home Wi-Fi. The Internet is millions of those
+    groups connected to each other — a network of networks — all agreeing to speak the same language (TCP/IP)
+    so any computer can reach any other.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Independent networks interconnect through ISPs, IXPs, and backbone carriers. Packet switching lets all
+    conversations share links instead of reserving circuits. The glue is the TCP/IP protocol suite: any network
+    that speaks IP at its border can join. Routers (Part 3) are the devices that forward packets between
+    networks.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The Internet's unit of organization is the <em>autonomous system</em> (AS) — a network under one
+    administrative control with its own routing policy (AWS is AS16509). ASes exchange reachability information
+    using BGP (Border Gateway Protocol), the routing protocol <em>between</em> networks, governed as much by
+    business contracts (peering vs transit) as by engineering. Most global outages you read about — Facebook's
+    2021 six-hour outage, route leaks taking countries offline — are BGP incidents: the cooperative glue failing,
+    not cables breaking.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="lan-wan-man">6. LAN, WAN, MAN — networks by reach</h2>
+
+<p>Networks are classified by geographic scope, and the classification matters because <strong>who owns the
+network determines who fixes it, secures it, and pays for it</strong> — and because each scope uses different
+technology with different speed and latency characteristics.</p>
+
+<h3>6.1 LAN — Local Area Network</h3>
+
+<p>A <strong>LAN</strong> (Local Area Network) covers one small place — a home, an office floor, one
+data-center room. Its defining features: <em>you (or your company) own all of it</em>, it uses Ethernet cables
+and Wi-Fi, it is extremely fast (1–100 Gbps) and extremely low-latency (under 1 ms), and it is private by
+default — outsiders cannot reach into it (Part 3's NAT explains exactly why).</p>
+
+<p>Your home LAN right now: a router (provided by your ISP), your laptop, your phone, your TV, maybe a smart
+bulb — all able to reach each other directly. When you cast a video from phone to TV, the data never leaves
+this LAN.</p>
+
+<h3>6.2 WAN — Wide Area Network</h3>
+
+<p>A <strong>WAN</strong> (Wide Area Network) connects LANs across cities, countries, or the planet. Defining
+features: <em>nobody owns it end-to-end</em> — you lease capacity from carriers; it is slower per-link and
+higher-latency (because: physics, section 4); and it is hostile territory — your data crosses infrastructure
+owned by strangers, which is the entire reason encryption (Part 8) exists. <strong>The Internet is the largest
+WAN.</strong> A company connecting its Mumbai and Berlin offices with leased lines or VPN tunnels has built a
+private WAN.</p>
+
+<h3>6.3 MAN — Metropolitan Area Network</h3>
+
+<p>A <strong>MAN</strong> (Metropolitan Area Network) is the in-between scale: one city or campus. A university
+with 30 buildings, a city's traffic-camera network, or a cable ISP's city-wide infrastructure are MANs. The
+term is the least used of the three in daily engineering — in practice people say "campus network" or just
+describe it as a small WAN — but it appears in interviews and certification exams, so know the word.</p>
+
+<div class="figure-title">Fig 1.6 — Network scopes nest inside each other</div>
+<pre class="diagram">
+  ┌─ WAN ─ country / planet scale ─ leased lines, the Internet ──────────┐
+  │                                                                      │
+  │    ┌─ MAN ─ one city / campus ─ metro fiber rings ─────────┐         │
+  │    │                                                       │         │
+  │    │    ┌─ LAN ─ one building ─ Ethernet + Wi-Fi ──┐       │         │
+  │    │    │                                          │       │         │
+  │    │    │    ┌─ PAN ─ around one person ────┐      │       │         │
+  │    │    │    │  phone ── smartwatch ──      │      │       │         │
+  │    │    │    │  earbuds (Bluetooth)         │      │       │         │
+  │    │    │    └──────────────────────────────┘      │       │         │
+  │    │    └──────────────────────────────────────────┘       │         │
+  │    └───────────────────────────────────────────────────────┘         │
+  └──────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>(Bonus term in the diagram: a <strong>PAN</strong> — Personal Area Network — is the meter-scale network around
+one person, typically Bluetooth.) The comparison every interview wants:</p>
+
+<table>
+  <tr><th></th><th>LAN</th><th>MAN</th><th>WAN</th></tr>
+  <tr><td><strong>Scope</strong></td><td>Room / building</td><td>City / campus</td><td>Country / planet</td></tr>
+  <tr><td><strong>Ownership</strong></td><td>One person/org owns everything</td><td>One org or consortium</td><td>Many parties; you lease</td></tr>
+  <tr><td><strong>Typical tech</strong></td><td>Ethernet, Wi-Fi</td><td>Metro fiber</td><td>Long-haul fiber, submarine cables, MPLS, VPN</td></tr>
+  <tr><td><strong>Speed / latency</strong></td><td>1–100 Gbps, &#60;1 ms</td><td>1–100 Gbps, 1–5 ms</td><td>Varies, 10–300 ms</td></tr>
+  <tr><td><strong>Trust</strong></td><td>Private, trusted</td><td>Semi-trusted</td><td>Untrusted — encrypt everything</td></tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — these words map directly onto AWS</div>
+  <p>This classification is not academic; it is the vocabulary of cloud architecture (Part 11):</p>
+  <ul>
+    <li>An AWS <strong>VPC</strong> (Virtual Private Cloud) is your <em>virtual LAN</em> — a private network you own, where your EC2 instances and pods talk with LAN-like speed and trust.</li>
+    <li>An AWS <strong>Region</strong> behaves like a MAN — multiple data centers (Availability Zones) in one metro area, linked by AWS-owned fiber with 1–2 ms latency.</li>
+    <li>Connecting your office to your VPC via <strong>VPN</strong> (Virtual Private Network — an encrypted tunnel over the Internet) or <strong>AWS Direct Connect</strong> (a leased private line) is building a WAN link.</li>
+    <li>Cross-region replication of a database is WAN traffic — which is why it is asynchronous by default: you cannot pretend 200 ms is a LAN.</li>
+  </ul>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>LAN = the network in one building (your home Wi-Fi). WAN = networks connected across long distances (the
+    Internet). MAN = city-sized, in between. The further data travels, the slower and less trusted the path.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Scope determines technology (Ethernet/Wi-Fi vs metro fiber vs long-haul), ownership (own vs lease),
+    latency class (&#60;1 ms vs ~5 ms vs 10–300 ms), and threat model (trusted vs encrypt-everything). Architecture
+    decisions like "keep chatty services in one AZ" are LAN-vs-WAN decisions in disguise.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The LAN/WAN boundary is where guarantees change: inside a LAN you can assume microsecond jitter, abundant
+    bandwidth, and a single failure domain you control; across a WAN you must budget for packet loss, variable
+    RTT, partial partitions, and third-party failures. Distributed-systems theory (consensus quorums, CAP
+    trade-offs) is essentially the mathematics of WANs; many systems that are trivial on a LAN (synchronous
+    replication, distributed locks) become dangerous across one. When an interviewer asks "would you run a
+    PostgreSQL synchronous replica cross-region?", they are asking whether you know this boundary.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="client-server">7. Clients and servers — roles, not machines</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this concept exists</div>
+  <p>Once machines can talk, you must decide the <em>shape</em> of the conversation. The shape that conquered
+  the world is asymmetric: one side has something (data, computation, files) and passively waits; the other
+  side wants something and actively asks. The waiting side is the <strong>server</strong> (it <em>serves</em>);
+  the asking side is the <strong>client</strong>. This asymmetry exists because it is operationally sane: servers
+  can be few, powerful, professionally managed, and always-on at known addresses, while clients can be billions,
+  cheap, intermittently connected, and anonymous. Almost everything you build — REST APIs, databases, message
+  brokers — follows this pattern.</p>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>Client and server are roles in one conversation, not types of hardware.</strong> The rule that
+  defines the roles: <strong>the client always initiates; the server always listens and responds.</strong>
+  Whoever speaks first is the client of that exchange. Nothing about the machine itself makes it a "server."</p>
+</div>
+
+<div class="figure-title">Fig 1.7 — One request–response exchange (the client always speaks first)</div>
+<pre class="diagram">
+   CLIENT (your browser)                     SERVER (Spring Boot on :8080)
+         │                                              │
+         │  1. client initiates:                        │ … was sitting idle,
+         │     "GET /api/orders"                        │   listening, waiting
+         │ ─────────────────────────────────────────►   │
+         │                                              │ 2. OrderController
+         │                                              │    runs, queries the
+         │                                              │    database, builds JSON
+         │  3. server responds:                         │
+         │     "200 OK" + JSON body                     │
+         │ ◄─────────────────────────────────────────   │
+         │                                              │
+         │   the request–response pair is the atom      │
+         │   of almost all backend communication        │
+</pre>
+
+<h3>7.1 The word "server" means three different things — disambiguate it</h3>
+
+<p>In real engineering conversations, "server" means any of:</p>
+
+<ol>
+  <li><strong>A process</strong> — a program listening for requests: "the Spring Boot server," "PostgreSQL server." This is the precise meaning.</li>
+  <li><strong>A machine</strong> — a computer whose main job is running such processes: "SSH into the server."</li>
+  <li><strong>The hardware class</strong> — rack-mounted computers without screens: "we bought four new servers."</li>
+</ol>
+
+<p>The first meaning is the one that matters for this course, and it implies something beginners find surprising:
+<strong>your laptop becomes a server every working day.</strong></p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — you start servers all day long</div>
+  <pre class="code">$ mvn spring-boot:run          # your laptop is now an HTTP server on port 8080
+$ npm run dev                  # Vite/React dev server — your laptop serves on port 3000
+$ uvicorn main:app --reload    # FastAPI server on port 8000
+$ docker run -p 5432:5432 postgres   # your laptop now runs a database server</pre>
+  <p>In each case a process on your machine moved into the <em>listening</em> role: it sits idle, bound to a
+  port (Part 5), waiting for some client to speak first. Meanwhile, the browser tab you test with is the client.
+  Same laptop, both roles, simultaneously.</p>
+</div>
+
+<h3>7.2 One process is usually both client AND server</h3>
+
+<p>Here is the picture that makes microservices make sense. Follow one request through a typical stack and
+watch the roles flip:</p>
+
+<div class="figure-title">Fig 1.8 — The same Spring Boot process plays both roles at once</div>
+<pre class="diagram">
+                  acts as a SERVER              acts as a CLIENT
+                  (accepts requests)            (initiates requests)
+
+  ┌──────────┐    HTTP request     ┌──────────────┐    SQL over TCP    ┌─────────────┐
+  │ Browser  │ ──────────────────► │ Spring Boot  │ ─────────────────► │ PostgreSQL  │
+  │ (React)  │                     │ app on :8080 │                    │ on :5432    │
+  │          │ ◄────────────────── │              │ ◄───────────────── │             │
+  └──────────┘    JSON response    └──────────────┘    result rows     └─────────────┘
+
+      to the browser it is a server; to the database it is a client.
+      add Redis, Kafka, and three more services, and every arrow in your
+      architecture diagram is one of these client–server conversations.
+</pre>
+
+<p>This is why the question "is this machine a client or a server?" has no answer — but "in <em>this</em>
+conversation, who initiated?" always does. Your Spring Boot app is simultaneously: a server to browsers, a
+client to PostgreSQL, a client to Redis, a client to other microservices, and (if it consumes Kafka) a client
+to the Kafka brokers — because the consumer initiates the connection, even though data flows toward it.</p>
+
+<h3>7.3 The alternative shape: peer-to-peer</h3>
+
+<p>Client–server is not the only possible shape. In a <strong>P2P</strong> (peer-to-peer) network, every node
+plays both roles symmetrically with many partners at once — there is no central always-on authority.
+BitTorrent (file sharing), blockchain networks, and parts of video calling (WebRTC — Web Real-Time
+Communication — tries to send media directly between browsers) are P2P. The trade-offs: P2P has no single point
+of failure and scales "for free" with participants, but discovery (finding peers), trust, NAT traversal
+(Part 3 explains why home machines are hard to reach from outside), and consistency are all much harder.
+Backend engineering is overwhelmingly client–server; you should simply know P2P exists and why it is rare in
+business systems: <em>operability</em>. You cannot SSH into your users' machines to debug them.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A client asks; a server answers. They are roles, like "caller" and "callee" on a phone — whoever dials is
+    the client. Your browser is a client of Spring Boot; Spring Boot is a client of the database. The same
+    program can be both at once, in different conversations.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A server process binds to a port and blocks in a listening state; clients initiate connections to that
+    port from ephemeral ports (Part 5 makes this precise). The request–response pair is the atomic unit of the
+    model, and HTTP (Part 7) is its most famous embodiment. Asymmetry simplifies operations: known addresses,
+    central control, professional management on the server side.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"Who initiates" has architectural consequences far beyond vocabulary: firewalls and NAT permit outbound
+    initiation but block inbound by default, which is why webhooks need public endpoints, why Kafka consumers
+    <em>pull</em> rather than brokers pushing, and why long-polling/WebSockets/Server-Sent Events exist — they let
+    the client initiate a connection that the server can later push through, inverting the data flow without
+    inverting the connection direction. When you hear "we need the server to notify the client," your brain
+    should immediately answer: then the client must connect first and keep the pipe open.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">8. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>What is a network protocol, and why are protocols essential?</summary>
+    <p>A protocol is a pre-agreed set of rules two machines follow to communicate: how to represent bits, how to
+    mark message boundaries, how to address recipients, how to detect and recover from errors, how to begin and
+    end exchanges. Protocols are essential because raw signals carry no inherent meaning — without agreement on
+    interpretation, a receiver sees only voltage changes. Strong answers add: protocols are layered (each layer
+    solving one problem and offering a service to the layer above), standardized in RFC documents (Request for
+    Comments) so independent vendors interoperate, and exemplified by the TCP/IP family that the entire Internet
+    shares.</p>
+  </details>
+
+  <details><summary>Explain latency vs bandwidth. Can a link have high bandwidth and high latency?</summary>
+    <p>Latency is the time for data to travel from A to B (distance-dominated, measured in ms); bandwidth is the
+    volume of data transferable per second (capacity, measured in Mbps/Gbps). They are independent: a satellite
+    link or a transcontinental fiber has huge bandwidth and high latency (the classic example: a truck of hard
+    drives — petabytes of bandwidth, days of latency). For request–response workloads like APIs, latency
+    dominates because payloads are small; for bulk transfer, bandwidth dominates. A strong answer mentions RTT
+    (round-trip time) and that sequential round trips (N+1 queries, chatty microservices) multiply latency
+    costs, which no bandwidth upgrade can fix.</p>
+  </details>
+
+  <details><summary>What is the difference between the Internet and a network? And between the Internet and the Web?</summary>
+    <p>A network is one connected, administered island of machines (a home LAN, an office network, a VPC). The
+    Internet is a network <em>of</em> networks: tens of thousands of independently operated networks
+    interconnected by routers and unified by the TCP/IP protocol suite. The Web (World Wide Web) is narrower
+    still: one <em>application</em> running on top of the Internet — documents and APIs delivered over HTTP.
+    Email, SSH, DNS, video calls, and online games all use the Internet but are not the Web. Saying "the
+    Internet" when you mean "the Web" is the everyday conflation; engineers should keep them separate.</p>
+  </details>
+
+  <details><summary>What is the difference between LAN and WAN, and where does an AWS VPC fit?</summary>
+    <p>A LAN covers one site, is owned end-to-end by one party, runs Ethernet/Wi-Fi at gigabit+ speeds with
+    sub-millisecond latency, and is trusted. A WAN connects sites across cities or continents over leased or
+    public infrastructure, with higher latency (tens to hundreds of ms) and no end-to-end trust — hence
+    encryption. An AWS VPC is a <em>virtual LAN</em>: a private, software-defined network you control inside
+    AWS, with LAN-like latency within an Availability Zone. Connecting your office to the VPC (VPN/Direct
+    Connect) or peering VPCs across regions creates WAN links, and architectures must respect the latency and
+    failure characteristics of those links.</p>
+  </details>
+
+  <details><summary>Is a server a special kind of computer?</summary>
+    <p>No — "server" is fundamentally a <em>role</em>: a process that listens for and responds to requests.
+    Any machine can play it; a developer laptop running <code>mvn spring-boot:run</code> is a server. The word
+    is also used loosely for machines dedicated to that role and for rack-mounted hardware, but the precise
+    meaning is the listening process. Good answers demonstrate the role-flip: one Spring Boot process is a
+    server to browsers and simultaneously a client to PostgreSQL and Redis.</p>
+  </details>
+
+  <details><summary>Can one machine be both client and server at the same time? Give a real example.</summary>
+    <p>Yes — it is the normal case. A Spring Boot application accepts HTTP requests from browsers (server role)
+    while initiating connections to PostgreSQL on 5432, Redis on 6379, and downstream microservices (client
+    roles). Even two processes on one laptop do this: your React dev server serves your browser while acting as
+    a proxying client to your backend API. The roles are per-conversation, defined by who initiates.</p>
+  </details>
+
+  <details><summary>Why not connect every computer directly to every other computer?</summary>
+    <p>Full-mesh wiring scales as n×(n−1)/2 links — 4,950 cables for 100 machines, and a new cable to every
+    existing machine each time one joins. Cost, physical ports, and management make it absurd beyond a handful
+    of nodes. Instead we use intermediate devices: switches relay within a network, routers relay between
+    networks, so each machine needs one link. The price is shared capacity and the need for addressing and
+    forwarding logic — which is exactly what Layers 2 and 3 of the OSI model provide.</p>
+  </details>
+
+  <details><summary>What physically travels through a network cable when I send a request?</summary>
+    <p>Encoded signals: voltage transitions on copper, light pulses in fiber, modulated radio waves over Wi-Fi.
+    The OS chops the request into packets; the NIC (network interface card) encodes each packet's bits as
+    signal transitions using schemes that keep sender and receiver clock-synchronized; receiving NICs sample and
+    decode back to bits. Strong answers note that "the data" exists at many representations simultaneously —
+    bytes in RAM, packets in the OS, signals on the wire — and each conversion is a layer boundary (OSI, Part 2).</p>
+  </details>
+
+  <details><summary>Why does a request to a server on another continent take ~250 ms even on gigabit fiber?</summary>
+    <p>Because latency is bounded by distance and the speed of light in fiber (~200,000 km/s, i.e. ~200 km per
+    ms), plus processing delays at every router hop. A 12,000 km path costs ~60 ms one way — 120 ms round trip —
+    before any protocol overhead; TCP and TLS handshakes (Parts 4 and 8) add more round trips. Bandwidth does
+    not help because an API call is small — the time is travel, not transfer. This is the physics behind CDNs,
+    edge computing, regional deployments, and caching.</p>
+  </details>
+
+  <details><summary>What is peer-to-peer, and why do business systems prefer client–server?</summary>
+    <p>P2P makes every node both requester and responder among equals, with no central authority — BitTorrent
+    and blockchains are canonical examples. It removes single points of failure and scales with its users, but
+    makes discovery, trust, NAT traversal, consistency, and especially <em>operations</em> hard: you cannot
+    patch, monitor, or debug machines you do not control. Client–server centralizes state and control where
+    professionals operate it; that operability, plus simpler security and consistency, is why business systems
+    are overwhelmingly client–server.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">9. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "The cloud is somewhere abstract / virtual."</strong><br>
+  ✅ The cloud is physical buildings full of computers, connected by physical fiber, including cables on the
+  ocean floor. Every cloud decision (region, AZ, CDN) is a decision about where on Earth your data sits.
+  Latency to it is governed by geography.</p>
+
+  <p><strong>❌ "Wi-Fi = Internet."</strong><br>
+  ✅ Wi-Fi is only the radio link between your device and your router — the last 10 meters, part of your LAN.
+  The Internet connection is what your ISP provides beyond the router. This is why Wi-Fi can show "full bars"
+  while nothing loads: the LAN is healthy, the WAN link is down. Distinguishing the two is debugging step one.</p>
+
+  <p><strong>❌ "More bandwidth makes everything faster."</strong><br>
+  ✅ Bandwidth helps bulk transfer; it does nothing for round-trip-dominated work like API calls and database
+  queries. A 10× bandwidth upgrade leaves a 20-sequential-query endpoint exactly as slow. Latency is fixed by
+  distance and hops; you fix it by moving data closer or making fewer round trips.</p>
+
+  <p><strong>❌ "A server is a big expensive machine."</strong><br>
+  ✅ A server is a listening process. Your laptop runs several every workday. Conversely, a rack machine running
+  a browser is acting as a client. Roles, not hardware.</p>
+
+  <p><strong>❌ "localhost requests don't involve networking."</strong><br>
+  ✅ A request to <code>localhost:8080</code> traverses the OS's full networking stack — addressing, ports,
+  TCP — via the loopback interface; it just skips the physical cable. That is why port conflicts, connection
+  refusals, and TCP behavior all still happen locally, and why local testing genuinely exercises (most of) the
+  network path.</p>
+
+  <p><strong>❌ "Data is sent as one continuous stream."</strong><br>
+  ✅ Everything is chopped into packets that travel independently — possibly via different routes, arriving out
+  of order or not at all. The illusion of a smooth stream is manufactured by TCP (Part 4). Once you know this,
+  retransmissions, reordering, and "why is my response chunked?" stop being mysterious.</p>
+
+  <p><strong>❌ "The Internet and the Web are the same thing."</strong><br>
+  ✅ The Internet is the global network-of-networks infrastructure; the Web (HTTP + browsers) is one application
+  on it, alongside email, DNS, SSH, gaming, and video protocols. You will build non-Web Internet software
+  constantly: database connections, Kafka, gRPC.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You now know <em>why</em> networks exist, what physically moves, and the ten problems any network must
+  solve. But ten problems solved by dozens of cooperating technologies need an organizing map — otherwise every
+  debugging session is chaos. That map exists: it is the <strong>OSI model</strong>, seven layers that assign
+  every problem (and every protocol, device, and failure) a precise home. It is the single most useful mental
+  tool in networking, and it is next: <a href="part02.html"><strong>Part 2 — The OSI Model</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="index.html"><span class="dir">← Course home</span><span class="t">Networking for Backend Engineers</span></a>
+  <a href="part02.html"><span class="dir">Next →</span><span class="t">Part 2: The OSI Model</span></a>
+</div>
+
+</main>
+</body>
+</html>

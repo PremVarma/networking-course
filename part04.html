@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 4: TCP &amp; UDP — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html" class="active"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 4 of 15</p>
+<h1>TCP &amp; UDP — Moving Data Reliably (or Fast)</h1>
+<p class="lede">Part 3 got your packet to the right machine — and that is <em>everything</em> IP will ever do for
+you. Packets get lost, duplicated, reordered, and corrupted, and IP never apologizes. This part is about the two
+protocols that decide what to do about that: TCP, which manufactures a reliable byte pipe out of unreliable
+parts, and UDP, which honestly refuses to. Every connection your backend has ever opened — to PostgreSQL, Redis,
+Kafka, another microservice — is one of these two, and most of your weirdest production bugs live in this chapter.</p>
+
+<div class="osi-badge">📍 OSI Layer 4 — Transport</div>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#best-effort">The gap Part 3 leaves: IP is best-effort</a></li>
+    <li><a href="#udp">UDP — the thinnest possible protocol</a></li>
+    <li><a href="#tcp-contract">TCP — the contract</a></li>
+    <li><a href="#byte-stream">A stream of bytes, not messages</a></li>
+    <li><a href="#seq-ack">Sequence numbers and ACKs</a></li>
+    <li><a href="#handshake">The three-way handshake</a></li>
+    <li><a href="#lifecycle">Connection states, teardown, TIME_WAIT</a></li>
+    <li><a href="#rst">RST — what error messages really mean</a></li>
+    <li><a href="#retransmission">Retransmission — repairing loss</a></li>
+    <li><a href="#flow-control">Flow control — protecting the receiver</a></li>
+    <li><a href="#congestion">Congestion control — protecting the network</a></li>
+    <li><a href="#nagle">Nagle's algorithm and delayed ACK</a></li>
+    <li><a href="#keepalive">The two keep-alives</a></li>
+    <li><a href="#syn-flood">SYN floods and the accept backlog</a></li>
+    <li><a href="#tcp-vs-udp">TCP vs UDP — making the call</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="best-effort">1. The gap Part 3 leaves: IP is best-effort</h2>
+
+<p>Part 3 ended on what looked like victory: a packet addressed to <code>203.0.113.10</code> left your laptop,
+got NAT-translated at your router, hopped through a dozen routers it had never met, and arrived at the right
+network interface on the right machine, anywhere on Earth. Genuinely one of the great engineering feats of the
+20th century. Now read the fine print of the contract that made it possible:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>IP (Internet Protocol) offers <strong>best-effort delivery</strong>. It will <em>try</em> to deliver each
+  packet. It promises nothing else: not arrival, not arrival <em>once</em>, not arrival <em>in order</em>, not
+  arrival <em>intact</em> — and crucially, <strong>it never tells the sender what happened</strong>. No receipt,
+  no error report, no apology. "Best effort" is the politest possible name for "no guarantees whatsoever."</p>
+</div>
+
+<p>This is not sloppiness — each failure mode falls straight out of how Parts 1–3 said the Internet works:</p>
+
+<ul>
+  <li><strong>Loss.</strong> Routers have finite queues; when traffic arrives faster than a link drains, the
+  router <em>throws packets away</em> — legal, routine, by design. Radio links (Wi-Fi, 4G) add loss from noise.</li>
+  <li><strong>Reordering.</strong> Each packet routes independently (Part 3); if the path changes
+  mid-conversation, packet 7 can overtake packet 6.</li>
+  <li><strong>Duplication.</strong> Retransmission logic plus routing quirks can deliver the same packet twice.</li>
+  <li><strong>Corruption.</strong> Noise flips bits; Layer 2 checksums (Part 2) discard most damaged frames —
+  turning corruption into loss — and the few that slip through are why TCP and UDP carry their own checksums.</li>
+</ul>
+
+<div class="figure-title">Fig 4.1 — What "best effort" actually hands the receiver</div>
+<pre class="diagram">
+   what the sender gave to IP                what arrived at the receiver
+
+   ┌───┐  ┌───┐  ┌───┐  ┌───┐               ┌───┐  ┌───┐  ┌───┐  ┌───┐
+   │ 1 │  │ 2 │  │ 3 │  │ 4 │   ────────►   │ 2 │  │ 1 │  │ 4 │  │ 4 │
+   └───┘  └───┘  └───┘  └───┘               └───┘  └───┘  └───┘  └───┘
+                                            reordered      duplicated
+                                                  packet 3: gone forever
+
+   four packets in: two swapped, one missing, one delivered twice —
+   and IP considers this a SUCCESSFUL day at the office.
+   nobody is notified. nothing is retried. that is the whole contract.
+</pre>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why a transport layer exists</div>
+  <p>No application you have ever written can live on that contract directly. An <code>INSERT INTO orders…</code>
+  where the middle third of the SQL evaporates, a JSON response with its chunks shuffled, a Kafka message
+  delivered twice because the network felt like it — these are not edge cases an app can shrug off. Applications
+  need a different promise: <em>"the bytes I send arrive exactly once, in order, intact — or I find out that they
+  could not."</em> Since routers refuse to make that promise (and we'll see why they're right to refuse),
+  something at the <strong>endpoints</strong> must manufacture reliability out of unreliable parts. That
+  something is the <strong>transport layer</strong> — Layer 4 — and its two famous citizens, TCP and UDP, are
+  the subject of this entire part.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>The ARPANET (the Internet's ancestor — Part 1) originally ran <strong>NCP</strong> (Network Control
+  Program), which simply <em>assumed the network was reliable</em> — reasonably, because the ARPANET's routers
+  (IMPs, Interface Message Processors) did hop-by-hop acknowledgment internally. That worked on one homogeneous
+  network and died as an idea the moment people wanted to interconnect <em>different</em> networks — noisy
+  packet radio, half-second satellite links, lossy early Ethernets. You cannot demand every network on Earth be
+  reliable inside. In May 1974, <strong>Vint Cerf and Bob Kahn</strong> published "A Protocol for Packet Network
+  Intercommunication": one protocol (just called TCP) letting unreliable networks interconnect by pushing
+  reliability to the <em>hosts</em>. By 1978 it was split in two — <strong>IP</strong>, the dumb best-effort
+  forwarding layer any network could implement, and <strong>TCP</strong>, the reliability layer running only at
+  the endpoints. On 1 January 1983 — Part 1's "flag day" — the ARPANET switched off NCP and the TCP/IP era
+  began. UDP was carved out in 1980 (RFC 768) for apps wanting raw datagram service with no reliability
+  machinery at all.</p>
+</div>
+
+<h3>1.1 The end-to-end principle: dumb network, smart edges</h3>
+
+<p>That 1978 split embodies a design philosophy with a name — the <strong>end-to-end principle</strong>,
+formalized in a famous 1984 paper by Saltzer, Reed, and Clark. The argument: features like reliability should
+live at the <em>ends</em> of a communication path, not in the middle, because (a) only the endpoints know what
+the application actually needs — retransmit? how patiently? in what order?; (b) even a perfectly reliable
+middle can't save you — if a router acknowledges your packet and then crashes, hop-by-hop reliability
+guaranteed nothing end to end; and (c) per-conversation bookkeeping for millions of flows would make routers
+slow, expensive, and fragile. So the Internet's core stays <strong>dumb and stateless</strong> — routers
+forward packets and forget them — while intelligence lives at the <strong>edges</strong>, in the operating
+systems of the two endpoint machines.</p>
+
+<div class="figure-title">Fig 4.2 — Transport is end-to-end: routers never read it</div>
+<pre class="diagram">
+   YOUR APP (client)              THE NETWORK CORE                SERVER APP
+  ┌───────────────┐   ┌────────┐   ┌────────┐   ┌────────┐   ┌───────────────┐
+  │  application  │   │ router │   │ router │   │ router │   │  application  │
+  │               │   │        │   │        │   │        │   │               │
+  │  TCP / UDP ◄──┼───┼────────┼───┼────────┼───┼────────┼───┼──► TCP / UDP  │
+  │               │   │        │   │        │   │        │   │               │
+  │  IP           │   │   IP   │   │   IP   │   │   IP   │   │  IP           │
+  │  link         │   │  link  │   │  link  │   │  link  │   │  link         │
+  └───────────────┘   └────────┘   └────────┘   └────────┘   └───────────────┘
+
+   routers parse the frame and the IP header (Part 2's encapsulation),
+   pick the next hop, and forward. the TCP header inside is just opaque
+   payload bytes to them. the "connection" exists ONLY in the memory of
+   the two endpoint operating systems — nowhere in between.
+</pre>
+
+<p>This is why the OSI badge on this page matters (Part 2 callback): a router is a Layer 3 device — it reads
+the frame and IP headers and <em>stops parsing</em>. Every mechanism in this chapter runs in exactly two
+places: your kernel and the server's. The 14 routers in between have no idea a "connection" exists (Part 3's
+NAT is the famous cheat — it peeks into Layer 4 to rewrite ports). The payoff: the core stays simple enough to
+scale to billions of devices, and transports can evolve at the edges — exactly how QUIC (end of this part)
+later deployed a brand-new transport onto the existing Internet with zero router upgrades.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the postal system makes the same deal</div>
+  <p>The post office (Part 1's running analogy) is best-effort too: ordinary letters occasionally vanish, arrive
+  out of order, or show up twice, and no mail truck driver tracks your correspondence. If you need certainty,
+  the postal system doesn't change — <em>you</em> upgrade at the edges: you send <strong>registered mail with
+  numbered receipts</strong>, and you, the sender, keep a ledger and re-send anything unacknowledged. The trucks
+  stay dumb; the sender and recipient get smart. Hold that image: TCP is exactly "registered mail with numbered
+  receipts," implemented by the two endpoints over the same dumb trucks. UDP, coming up first, is the
+  <strong>postcard</strong>: cheap, instant, and entirely unaccounted for.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="udp">2. UDP — the thinnest possible protocol</h2>
+
+<p>We start with UDP (User Datagram Protocol) not because it's less important but because it's <em>simpler</em> —
+so simple that describing it takes one section, and everything afterward is TCP earning its complexity.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Without UDP, every application would be forced through TCP's full machinery: connections, acknowledgments,
+  retransmission, ordering. For some applications that machinery is <strong>wasted weight or actively
+  harmful</strong>. A DNS lookup is one tiny question and answer — a connection setup would triple its cost. A
+  retransmitted live-voice packet arrives <em>after the moment it described</em> — reliability delivering a
+  paperweight. So in 1980, David Reed's UDP (RFC 768) became the escape hatch: hand a single datagram to IP
+  with almost nothing added, and let the application decide what reliability even means for its data.</p>
+</div>
+
+<p>UDP adds exactly four fields — eight bytes — on top of IP:</p>
+
+<div class="figure-title">Fig 4.3 — The entire UDP header: 8 bytes</div>
+<pre class="diagram">
+   bit 0               15 16              31
+   ┌───────────────────┬───────────────────┐
+   │    source port    │ destination port  │   which app sent this /
+   │     (16 bits)     │     (16 bits)     │   which app should get it
+   ├───────────────────┼───────────────────┤
+   │      length       │     checksum      │   header + data length /
+   │     (16 bits)     │     (16 bits)     │   corruption detection
+   └───────────────────┴───────────────────┘
+   ├──────────── then your data ───────────┤
+
+        8 bytes. that is the entire protocol.
+</pre>
+
+<p>Two of those fields answer Part 1's "which app?" problem (problem #6 of the ten). An IP address gets a
+packet to a <em>machine</em> — but the machine runs Spring Boot, PostgreSQL, an SSH daemon, and forty browser
+tabs. A <strong>port</strong> is a 16-bit number (0–65535) naming <em>which program's mailbox</em> the data
+belongs to: PostgreSQL listens on 5432, Redis on 6379, Tomcat on 8080; the source port is the return address.
+That gentle definition is all we need today — Part 5 is entirely about ports and sockets, including where
+source ports come from and what a socket actually is.</p>
+
+<p>Now the defining feature of UDP — the list of things it does <strong>not</strong> do:</p>
+
+<ul>
+  <li><strong>No connection.</strong> There is no handshake, no setup, no teardown, no "session." You fling a
+  datagram at an address and port. The first packet can carry data.</li>
+  <li><strong>No delivery guarantee.</strong> Lost is lost. UDP doesn't know, doesn't retry, doesn't tell you.</li>
+  <li><strong>No ordering.</strong> Datagrams arrive in whatever order the network produces.</li>
+  <li><strong>No duplicate suppression.</strong> Delivered twice? You get it twice.</li>
+  <li><strong>No flow control, no congestion control.</strong> UDP will cheerfully let you firehose a receiver
+  or a congested network as fast as your NIC can transmit. (The checksum — detecting corruption — is the one
+  service it does perform, and even that was optional in IPv4.)</li>
+</ul>
+
+<p>Each datagram is independent, like a postcard: self-addressed, self-contained, unacknowledged. One useful
+consequence: UDP <em>does</em> preserve message boundaries. One <code>send()</code> = one datagram = one
+<code>receive()</code> at the other end. Hold that thought — TCP, surprisingly, will <em>not</em> give you that.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — postcards</div>
+  <p>UDP is the postcard tier of the postal system: cheap to send, no envelope, no receipt, no tracking number.
+  Drop fifty postcards in the box and they may arrive shuffled, and number 37 may never arrive at all — and the
+  postal service is not lying to you, because it never claimed otherwise. When is a postcard the <em>right</em>
+  choice? When the message is tiny, when speed matters more than certainty, or when the information goes stale
+  so fast that re-sending a lost one would be pointless ("wish you were here" three weeks after you got home).
+  Keep that last idea: <strong>late data is useless data</strong> is the single best predictor that a system
+  should use UDP.</p>
+</div>
+
+<h3>2.1 Who actually uses UDP — and why it's the right call</h3>
+
+<ul>
+  <li><strong>DNS (Domain Name System — Part 6).</strong> One question ("what's the IP for
+  <code>api.example.com</code>?"), one answer, each fitting in a single datagram — a handshake would triple the
+  round trips. The resolver handles reliability itself (no answer soon? ask again, or ask another server) and
+  falls back to TCP for oversized responses (Part 6).</li>
+  <li><strong>Live voice and video (Zoom, WebRTC).</strong> If frame 412 is lost, stalling frames 413–500 to
+  retransmit it is the worst response — that moment of the call is already gone. Drop it, interpolate, move on:
+  TCP's reliability is actively <em>harmful</em> here.</li>
+  <li><strong>Multiplayer games.</strong> Only the <em>latest</em> position matters; retransmitting where a
+  player was 200 ms ago is worse than useless. Game netcode sends frequent small UDP updates and shrugs at loss.</li>
+  <li><strong>Metrics fire-and-forget.</strong> StatsD emits counters over UDP (port 8125) so metrics can never
+  slow or break the hot path; losing 0.1% of increments under load is a fine trade for zero added latency.</li>
+  <li><strong>QUIC.</strong> The modern twist: QUIC (the transport under HTTP/3) rebuilds TCP-grade reliability,
+  ordering, and congestion control <em>in userspace, over UDP</em>. Why not improve TCP itself? TCP lives in
+  kernels and middleboxes that take decades to upgrade; UDP passes through everything today. Parts 7–8 pick
+  this story up.</li>
+</ul>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — a DNS lookup on the wire</div>
+  <p>Here is <code>tcpdump</code> watching your machine resolve a hostname. (tcpdump normally prints an arrow
+  between source and destination; we render it as <code>──►</code>.) The entire exchange is two datagrams:</p>
+  <pre class="code">$ sudo tcpdump -n udp port 53
+13:02:11.482910 IP 192.168.1.7.44291 ──► 192.168.1.1.53:
+        12345+ A? api.example.com. (33)
+13:02:11.498530 IP 192.168.1.1.53 ──► 192.168.1.7.44291:
+        12345 1/0/0 A 203.0.113.10 (49)
+
+  two packets. one round trip (~16 ms). zero setup, zero teardown.
+  the same exchange over TCP would cost five packets minimum and
+  twice the latency. the "12345" is a transaction ID the resolver
+  uses to match answer to question — reliability done in the app.</pre>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>UDP is "send and hope": you throw a small packet at an address and port, with no setup and no receipt.
+    It's perfect when the message is tiny (DNS) or goes stale instantly (live video, game positions), because
+    waiting to re-send a lost packet would be slower and more annoying than just losing it.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>UDP adds ports and a checksum to IP — nothing else. No connection state, no ordering, no retransmission,
+    no flow/congestion control; datagram boundaries are preserved 1:1. Applications that choose UDP take over
+    reliability themselves where needed: DNS retries with transaction IDs, video uses jitter buffers and FEC
+    (forward error correction), QUIC implements full reliability in userspace.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>UDP's statelessness is an operational superpower and hazard at once: servers can answer enormous query
+    volumes with no per-client memory (DNS roots), but no handshake means source addresses are trivially spoofed
+    — the root of reflection/amplification DDoS attacks, and the reason UDP services need their own anti-spoofing
+    (DNS cookies, QUIC's address validation). Also note kernel buffers: a burst of datagrams that outruns
+    <code>net.core.rmem_max</code> is silently dropped <em>on your own box</em> — the first place to look when
+    StatsD metrics go missing under load.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="tcp-contract">3. TCP — the contract</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Almost everything a backend does — SQL queries, HTTP APIs, cache reads, message publishing — needs the
+  opposite of a postcard: <em>every byte arrives, exactly once, in order, or the application is told the
+  connection failed.</em> Building that per-application on best-effort IP would mean every developer
+  re-implementing acknowledgment ledgers, timers, retransmission, and reordering buffers — badly, with subtle
+  bugs in each. TCP (Transmission Control Protocol) implements it once, in the kernel, behind the world's most
+  successful abstraction: a plain, reliable, two-way pipe of bytes. Without it, the web and databases as you
+  know them would not exist in recognizable form.</p>
+</div>
+
+<p>TCP's contract has six clauses. Each one is a mechanism we will open up in the sections that follow:</p>
+
+<ol>
+  <li><strong>Reliable</strong> — every byte is accounted for; lost data is detected and retransmitted, and if the
+  network is truly broken, you get an error instead of silence (§9).</li>
+  <li><strong>Ordered</strong> — bytes are delivered to the application in exactly the order they were written,
+  even if packets arrived shuffled (§5).</li>
+  <li><strong>Byte-stream</strong> — TCP moves a continuous stream of bytes with <em>no message boundaries</em> —
+  the most underrated fact in this course (§4).</li>
+  <li><strong>Connection-oriented</strong> — before data flows, both ends establish shared state via a handshake
+  (§6), and tear it down explicitly (§7).</li>
+  <li><strong>Flow-controlled</strong> — a fast sender cannot drown a slow receiver (§10).</li>
+  <li><strong>Congestion-controlled</strong> — a sender backs off when the <em>network</em> is overloaded (§11).</li>
+</ol>
+
+<p>All six clauses run on one toolkit: <strong>number every byte, acknowledge what arrives, time and resend
+what doesn't, buffer at both ends.</strong> TCP's data unit is the <strong>segment</strong> (Part 2's
+vocabulary: a segment rides inside an IP packet inside a link-layer frame). Here is the header that runs the
+show — every field pays for one of the six promises:</p>
+
+<div class="figure-title">Fig 4.4 — The TCP header (20 bytes minimum + options)</div>
+<pre class="diagram">
+   bit 0               15 16              31
+   ┌───────────────────┬───────────────────┐
+   │    source port    │ destination port  │  4 bytes — which apps
+   ├───────────────────┴───────────────────┤
+   │            sequence number            │  4 bytes — stream position of
+   │               (32 bits)               │  this segment's first byte (§5)
+   ├───────────────────────────────────────┤
+   │        acknowledgment number          │  4 bytes — next byte I expect
+   │               (32 bits)               │  FROM you (§5)
+   ├──────┬─────────┬──────┬───────────────┤
+   │ data │reserved │flags │    window     │  4 bytes — header length, the
+   │offset│         │      │   (16 bits)   │  flag bits, receive window (§10)
+   ├──────┴─────────┴──────┼───────────────┤
+   │       checksum        │ urgent pointer│  4 bytes — corruption check /
+   │       (16 bits)       │   (16 bits)   │  (urgent ptr: ~never used now)
+   ├───────────────────────┴───────────────┤
+   │  options (0–40 bytes): MSS, SACK-     │  negotiated mostly during the
+   │  permitted, window scale, timestamps  │  handshake (§6, §9, §10)
+   ├───────────────────────────────────────┤
+   │              your data …              │
+   └───────────────────────────────────────┘
+</pre>
+
+<p>The <strong>flags</strong> are six famous bits (plus two newer ones for ECN — Explicit Congestion
+Notification — that you can ignore for now). You will see them constantly in <code>tcpdump</code> output and
+firewall rules:</p>
+
+<table>
+  <tr><th>Flag</th><th>Name</th><th>Meaning</th><th>You'll meet it in</th></tr>
+  <tr><td><code>SYN</code></td><td>synchronize</td><td>"Let's start a connection; here's my starting sequence number"</td><td>§6 handshake</td></tr>
+  <tr><td><code>ACK</code></td><td>acknowledge</td><td>"The acknowledgment-number field is valid" — set on nearly every segment after the first</td><td>§5</td></tr>
+  <tr><td><code>FIN</code></td><td>finish</td><td>"I have no more data to send" — polite goodbye</td><td>§7 teardown</td></tr>
+  <tr><td><code>RST</code></td><td>reset</td><td>"There is no such connection / abort immediately" — the slammed door</td><td>§8 errors</td></tr>
+  <tr><td><code>PSH</code></td><td>push</td><td>"Deliver this to the app promptly, don't sit on it in buffers"</td><td>tcpdump output</td></tr>
+  <tr><td><code>URG</code></td><td>urgent</td><td>"Urgent data inside" — a 1970s feature, effectively dead today</td><td>history books</td></tr>
+</table>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — registered mail with numbered receipts</div>
+  <p>TCP is the registered-mail tier of our postal system, run entirely by the two correspondents. Every page
+  you mail carries a serial number (sequence numbers); the recipient mails back receipts — "I now hold every
+  page up to #4500" (cumulative ACKs); you keep copies and re-mail anything unconfirmed for too long
+  (retransmission). The correspondence opens by exchanging starting serial numbers (the handshake) and ends
+  with formal goodbye letters in both directions (FIN). The trucks underneath are the same lossy, reordering,
+  best-effort trucks as ever — all the certainty is manufactured by the two of you, at the edges. That is TCP
+  in one paragraph; the rest of this part is the engineering inside it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="byte-stream">4. A stream of bytes, not messages</h2>
+
+<p>Before the handshake and the state machines, one concept — because it is the TCP fact most likely to bite
+you in application code this year. <strong>TCP has no idea what a "message" is.</strong> It accepts bytes from
+your app, pools them, slices them into segments <em>wherever it finds convenient</em>, and delivers an identical
+byte sequence on the far side. How your writes were grouped is not recorded, not transmitted, and not
+reconstructable.</p>
+
+<div class="figure-title">Fig 4.5 — Write boundaries do not survive the trip</div>
+<pre class="diagram">
+   your app                         TCP
+   ────────                         ───
+
+   write("HELLO")  ──►   ┌──────────────────────────────┐
+   write("WORLD")  ──►   │ send buffer:  HELLOWORLD     │  boundaries are gone
+                         │ (just a pool of bytes now)   │  the moment you write
+                         └──────────────┬───────────────┘
+                                        │ TCP cuts segments where IT
+                                        ▼ chooses (MSS, timing, window)
+                            ┌──────────┐  ┌────┐
+                            │ HELLOWOR │  │ LD │        segments on the wire
+                            └──────────┘  └────┘
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+   read() ──► "HELLOWOR" │ receive buffer               │  reads return whatever
+   read() ──► "LD"       │ (or one read: "HELLOWORLD")  │  has arrived so far
+                         └──────────────────────────────┘
+
+   the ONLY guarantee: same bytes, same order.
+   one write may become three reads; three writes may become one read.
+</pre>
+
+<p>Here it is in code you can run tonight. The sender calls <code>write()</code> twice; how many
+<code>data</code> events does the receiver get?</p>
+
+<pre class="code">// sender.js — the app makes TWO writes
+const net = require("net");
+const sock = net.connect(9000, "10.0.1.20", function () {
+  sock.write("HELLO");     // write #1 — 5 bytes
+  sock.write("WORLD");     // write #2 — 5 bytes
+});
+
+// receiver.js — how many 'data' events? NO GUARANTEE WHATSOEVER.
+const net = require("net");
+net.createServer(function (sock) {
+  sock.on("data", function (chunk) {
+    console.log("got", chunk.length, "bytes:", chunk.toString());
+  });
+}).listen(9000);
+
+// on localhost you will usually see ONE event:
+//     got 10 bytes: HELLOWORLD
+// across a real network, under load, you might see:
+//     got 7 bytes: HELLOWO
+//     got 3 bytes: RLD
+// and any other split is equally legal.</pre>
+
+<p>The classic career moment: code that parses "one <code>data</code> event = one JSON message" works perfectly
+on <code>localhost</code> (where writes usually arrive 1:1), survives the demo, then corrupts data in
+production the first time a message straddles two segments. Java devs hit the same wall expecting one
+<code>InputStream.read()</code> to return exactly one logical message.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Because TCP refuses to mark message boundaries, <strong>every application protocol on top of TCP must
+  invent its own framing</strong> — a rule for where messages start and end. The three classic designs:
+  <strong>length prefixes</strong> — "the next 4 bytes say how long the message is" (Kafka's wire protocol and
+  PostgreSQL's both do exactly this); <strong>delimiters</strong> — "a message ends at CRLF" (Redis's RESP
+  protocol, HTTP/1.1 header lines); and <strong>declared length in a header</strong> — HTTP's
+  <code>Content-Length</code>, which Part 7 will show riding on everything you learn today. When you write a
+  custom TCP protocol and forget framing, you haven't written a protocol — you've written a localhost demo.</p>
+</div>
+
+<h3>4.1 MSS vs MTU — how big is a segment?</h3>
+
+<p>How big is a slice? Part 2 introduced the <strong>MTU</strong> (Maximum Transmission Unit) — the largest IP
+packet a link will carry, classically <strong>1500 bytes</strong> for Ethernet. Subtract a 20-byte IP header
+and a 20-byte TCP header: <strong>1460 bytes</strong> of payload. That is the <strong>MSS</strong> (Maximum
+Segment Size) — the most application data one segment can carry. Each side announces its MSS in the handshake
+(watch for <code>mss 1460</code> in §6's tcpdump) and the smaller wins; pre-slicing to fit the MTU avoids IP
+fragmentation (Part 3's slow, fragile fallback). A 1 MB API response therefore leaves as roughly 720
+segments.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>TCP is a conveyor belt of bytes, not a parcel service. You pour bytes in; the same bytes pour out the
+    other end in order — but your neat packages get melted together. If your app needs "messages," it must draw
+    the lines itself, e.g. "first 4 bytes = length of what follows."</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>The kernel coalesces and splits writes into segments bounded by MSS (MTU − IP header − TCP header =
+    1500 − 40 = 1460 on plain Ethernet), influenced by the window (§10), Nagle (§12), and retransmission.
+    Reads return whatever contiguous bytes the receive buffer holds. Robust TCP code always loops: accumulate
+    bytes, repeatedly try to parse complete frames, keep the remainder.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Real stacks complicate the picture further: TSO/GSO offload lets the kernel hand the NIC 64 KB
+    "supersegments" that the hardware slices, and GRO re-merges on receive — so even tcpdump's view differs
+    from the wire. Path MTU discovery adjusts effective MSS when a tunnel (VPN, VXLAN in Kubernetes — Part 12)
+    shrinks the MTU below 1500; when ICMP "fragmentation needed" messages are firewalled away, you get the
+    infamous PMTU black hole: small requests work, big responses hang. If "curl works but the file download
+    stalls at 1460 bytes," you are living this bug.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="seq-ack">5. Sequence numbers and ACKs — the bookkeeping of certainty</h2>
+
+<p>Now open the ledger. TCP numbers <strong>bytes, not segments</strong>. Each direction of the connection picks
+a starting number — the <strong>ISN</strong> (Initial Sequence Number) — and from then on every byte in that
+direction has a position: ISN+1, ISN+2, ISN+3… A segment's <strong>sequence number</strong> field holds the
+stream position of its <em>first</em> payload byte; a segment carrying bytes 4001–4500 has seq=4001 and length
+500.</p>
+
+<p>Acknowledgment runs on one elegant convention — <strong>cumulative ACKs</strong>:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The <strong>acknowledgment number</strong> means: <em>"I have received every byte up to here; this is the
+  next byte I expect."</em> ACK 1001 = "everything through byte 1000 is safely mine; send 1001 next." One number
+  summarizes the entire history of the conversation — which makes ACKs cheap, and makes a <em>lost ACK</em>
+  usually harmless, because any later ACK re-confirms everything before it.</p>
+</div>
+
+<p>Both directions run independently: each side numbers its own outgoing bytes and acknowledges the other's.
+And because every TCP segment has both a sequence field and an ACK field, acknowledgments usually
+<strong>piggyback</strong> on data flowing the other way — a response segment carries new data <em>and</em>
+confirms your request in one packet. Here's a complete worked example: your Spring Boot app sends a 500-byte
+request; PostgreSQL replies with 2,400 bytes (which exceeds one 1460-byte MSS, so it ships as two segments).
+Client ISN = 4000, server ISN = 9000, so first data bytes are 4001 and 9001:</p>
+
+<div class="figure-title">Fig 4.6 — Seq/ACK arithmetic, both directions (numbers are byte positions)</div>
+<pre class="diagram">
+   CLIENT  (its bytes: 4001, 4002, …)        SERVER  (its bytes: 9001, 9002, …)
+         │                                              │
+         │  seq=4001, len=500, ack=9001                 │
+         │  (request bytes 4001–4500; "I expect         │
+         │   your byte 9001 next")                      │
+         │ ─────────────────────────────────────────►   │
+         │                                              │
+         │             seq=9001, len=1460, ack=4501     │
+         │             (response bytes 9001–10460,      │
+         │              piggybacking "got your request  │
+         │              through 4500")                  │
+         │ ◄─────────────────────────────────────────   │
+         │                                              │
+         │             seq=10461, len=940, ack=4501     │
+         │             (response bytes 10461–11400)     │
+         │ ◄─────────────────────────────────────────   │
+         │                                              │
+         │  seq=4501, len=0, ack=11401                  │
+         │  (pure ACK: "I hold everything through       │
+         │   11400" — one number covers BOTH segments)  │
+         │ ─────────────────────────────────────────►   │
+         │                                              │
+</pre>
+
+<p>Check the arithmetic — it's how you read any tcpdump capture: the client's 500 bytes occupy 4001–4500, so
+the server ACKs 4501; the server's segments cover 9001–11400, so the client ACKs 11401. Had an earlier ACK been
+lost, the final one still confirms everything — cumulative ACKs are self-healing. Lost <em>data</em>, and the
+ledger that stops adding up, is §9's story. But first: where do those ISNs come from? Each side must learn the
+other's starting number before any bookkeeping can work — which is exactly what the handshake is for.</p>
+
+<!-- ============================================================ -->
+<h2 id="handshake">6. The three-way handshake</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>TCP's machinery requires shared state: each side must know the other's ISN (or no ACK arithmetic works),
+  agree on options (MSS, SACK, window scaling), and allocate buffers and a control block in the kernel. None of
+  that exists for a new peer — so before the first data byte, both sides must <em>synchronize</em>. The
+  handshake is that synchronization, and it doubles as proof of life: each side demonstrates it can both send
+  to and receive from the other. Without it, you could ACK nothing, order nothing, retransmit nothing — every
+  promise in §3 depends on these three packets.</p>
+</div>
+
+<div class="figure-title">Fig 4.7 — The three-way handshake (SYN, SYN-ACK, ACK)</div>
+<pre class="diagram">
+   CLIENT (Spring Boot)                        SERVER (PostgreSQL :5432)
+   state: CLOSED                               state: LISTEN
+         │                                              │
+         │  1. SYN  seq=x                               │
+         │     "let's talk; my ISN is x;                │
+         │      mss 1460, sackOK, wscale 7"             │
+         │ ─────────────────────────────────────────►   │
+   SYN_SENT                                    SYN_RECEIVED
+         │                                              │
+         │  2. SYN-ACK  seq=y, ack=x+1                  │
+         │     "got your x (proof I can hear you);      │
+         │      my ISN is y; here are MY options"       │
+         │ ◄─────────────────────────────────────────   │
+         │                                              │
+         │  3. ACK  ack=y+1                             │
+         │     "got your y"                             │
+         │ ─────────────────────────────────────────►   │
+   ESTABLISHED                                 ESTABLISHED
+         │                                              │
+         │  ◄────────── data may now flow ──────────►   │
+         │                                              │
+   cost: exactly one round trip (RTT) before the client
+   may send its first data byte — packet 3 can already
+   carry data along with the ACK
+</pre>
+
+<p>Why exactly <strong>three</strong>? Count what must be proven. A connection needs <em>both</em> ISNs
+delivered <em>and</em> acknowledged — x must reach the server and be confirmed back; y must reach the client
+and be confirmed back. That is four logical messages: SYN(x), ACK(x), SYN(y), ACK(y). But the middle two travel
+the same direction at the same moment, so TCP merges them into one packet — the SYN-ACK — giving three. Two
+packets cannot work: after just SYN and SYN-ACK, the server has no evidence its y ever arrived — it would be
+running a connection on an unconfirmed number, and a connection request from a long-delayed duplicate SYN
+(from a connection that no longer exists) would be indistinguishable from a real one. Three is not a
+convention; it is the provable minimum. Note also the +1s: a SYN <em>consumes one sequence number</em> even
+though it carries no data — that's why the ACKs say x+1 and y+1, and it's how the handshake itself gets
+reliability (an unACKed SYN is retransmitted like any other byte).</p>
+
+<h3>6.1 Why ISNs are randomized</h3>
+
+<p>If every connection started at sequence 0, two ugly things happen. <strong>Security:</strong> an off-path
+attacker who can guess your sequence numbers can forge segments that land inside your window — injecting an
+RST to kill a connection (a real attack against long-lived BGP router sessions) or even injecting data;
+predictable ISNs powered the famous 1990s IP-spoofing attacks, so modern stacks (RFC 6528) derive the ISN from
+a keyed hash of the connection's addresses and ports plus a clock. <strong>Correctness:</strong> address/port
+pairs get reused over time, and a delayed packet from the <em>previous</em> connection could wander into the
+new one — widely-spaced random ISNs make it fall outside the valid window and be discarded instead of accepted
+as fresh data. (TIME_WAIT in §7 is the other half of this defense.)</p>
+
+<h3>6.2 A real handshake in tcpdump</h3>
+
+<p>This is your Spring Boot app opening a connection to PostgreSQL, captured with tcpdump. Flag shorthand:
+<code>[S]</code> = SYN, <code>[S.]</code> = SYN+ACK (the dot means ACK), <code>[.]</code> = plain ACK.
+(tcpdump's arrow is rendered here as <code>──►</code>.)</p>
+
+<pre class="code">$ sudo tcpdump -n -S tcp port 5432
+12:31:08.405112 IP 10.0.1.7.51742 ──► 10.0.1.20.5432:
+    Flags [S], seq 2837514871, win 64240,
+    options [mss 1460, sackOK, TS val 88321 ecr 0, nop, wscale 7], length 0
+        packet 1 — SYN. "my ISN is 2837514871. I take segments up to
+        1460 bytes; I support SACK (§9), timestamps, and window
+        scaling ×2^7 (§10)." options ride ONLY in the handshake.
+
+12:31:08.405798 IP 10.0.1.20.5432 ──► 10.0.1.7.51742:
+    Flags [S.], seq 901442310, ack 2837514872, win 65160,
+    options [mss 1460, sackOK, TS val 5512 ecr 88321, nop, wscale 7], length 0
+        packet 2 — SYN-ACK. "ack 2837514872 = your ISN + 1: I heard
+        you. my ISN is 901442310, and here are my options."
+
+12:31:08.405912 IP 10.0.1.7.51742 ──► 10.0.1.20.5432:
+    Flags [.], ack 901442311, win 502, length 0
+        packet 3 — ACK. "your ISN + 1: I heard you too."
+        connection ESTABLISHED on both ends. elapsed: 0.8 ms on
+        this LAN. the PostgreSQL startup message may now be sent.</pre>
+
+<h3>6.3 The handshake tax — and why connection pooling exists</h3>
+
+<p>The handshake costs <strong>one full RTT before the first useful byte</strong> (Part 1: RTT — round-trip
+time — is the distance tax physics charges). On a LAN, sub-millisecond and ignorable. Cross-region, it is not —
+and it's only the start, because a fresh database connection stacks <em>more</em> round trips on top: TLS
+negotiation (Part 8) and PostgreSQL's own startup and authentication exchange. The arithmetic for one
+freshly-opened connection per request:</p>
+
+<table>
+  <tr><th>Cost before the first query</th><th>Same AZ — RTT ≈ 1 ms</th><th>Cross-region — RTT ≈ 70 ms</th></tr>
+  <tr><td>TCP handshake (1 RTT)</td><td>1 ms</td><td>70 ms</td></tr>
+  <tr><td>TLS handshake (~2 RTT, Part 8)</td><td>2 ms</td><td>140 ms</td></tr>
+  <tr><td>PostgreSQL startup + auth (~3 RTT)</td><td>3 ms</td><td>210 ms</td></tr>
+  <tr><td><strong>Total connection tax, per request</strong></td><td><strong>~6 ms</strong></td><td><strong>~420 ms</strong></td></tr>
+  <tr><td><strong>With a connection pool (HikariCP)</strong></td><td><strong>~0 ms</strong></td><td><strong>~0 ms</strong> — paid once at startup</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>This is <strong>the</strong> reason connection pooling exists. HikariCP is not a Java optimization — it is
+  a <em>TCP optimization</em>: pay the connection tax once per pooled connection at startup, then amortize it
+  across millions of queries. The same physics explains HTTP keep-alive (one TCP connection, many requests —
+  Part 7) and why Kafka and Redis clients hold sockets open for hours. At 70 ms RTT, a 5 ms query costs ~75 ms
+  un-pooled: pooling is a 15× speedup you get by <em>not doing work</em>.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the handshake is exchanging receipt books</div>
+  <p>Before our registered-mail correspondence begins: "I'd like to correspond; my receipt book starts at
+  number 2,837,514,871." — "Received; mine starts at 901,442,310." — "Received." Three letters, no fewer, and
+  both ledgers are synchronized. And if the correspondence will span many exchanges, you can see why we keep
+  the channel open (pooling) rather than re-exchanging receipt books before every single letter.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Before talking, both computers swap "hello" notes: client says hello with a starting number, server says
+    "got it, here's mine," client says "got yours." Three messages, one round trip, and now both sides can track
+    every byte. Opening connections is expensive over distance, so backends open them once and reuse them — that
+    is all a connection pool is.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>SYN(seq=x) → SYN-ACK(seq=y, ack=x+1) → ACK(ack=y+1); both ISNs exchanged AND acknowledged, which two
+    packets cannot achieve. SYN/FIN each consume one sequence number. Options (MSS, SACK-permitted, window
+    scale, timestamps) are negotiated only here — they cannot be added later. Total cost: 1 RTT, which compounds
+    with TLS and application auth into the "connection tax" that pooling and keep-alive amortize.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The client may send data with packet 3 (zero extra cost), and TCP Fast Open (TFO) even allows data on the
+    SYN for repeat connections via a server-issued cookie — though middleboxes mangled TFO badly enough that it
+    never conquered the public Internet; that lesson ("you can't upgrade TCP in place") is a direct cause of
+    QUIC-over-UDP, which folds transport and crypto setup into a single round trip (and zero for resumption).
+    Also know: <code>connect()</code> returning success only proves the handshake finished — the server
+    <em>process</em> may still be wedged; that's why health checks speak the application protocol, not just TCP
+    (Part 9).</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="lifecycle">7. Connection states, teardown, and TIME_WAIT</h2>
+
+<p>From the kernel's point of view, every TCP connection is a small state machine. You met three states in the
+handshake ladder; here is the full cast. This table is worth genuinely memorizing — these names are exactly
+what <code>ss</code> and <code>netstat</code> print at 3 a.m. when production is on fire:</p>
+
+<table>
+  <tr><th>State</th><th>One-line meaning</th></tr>
+  <tr><td><code>LISTEN</code></td><td>A server socket waiting for SYNs — Tomcat parked on 8080, PostgreSQL on 5432.</td></tr>
+  <tr><td><code>SYN_SENT</code></td><td>Client sent a SYN, awaiting the SYN-ACK. Piles up here = the far side isn't answering (§8).</td></tr>
+  <tr><td><code>SYN_RECEIVED</code></td><td>Server got the SYN, sent SYN-ACK, awaiting the final ACK (the "half-open" state — §14).</td></tr>
+  <tr><td><code>ESTABLISHED</code></td><td>Handshake done; data can flow. The healthy steady state — usually most of your sockets.</td></tr>
+  <tr><td><code>FIN_WAIT_1</code></td><td>I called <code>close()</code>, sent my FIN, waiting for it to be ACKed.</td></tr>
+  <tr><td><code>FIN_WAIT_2</code></td><td>My FIN is ACKed; now waiting for the <em>peer's</em> FIN (half-closed: I can still receive).</td></tr>
+  <tr><td><code>CLOSE_WAIT</code></td><td>Peer sent FIN; the kernel ACKed it; now waiting for <strong>my application</strong> to call <code>close()</code>. ⚠ piles up only through app bugs.</td></tr>
+  <tr><td><code>LAST_ACK</code></td><td>I was in CLOSE_WAIT, finally sent my FIN, waiting for its ACK.</td></tr>
+  <tr><td><code>TIME_WAIT</code></td><td>Connection fully closed, but I (the active closer) linger 2×MSL to mop up stragglers. Normal!</td></tr>
+  <tr><td><code>CLOSED</code></td><td>No connection. The socket's memory is freed — this state is invisible in listings.</td></tr>
+</table>
+
+<p>The two journeys through that machine to memorize: the <strong>active closer</strong> — whoever calls
+<code>close()</code> first — walks ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED; the
+<strong>passive closer</strong> walks ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED, and its CLOSE_WAIT ends
+only when the <em>application</em> calls <code>close()</code>.</p>
+
+<h3>7.1 Reading <code>ss -tan</code> like an operator</h3>
+
+<p><code>ss</code> (socket statistics — the modern replacement for <code>netstat</code>) with
+<code>-tan</code> = TCP, all states, numeric addresses. Here's a Spring Boot box mid-flight, annotated:</p>
+
+<pre class="code">$ ss -tan
+State       Recv-Q  Send-Q   Local Address:Port      Peer Address:Port
+
+LISTEN      0       100            0.0.0.0:8080           0.0.0.0:*
+LISTEN      0       4096         127.0.0.1:5432           0.0.0.0:*
+ESTAB       0       0             10.0.1.7:8080      203.0.113.45:53210
+ESTAB       0       0             10.0.1.7:51742        10.0.1.20:5432
+ESTAB       0       36            10.0.1.7:51750        10.0.1.20:5432
+TIME-WAIT   0       0             10.0.1.7:49832        10.0.1.30:6379
+CLOSE-WAIT  1       0             10.0.1.7:8080      203.0.113.88:41122
+
+line 1: Tomcat listening. on LISTEN rows the columns change meaning:
+        Send-Q 100 = accept-backlog LIMIT (acceptCount, §14);
+        Recv-Q = connections queued right now.
+line 2: local PostgreSQL, bound to loopback only (Part 3).
+line 3: a user's request from the public internet, in flight.
+lines 4–5: two HikariCP pool connections — warm, reused, exactly as
+        §6 prescribed. Send-Q 36 = bytes sent, not yet ACKed.
+line 6: an un-pooled Redis call we just closed — WE hold the
+        TIME_WAIT. a few: fine. thousands: connection churn.
+line 7: ⚠ peer hung up; our app never called close(). Recv-Q 1 =
+        unread bytes. CLOSE-WAIT pileups are ALWAYS an app bug.</pre>
+
+<h3>7.2 Closing: the four-way teardown and half-close</h3>
+
+<p>Opening takes three packets; closing politely takes <strong>four</strong>. Why the asymmetry? Because a TCP
+connection is two independent byte streams, and each direction must be closed by its own sender. "I'm done
+talking" does not imply "I'm done listening" — after you send your FIN, the peer may legitimately keep streaming
+data to you for as long as it likes (this is <strong>half-close</strong>), and you keep ACKing it. So each
+direction gets its own FIN and its own ACK:</p>
+
+<div class="figure-title">Fig 4.8 — Four-way termination (with half-close in the middle)</div>
+<pre class="diagram">
+   CLIENT (active closer)                      SERVER (passive closer)
+   ESTABLISHED                                 ESTABLISHED
+         │                                              │
+         │  1. FIN  ("I have nothing more to send")     │
+         │ ─────────────────────────────────────────►   │
+   FIN_WAIT_1                                  CLOSE_WAIT
+         │                                              │
+         │  2. ACK  ("understood")                      │
+         │ ◄─────────────────────────────────────────   │
+   FIN_WAIT_2                                           │
+         │                                              │
+         │      ◄──── server may KEEP SENDING ────      │
+         │      (half-close: client is done talking     │
+         │       but still receives and ACKs)           │
+         │                                              │
+         │  3. FIN  ("now I am done too")               │
+         │ ◄─────────────────────────────────────────   │
+         │                                       LAST_ACK
+         │  4. ACK                                      │
+         │ ─────────────────────────────────────────►   │
+   TIME_WAIT                                    CLOSED
+         │                                              │
+         │  …lingers 2 × MSL, then CLOSED…              │
+</pre>
+
+<p>Half-close is not a curiosity — it's an API you've used: Java's <code>socket.shutdownOutput()</code> and
+Node's <code>sock.end()</code> send a FIN while leaving the read side open ("here's my full request; I'll wait
+for your full response"). When both FINs happen to cross simultaneously, the ACKs can ride along and you'll see
+three packets — but the logical model is always: <em>each direction closes independently</em>.</p>
+
+<h3>7.3 TIME_WAIT — the misunderstood hero</h3>
+
+<p>After sending the final ACK (packet 4), the <strong>active closer</strong> — whoever sent the first FIN —
+does not go straight to CLOSED. It parks in <code>TIME_WAIT</code> for <strong>2 × MSL</strong> (Maximum
+Segment Lifetime — the longest a segment is presumed able to wander the network; the spec says MSL = 2 minutes,
+so 4 minutes of waiting; Linux hardcodes the whole wait to 60 seconds). Two jobs justify the wait:</p>
+
+<ol>
+  <li><strong>The final ACK might be lost.</strong> If it is, the server — stuck in LAST_ACK — retransmits its
+  FIN. <em>Someone must still be at the address to re-ACK it</em>, or the server's clean shutdown turns into an
+  error:</li>
+</ol>
+
+<div class="figure-title">Fig 4.9 — TIME_WAIT saving a clean shutdown</div>
+<pre class="diagram">
+   CLIENT                                       SERVER
+   TIME_WAIT                                   LAST_ACK
+         │                                              │
+         │  4. ACK                                      │
+         │ ────────────────X                            │
+         │           (lost in transit)                  │
+         │                                              │
+         │       …server hears nothing, so it           │
+         │        retransmits its FIN…                  │
+         │  FIN (again)                                 │
+         │ ◄─────────────────────────────────────────   │
+         │                                              │
+         │  client is STILL THERE — re-sends the ACK    │
+         │ ─────────────────────────────────────────►   │
+         │                                        CLOSED│
+         │                                              │
+   had the client vanished straight to CLOSED, that retransmitted
+   FIN would hit a socket that "does not exist" — answered by RST —
+   and the server would log an error for a perfectly clean goodbye
+</pre>
+
+<ol start="2">
+  <li><strong>Stray old segments must die before the address pair is reused.</strong> The connection is named by
+  its 4-tuple — source IP, source port, destination IP, destination port (Part 5 formalizes this). If a new
+  connection reused the exact same tuple immediately, a delayed segment from the <em>old</em> connection could
+  arrive and land inside the <em>new</em> connection's sequence window: data corruption by ghost. Waiting 2×MSL
+  guarantees every wanderer from the old conversation has expired before the name can be reused.</li>
+</ol>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — ops wisdom: diagnosing a wall of CLOSE_WAIT or TIME_WAIT</div>
+  <p><strong>Thousands of CLOSE_WAIT = your code is leaking sockets.</strong> CLOSE_WAIT means the peer hung up
+  and the kernel is waiting for <em>your application</em> to call <code>close()</code> — forever, if you never
+  do. Classic causes: an HTTP client response body never closed, a JDBC (Java Database Connectivity) connection
+  opened outside the pool, an exception path that skips cleanup. The kernel cannot fix your leak;
+  try-with-resources can:</p>
+  <pre class="code"># count sockets by state — the 3 a.m. command
+$ ss -tan | awk '{print $1}' | sort | uniq -c | sort -rn
+   4811 CLOSE-WAIT     ⚠ this number should be ~0
+    212 ESTAB
+     63 TIME-WAIT
+
+// the Java fix — close() runs on EVERY path, exceptions included:
+try (CloseableHttpResponse resp = httpClient.execute(req)) {
+    process(resp.getEntity().getContent());
+}   // closed here — the FIN goes out, CLOSE_WAIT resolves
+
+try (Connection c = dataSource.getConnection();
+     PreparedStatement ps = c.prepareStatement(SQL)) {
+    // pooled: close() returns it to HikariCP instead of leaking it
+}</pre>
+  <p><strong>Thousands of TIME_WAIT = you're churning short-lived connections.</strong> Usually a hot loop
+  opening a fresh Redis/HTTP/DB connection per call. Not a leak — each entry expires in 60 s — but it burns
+  ephemeral ports: with ~28k usable ports (Linux default 32768–60999) and a 60 s wait, ~470 new connections per
+  second to one destination is the hard ceiling before exhaustion. The fix is pooling/keep-alive, not sysctl
+  folklore (<code>tcp_tw_reuse</code> is a narrow timestamps-dependent optimization; the dangerous
+  <code>tcp_tw_recycle</code> was removed in Linux 4.12 for breaking clients behind NAT).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rst">8. RST — what error messages really mean</h2>
+
+<p>FIN is the polite goodbye. <strong>RST (reset) is the slammed door</strong>: "there is no such conversation —
+stop immediately." A kernel sends RST when a segment arrives for a connection it has no record of: a SYN to a
+port nobody is listening on, data for a connection that died with its process, anything after an abort. No
+ceremony, no TIME_WAIT — and unlike FIN, an RST can mean in-flight data was discarded. This one flag is behind
+the error messages backend engineers stare at most, and learning to read them is debugging gold:</p>
+
+<div class="figure-title">Fig 4.10 — "Connection refused" vs "connection timed out" on the wire</div>
+<pre class="diagram">
+  SCENARIO A — "connection refused" (instant, definitive)
+
+   CLIENT                                      SERVER (nothing on :5433)
+         │                                              │
+         │  SYN ────────────────────────────────────►   │ OS checks its list:
+         │                                              │ no LISTEN on 5433
+         │  ◄──────────────────────────────────── RST   │ "no such service"
+         │                                              │
+   fails in ONE round trip. the machine is up, the path works,
+   the OS answered — there is simply no listener on that port.
+
+  SCENARIO B — "connection timed out" (slow, ambiguous)
+
+   CLIENT                        FIREWALL / SECURITY GROUP        SERVER
+         │                                  │                        │
+         │  SYN ─────────────────────────►  X  (silently dropped)    │
+         │  SYN  retry ~1 s later ───────►  X                        │
+         │  SYN  retry ~2 s later ───────►  X                        │
+         │  SYN  ~4 s, ~8 s, ~16 s, … ───►  X                        │
+         │                                  │                        │
+   the client retransmits with exponential backoff and gives up
+   after ~2 minutes (Linux default: 6 SYN retries ≈ 127 s).
+   the server never even knew you tried.
+</pre>
+
+<p>Map this straight onto the exceptions in your logs:</p>
+
+<table>
+  <tr><th>What you see</th><th>What happened on the wire</th><th>Java</th><th>Node</th><th>Usual culprits</th></tr>
+  <tr><td><strong>Connection refused</strong></td><td>SYN answered by RST — instant</td><td><code>ConnectException: Connection refused</code></td><td><code>ECONNREFUSED</code></td><td>Service down; wrong port; bound to <code>127.0.0.1</code> only (Part 3); Docker port not mapped</td></tr>
+  <tr><td><strong>Connection timed out</strong></td><td>SYNs silently dropped — slow</td><td><code>SocketTimeoutException: connect timed out</code></td><td><code>ETIMEDOUT</code></td><td>Firewall or AWS Security Group (SGs <em>drop</em>, never reject — Part 11); wrong IP; host down; no route back (Part 3)</td></tr>
+  <tr><td><strong>Connection reset</strong> (mid-stream)</td><td>RST on an ESTABLISHED connection</td><td><code>SocketException: Connection reset</code></td><td><code>ECONNRESET</code></td><td>Peer crashed or rebooted (no memory of you = RST); an idle middlebox — LB idle timeout (Part 9), NAT eviction — killed the path</td></tr>
+  <tr><td><strong>Broken pipe</strong> (on write)</td><td>Wrote into a connection the peer already closed/reset</td><td><code>SocketException: Broken pipe</code></td><td><code>EPIPE</code></td><td>Client disconnected mid-response; you kept streaming after its FIN/RST</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>Refused is fast and informative; timeout is slow and ambiguous.</strong> Refused proves the path
+  works end to end — routing, NAT, firewalls all passed — and an OS personally told you "no listener here":
+  suspect the destination (wrong port, dead process, loopback-only bind). Timeout proves only that
+  <em>something, somewhere</em> ate your SYNs. So the first question in any connectivity incident: <em>did it
+  fail in milliseconds or in minutes?</em> The answer halves the search space before you type a command.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="retransmission">9. Retransmission — how loss actually gets repaired</h2>
+
+<p>Back to the ledger from §5. The sender keeps a copy of every transmitted-but-unACKed byte. Two separate
+tripwires decide when a copy gets re-sent.</p>
+
+<h3>9.1 Tripwire one: the retransmission timer (RTO)</h3>
+
+<p>For its oldest unACKed data the sender runs a timer — the <strong>RTO</strong> (Retransmission TimeOut). If
+it fires before an ACK covers that data, the sender assumes loss and retransmits. The timer must adapt — 1 ms
+is absurd across an ocean, 1 s absurd within a rack — so TCP continuously measures its own segments' RTT and
+maintains a <strong>smoothed RTT estimate</strong> (SRTT) plus a variance estimate: RTO ≈ <em>SRTT + 4 ×
+variance</em> (the Jacobson/Karels algorithm), floored at 200 ms on Linux, starting at 1 s before any
+measurement exists. Each consecutive failure <strong>doubles</strong> the RTO — the same exponential backoff
+SYNs used in Fig 4.10, so a dead peer is probed gently rather than hammered.</p>
+
+<div class="figure-title">Fig 4.11 — Recovery by timeout: correct, but expensive</div>
+<pre class="diagram">
+   SENDER                                       RECEIVER
+         │                                              │
+         │  seq=1001, len=1000 ────────X                │
+         │                      (segment lost)          │
+         │                                              │
+         │        … silence — nothing to ACK …          │
+         │                                              │
+         │  RTO fires (~200 ms of dead air)             │
+         │  seq=1001, len=1000  (retransmission)        │
+         │ ─────────────────────────────────────────►   │
+         │                                              │
+         │  ◄────────────────────────────  ack=2001     │
+         │                                              │
+   cost of a timeout: an entire RTO of stalled pipe — and if the
+   retransmission also dies, the wait doubles each time.
+   this is why loss murders your p99 latency long before it
+   shows up in average throughput.
+</pre>
+
+<h3>9.2 Tripwire two: duplicate ACKs and fast retransmit</h3>
+
+<p>Timeouts are the safety net, but there's a faster clue. Remember cumulative ACKs: a receiver that gets bytes
+<em>out of order</em> (segment 2 arrived, segment 1 didn't) can only re-ACK the last in-order byte it has. Each
+out-of-order arrival therefore produces another identical ACK — a <strong>duplicate ACK</strong>. One duplicate
+might just be reordering; <strong>three duplicate ACKs</strong> are treated as a confession that exactly one
+segment died while its successors survived — so the sender retransmits it immediately, <em>without waiting for
+the RTO</em>. This is <strong>fast retransmit</strong>:</p>
+
+<div class="figure-title">Fig 4.12 — Recovery by fast retransmit: three duplicate ACKs</div>
+<pre class="diagram">
+   SENDER                                       RECEIVER
+         │                                              │
+         │  seq=1001, len=1000 ────────X   (lost)       │
+         │  seq=2001, len=1000 ────────────────────►    │ expected 1001!
+         │  ◄────────────────────────────  ack=1001     │ dup ACK #1
+         │  seq=3001, len=1000 ────────────────────►    │ buffered, still
+         │  ◄────────────────────────────  ack=1001     │ dup ACK #2
+         │  seq=4001, len=1000 ────────────────────►    │ buffered…
+         │  ◄────────────────────────────  ack=1001     │ dup ACK #3
+         │                                              │
+         │  three dups = verdict: 1001–2000 died.       │
+         │  retransmit NOW — no RTO wait:               │
+         │  seq=1001, len=1000 ────────────────────►    │
+         │                                              │
+         │  ◄────────────────────────────  ack=5001     │
+         │     the cumulative ACK LEAPS forward —       │
+         │     2001–5000 were waiting in the receive    │
+         │     buffer all along                         │
+</pre>
+
+<p>One refinement deserves its paragraph: <strong>SACK</strong> (Selective ACKnowledgment). Cumulative ACKs
+cannot describe holes — only "everything up to N." With the <code>sackOK</code> option (negotiated in the
+handshake — it was in our tcpdump), the receiver attaches detail: "ack=1001, but I also hold 2001–5000," so
+the sender retransmits <em>only</em> the hole instead of guessing. On lossy paths (Wi-Fi, congested long-haul
+links) SACK is the difference between a hiccup and a collapse, which is why every modern stack negotiates it
+by default.</p>
+
+<!-- ============================================================ -->
+<h2 id="flow-control">10. Flow control — protecting the receiver</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this exists</div>
+  <p>Reliability creates a new problem. The receiver's kernel buffers arriving bytes until the application
+  reads them — and applications stall: GC (garbage collection) pauses, slow disks, a phone on a weak signal.
+  A fast sender transmitting into a full buffer forces drops — which TCP's rules would dutifully retransmit
+  into the same full buffer, forever. The fix: the receiver continuously tells the sender how much room it
+  has, and the sender never exceeds it. That is <strong>flow control</strong>.</p>
+</div>
+
+<p>The mechanism is the <strong>window</strong> field you saw in the header (§3): in <em>every</em> segment it
+sends, the receiver advertises its <strong>receive window</strong> — <strong>rwnd</strong> — the number of
+bytes of buffer space it currently has free. The sender may have at most that many bytes
+<em>in flight</em> (sent but unACKed) at any moment. Visualized over the sender's outgoing stream, this is the
+famous <strong>sliding window</strong>:</p>
+
+<div class="figure-title">Fig 4.13 — The sliding window, from the sender's seat</div>
+<pre class="diagram">
+            the sender's view of its own outgoing byte stream
+
+  bytes:   …1000          2000            3500                5000…
+   ┌──────────────┬───────────────┬─────────────────┬──────────────────┐
+   │  sent and    │  sent, NOT    │  may send NOW   │  may NOT send    │
+   │  ACKed       │  yet ACKed    │  (room left in  │  yet (beyond     │
+   │  (retired)   │  (in flight)  │   the window)   │   the window)    │
+   └──────────────┴───────────────┴─────────────────┴──────────────────┘
+                  ▲                                 ▲
+                  └── window starts at the          └── window ends at
+                      oldest unACKed byte               start + window size
+
+   every arriving ACK slides the whole window to the right: bytes
+   retire on the left, new bytes become sendable on the right.
+   in-flight bytes never exceed the advertised window.
+</pre>
+
+<p>The beautiful edge case: a completely full receiver advertises <strong>rwnd = 0</strong> — the
+<strong>zero window</strong> — and the sender must stop entirely, no matter how much data is queued. Picture
+PostgreSQL mid-stream while your app sits in a GC pause: the receive buffer fills, <code>win 0</code> goes out,
+and the database falls silent. To avoid deadlock (the "window reopened" ACK could itself be lost), the sender
+keeps sending tiny <strong>persist probes</strong> — "any room yet?" — with backoff, until an ACK finally
+advertises space and data flows again.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — you have used flow control without knowing it</div>
+  <p><strong>Streaming a huge PostgreSQL result.</strong> You stream a 10-million-row <code>ResultSet</code>
+  with a small <code>fetchSize</code>, processing slowly: your receive buffer fills, rwnd hits zero, and
+  <em>PostgreSQL itself stops sending</em> — backpressure propagates from your <code>while (rs.next())</code>
+  loop into the database's network stack, no code required. <strong>A slow HTTP client</strong> on 2G
+  downloading your 40 MB report throttles Tomcat with its rwnd; the servlet thread blocks inside
+  <code>outputStream.write()</code> — one way slow clients pin server threads (Part 9's buffering proxies
+  rescue this). <strong>Node makes it visible:</strong> <code>sock.write()</code> returning <code>false</code>
+  means the pipe is full; the <code>drain</code> event is the window reopening. Node's stream backpressure API
+  is TCP flow control surfacing into JavaScript.</p>
+</div>
+
+<h3>10.1 Window scaling — when 64 KB stopped being enough</h3>
+
+<p>The window field is 16 bits: maximum <strong>65,535 bytes</strong> — generous in 1981, crippling now.
+Recall the <strong>BDP</strong> (bandwidth-delay product) from Part 1: the pipe holds bandwidth × RTT. A 1 Gbps
+path at 100 ms RTT holds 125,000,000 bytes/s × 0.1 s = <strong>12.5 MB</strong> in flight — but a sender capped
+at 64 KB unACKed transmits 64 KB then idles a full RTT for ACKs: 65,535 ÷ 0.1 s ≈ 5.2 Mbps. On a gigabit link.
+<em>That</em> is why the handshake negotiated <code>wscale 7</code>: the <strong>window scale</strong> option
+multiplies the advertised window by 2^7 = 128 (shifts up to 14 allow windows near 1 GB). Negotiable only in
+the SYN exchange — one more thing a connection cannot change after birth.</p>
+
+<!-- ============================================================ -->
+<h2 id="congestion">11. Congestion control — protecting the network</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — the day the Internet choked</div>
+  <p>Original TCP had flow control only: it protected receivers and trusted the <em>network</em> to cope. In
+  October 1986 it stopped coping: the link between Lawrence Berkeley Laboratory and UC Berkeley — 400 meters,
+  three hops — fell from 32 kbps to <strong>40 bits per second</strong>, a thousandfold collapse. The death
+  spiral: overloaded routers dropped packets; every sender's RTO fired and <em>retransmitted</em>; the
+  retransmissions deepened the overload, causing more drops, causing more retransmissions — until the network's
+  capacity was spent carrying copies of data it was about to discard. This was <strong>congestion
+  collapse</strong>. Van Jacobson and Michael Karels diagnosed it and in 1988 retrofitted the cure into TCP:
+  treat the network as a shared resource, probe its capacity, <em>back off when it signals distress</em>.
+  Every TCP connection on Earth still runs their medicine.</p>
+</div>
+
+<p>The cure introduces a second window, this one maintained privately by the <strong>sender</strong>: the
+<strong>congestion window — cwnd</strong> — the sender's running estimate of how much data the <em>network
+path</em> can absorb. Nobody advertises it; the sender infers it from evidence. And it joins rwnd in one
+beautifully simple rule:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A sender may have at most <strong>min(rwnd, cwnd)</strong> bytes in flight. Two protectors, one limit:
+  <strong>rwnd</strong> protects the <em>receiver</em> (it says so explicitly, in every ACK);
+  <strong>cwnd</strong> protects the <em>network</em> (the sender guesses, watching for loss). Your effective
+  throughput is whichever guardian is currently stricter — when a transfer is slow, the first diagnostic
+  question is <em>which window is pinching</em>.</p>
+</div>
+
+<p>How does the sender grow and shrink cwnd? Two phases, both visible in the sawtooth below:</p>
+
+<ul>
+  <li><strong>Slow start</strong> (misleading name — it's exponential). A new connection starts cwnd at about 10
+  segments (~14.6 KB on modern Linux) and <em>doubles it every RTT</em> — each ACK earns more credit — probing
+  upward fast until loss occurs or a threshold (<code>ssthresh</code>) is crossed.</li>
+  <li><strong>Congestion avoidance — AIMD</strong> (Additive Increase, Multiplicative Decrease). Past the
+  threshold, growth turns gentle: roughly +1 MSS per RTT (additive). On loss, cwnd is <em>halved</em>
+  (multiplicative). Climb slowly, fall hard — AIMD is mathematically what makes many competing flows converge
+  toward fair shares instead of starving each other.</li>
+  <li><strong>Loss is the signal.</strong> A router with a full queue drops your packet; your dup-ACKs or RTO
+  detect it; you interpret it as "the network is full" and retreat. Packet loss on the Internet is not (only)
+  failure — it is the network's <em>language</em> for "slow down," and TCP deliberately drives into it to find
+  the ceiling. (Modern extras like ECN — Explicit Congestion Notification, §3 — let routers mark instead of
+  drop, and delay-based algorithms listen to rising RTT instead.)</li>
+</ul>
+
+<div class="figure-title">Fig 4.14 — The AIMD sawtooth: cwnd over the life of a connection</div>
+<pre class="diagram">
+  cwnd
+   ▲                  loss              loss               loss
+   │                   ▼                 ▼                  ▼
+   │                  ┌┐                ┌┐                 ┌┐
+   │               ┌──┘│             ┌──┘│              ┌──┘│
+   │            ┌──┘   │          ┌──┘   │           ┌──┘   │
+   │         ┌──┘      └──┐    ┌──┘      └──┐     ┌──┘      └── …
+   │      ┌──┘            └────┘            └─────┘
+   │   ┌──┘
+   │  ┌┘  ◄── slow start: doubling      ◄── then AIMD: climb +1 MSS
+   │ ┌┘       every RTT                     per RTT, halve on loss
+   └─┴──────────────────────────────────────────────────────► time
+
+   the sawtooth IS the probing: TCP perpetually creeps up to the
+   network's ceiling, bumps its head (loss), backs off, climbs again.
+</pre>
+
+<p>Two modern algorithms to know by name. <strong>CUBIC</strong> — the Linux default since 2006, i.e. what
+your EC2 instances and containers run — replaces AIMD's straight climb with a cubic curve: recover fast toward
+the previous ceiling, plateau cautiously near it, then probe beyond; far better on high-BDP paths.
+<strong>BBR</strong> (Bottleneck Bandwidth and Round-trip propagation time, from Google) abandons
+loss-as-signal: it continuously <em>models</em> the path — estimating bottleneck bandwidth and minimum RTT —
+and paces transmission at the optimum without filling router queues. High throughput, low queueing delay
+("bufferbloat" relief), resilient on lossy links; YouTube runs on it, and on Linux it's one sysctl away
+(<code>net.ipv4.tcp_congestion_control=bbr</code>).</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — cold connections are slow connections</div>
+  <p>Slow start means a fresh connection's first round trips move tiny amounts: ~14.6 KB, then ~29 KB, then
+  ~58 KB… A 100 KB response on a brand-new connection pays <em>three or four RTTs of ramp-up</em> that a warm
+  connection (with a grown cwnd) would not. The full cold bill: handshake (§6) + TLS (Part 8) + slow-start ramp
+  — a pooled connection pays none of it. The third independent reason pooling and keep-alive win, and why
+  HTTP/2 multiplexes requests over <em>one</em> warm connection rather than opening six cold ones (Part 7).</p>
+</div>
+
+<p>The comparison every interviewer eventually asks for:</p>
+
+<table>
+  <tr><th></th><th>Flow control (§10)</th><th>Congestion control (§11)</th></tr>
+  <tr><td><strong>Protects</strong></td><td>The receiver — a finite buffer</td><td>The network — shared links and router queues</td></tr>
+  <tr><td><strong>Limit set by</strong></td><td>Receiver, explicitly: advertises rwnd</td><td>Sender, by inference: maintains cwnd</td></tr>
+  <tr><td><strong>The signal</strong></td><td>Window field carried in every ACK</td><td>Packet loss (dup ACKs / RTO), or delay, or ECN marks</td></tr>
+  <tr><td><strong>Visibility</strong></td><td>Explicit header field — see it in tcpdump</td><td>Invisible on the wire — must be inferred</td></tr>
+  <tr><td><strong>Without it</strong></td><td>Receiver buffer overflow; futile retransmit treadmill</td><td>Congestion collapse — October 1986, 1000× throughput loss</td></tr>
+  <tr><td><strong>Sender's actual limit</strong></td><td colspan="2"><strong>min(rwnd, cwnd)</strong> — both guardians, one rule</td></tr>
+</table>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Two brakes keep TCP polite. The receiver says "I only have room for this much" (flow control). The sender
+    also watches for lost packets — the network's way of saying "I'm overloaded" — and slows itself down
+    (congestion control). New connections start cautiously and speed up, like merging onto a highway, which is
+    why reusing warm connections is faster than opening new ones.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>In-flight data ≤ min(rwnd, cwnd). rwnd: receiver-advertised, scales via the handshake-negotiated window
+    scale option; zero-window stalls are real backpressure (slow consumers, slow clients). cwnd: slow start
+    doubles per RTT from ~10 segments, then AIMD (+1 MSS/RTT, halve on loss); dup-ACKs trigger fast retransmit,
+    RTO is the fallback. Linux default CUBIC; BBR paces from a bandwidth/RTT model instead of loss.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Throughput on lossy paths follows rate ≈ MSS ÷ (RTT × √loss): a 0.1% loss rate quietly caps a 100 ms
+    flow far below link speed — why cross-region replication (PostgreSQL, Kafka MirrorMaker) is so sensitive to
+    tiny loss. Idle pooled connections may have cwnd decayed by the kernel
+    (<code>tcp_slow_start_after_idle</code>; latency-sensitive shops disable it). Bufferbloat — oversized
+    queues delaying the loss signal — is BBR's reason to exist. And cwnd is per-connection: 8 parallel
+    connections grab ~8 shares, which is why download managers "work" and polite services don't do that.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="nagle">12. Nagle's algorithm and delayed ACK — the 40 ms mystery</h2>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before</div>
+  <p>1984, the era of telnet: every keystroke an interactive session sent became its own segment — 1 byte of
+  payload wearing 40 bytes of TCP/IP headers, a 4000% overhead, multiplied across every typist on a 56 kbps
+  line. John Nagle's RFC 896 proposed the obvious economy: <strong>coalesce tiny writes</strong>. The rule —
+  <em>while a small segment is in flight unACKed, buffer further small writes and send them together once the
+  ACK returns (or a full MSS accumulates)</em>. Independently, receivers adopted <strong>delayed ACK</strong>
+  (RFC 1122): on receiving data, wait up to ~40 ms before ACKing, hoping to piggyback the ACK on response data
+  or cover several segments with one ACK. Each idea is sensible alone. Together they interlock into one of
+  networking's most infamous performance bugs.</p>
+</div>
+
+<p>The trap springs on a <strong>write–write–read</strong> pattern — say a client that writes a small header,
+then a small body, then waits for the response:</p>
+
+<div class="figure-title">Fig 4.15 — Nagle meets delayed ACK: the mutual politeness deadlock</div>
+<pre class="diagram">
+   CLIENT  write(header); write(body); read()   SERVER  (needs header+body
+   Nagle ON                                             before it can reply)
+         │                                              │
+         │  segment 1: the 30-byte header               │
+         │ ─────────────────────────────────────────►   │
+         │                                              │
+         │  body is small + segment 1 unACKed           │  no reply possible
+         │  → Nagle HOLDS the body back                 │  yet (body missing),
+         │                                              │  so nothing to
+         │  server delays its ACK ~40 ms                │  piggyback the ACK on
+         │  hoping to piggyback it on a reply           │
+         │                                              │
+         │          … ~40 ms of mutual waiting …        │
+         │                                              │
+         │  ◄──────────────────  delayed-ACK timer      │
+         │                       fires: bare ACK        │
+         │  segment 2: the body (released at last)      │
+         │ ─────────────────────────────────────────►   │
+         │  ◄──────────────────────────────  response   │
+         │                                              │
+   two correct optimizations, each waiting for the other:
+   ~40 ms added to the exchange. invisible in code review,
+   devastating at p99 — and at 25 req/s per connection it
+   becomes your throughput ceiling.
+</pre>
+
+<p>The cure is the socket option <strong><code>TCP_NODELAY</code></strong> — disable Nagle, send small segments
+immediately. You already benefit from it unknowingly: Redis clients (Jedis, Lettuce) set it — a cache answering
+in 0.2 ms cannot tolerate 40 ms stalls; gRPC's Netty transport sets it; game servers set it reflexively. In
+your own code: <code>socket.setTcpNoDelay(true)</code> in Java, <code>socket.setNoDelay(true)</code> in Node.
+Modern frameworks pair it with <em>application-level</em> buffering — assemble the full message, write once —
+keeping Nagle's economy without its latency. Nagle still helps genuinely interactive byte-dribbles (its telnet
+habitat) and apps spraying tiny writes across a WAN; the backend default is: complete messages, single writes,
+TCP_NODELAY on.</p>
+
+<!-- ============================================================ -->
+<h2 id="keepalive">13. The two keep-alives — same name, different universes</h2>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — disambiguate or be confused forever</div>
+  <p><strong>TCP keepalive</strong> and <strong>HTTP Keep-Alive</strong> share a name and nothing else.
+  <strong>TCP keepalive</strong> is an OS-level liveness probe: with <code>SO_KEEPALIVE</code> enabled, the
+  kernel sends tiny probe segments on an <em>idle</em> connection — by default starting after <strong>two
+  hours</strong> — to check the peer still exists, and kills the connection after enough silence.
+  <strong>HTTP Keep-Alive</strong> is an application-level <em>reuse</em> convention: send multiple HTTP
+  requests over one TCP connection instead of opening a fresh one per request (Part 7's territory — it's how
+  HTTP dodges §6's handshake tax). One probes for death; the other amortizes birth. Saying "keep-alive" in a
+  design review without qualifying which one is a small act of sabotage.</p>
+</div>
+
+<p>The OS-level defaults are visible (and tunable) on any Linux box:</p>
+
+<pre class="code">$ sysctl net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_keepalive_probes
+net.ipv4.tcp_keepalive_time = 7200     # idle seconds before the FIRST probe (2 hours!)
+net.ipv4.tcp_keepalive_intvl = 75      # seconds between probes
+net.ipv4.tcp_keepalive_probes = 9      # unanswered probes before declaring death
+
+# 7200 + 9 × 75 ≈ 2 hours 11 minutes before a dead peer is noticed —
+# and even this only applies if the app opted in with SO_KEEPALIVE
+# (the PostgreSQL JDBC driver does, with tcpKeepAlive=true)</pre>
+
+<h3>13.1 Why idle connections die anyway</h3>
+
+<p>The operational punchline: an idle TCP connection generates <strong>zero packets</strong>, and per the
+end-to-end principle (§1) only the endpoints know it exists — but the <em>stateful middleboxes</em> on the path
+(Part 3's NAT, Part 9's load balancers, corporate firewalls) keep per-connection table entries and
+<strong>evict idle ones</strong> to reclaim memory. AWS's NAT Gateway forgets idle flows at 350 seconds; an
+Application Load Balancer kills idle connections at 60 seconds by default (Part 9 dwells on this). Both
+endpoints still believe the connection is ESTABLISHED — <code>ss</code> swears it on both machines! — but the
+path has amnesia: the next write vanishes into futile retransmission (a timeout minutes later) or draws an
+instant RST. That is the anatomy of the classic "first request after lunch fails, the retry works" bug: the
+pool handed your code a connection that died quietly during the quiet hour.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — how mature pools defend themselves</div>
+  <p>Every serious connection-pool feature you've configured is a workaround for silent connection death:</p>
+  <pre class="code"># HikariCP (Spring Boot application.properties)
+spring.datasource.hikari.max-lifetime=1800000     # retire any connection at 30 min —
+                                                  # younger than most middlebox quirks
+spring.datasource.hikari.keepalive-time=300000    # ping idle pooled connections every
+                                                  # 5 min so NAT/LB tables stay warm
+spring.datasource.hikari.connection-timeout=3000  # fail fast when acquiring
+
+# the older pattern (Tomcat JDBC / DBCP):
+testWhileIdle=true                                # validation query on idle connections
+validationQuery=SELECT 1                          # the famous heartbeat in your pg logs</pre>
+  <p>Same idea everywhere in your stack: Redis clients ping idle connections; Kafka clients recycle sockets idle
+  longer than <code>connections.max.idle.ms</code> (default 9 minutes); the PostgreSQL JDBC driver exposes
+  <code>tcpKeepAlive=true</code>. The pattern to remember: <strong>either traffic flows through a connection
+  regularly, or something must actively keep it alive — or it will die, silently, and you'll meet it as a
+  weird timeout at the worst time.</strong></p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="syn-flood">14. SYN floods and the accept backlog</h2>
+
+<p>One last look at the handshake, this time from the defender's chair. Between packets 1 and 3 (Fig 4.7) the
+server holds a <strong>half-open</strong> connection — state allocated for a peer that has proven nothing yet.
+The kernel parks these in a <strong>SYN queue</strong>; when the final ACK lands, the connection graduates to
+a second queue — the <strong>accept queue</strong> — where it waits for the application to claim it with
+<code>accept()</code>. Two queues, two distinct ways to suffer:</p>
+
+<p><strong>Attack: the SYN flood.</strong> An attacker sprays SYNs from spoofed sources and never completes a
+handshake. Each one squats in the SYN queue until its timeout; the queue fills; legitimate SYNs get dropped —
+service down, at trivial attacker cost. The 1996-era classic, still launched daily. The elegant defense:
+<strong>SYN cookies</strong>. When the SYN queue overflows, the kernel stops storing state and instead
+<em>encodes</em> the would-be connection's essentials (a timestamp, an MSS class) into the cryptographic hash
+it uses as the <strong>ISN of its SYN-ACK</strong> — then forgets the client entirely. A legitimate client's
+final ACK must echo that ISN + 1 (§5's arithmetic!), so the server can validate the cookie and rebuild the
+connection <em>from the ACK itself</em> — zero memory spent on liars. Trade-off: options the cookie can't
+encode are lost, so cookies engage only under attack.</p>
+
+<p><strong>Self-inflicted: accept-queue overflow.</strong> No attacker required — just your own success. If
+your app accepts slower than connections arrive (a long GC pause, all threads busy, a wedged event loop), the
+accept queue hits its cap and the kernel drops new handshakes — clients see timeouts and resets <em>while your
+process is technically up</em>. The cap is <code>listen()</code>'s backlog argument, bounded by
+<code>net.core.somaxconn</code> (historically 128; 4096 on modern kernels) — surfaced as Tomcat's
+<code>acceptCount</code> (default 100), Netty's <code>SO_BACKLOG</code>, and the third argument to Node's
+<code>server.listen()</code> (default 511).</p>
+
+<pre class="code"># is my accept queue overflowing? two commands answer it.
+
+$ ss -lnt
+State   Recv-Q  Send-Q   Local Address:Port
+LISTEN  101     100            0.0.0.0:8080
+#       ▲       ▲
+#       │       └─ Send-Q on LISTEN = the backlog LIMIT (acceptCount)
+#       └───────── Recv-Q on LISTEN = connections waiting RIGHT NOW
+#                  101 of 100: the queue is full — we are dropping
+
+$ netstat -s | grep -i listen
+    4127 times the listen queue of a socket overflowed
+    4127 SYNs to LISTEN sockets dropped
+#   nonzero and climbing = users are being turned away at the door</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>When a slammed service "drops connections," it usually happens in these kernel queues <em>before your
+  code ever sees the socket</em> — no log line, no exception, no trace span. Clients reporting timeouts while
+  your application logs look clean? Check <code>ss -lnt</code> and the overflow counters before blaming the
+  network. Bigger backlogs buy burst absorption; only faster accept-and-work — or more replicas (Part 9) —
+  buys real capacity.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="tcp-vs-udp">15. TCP vs UDP — making the call</h2>
+
+<p>You now know both protocols from the inside. The full comparison, then the decision rule:</p>
+
+<table>
+  <tr><th>Dimension</th><th>TCP</th><th>UDP</th></tr>
+  <tr><td><strong>Connection setup</strong></td><td>Three-way handshake — 1 RTT before data</td><td>None — first packet carries data</td></tr>
+  <tr><td><strong>Reliability</strong></td><td>Detect and retransmit until delivered — or fail loudly</td><td>None; lost is lost (app may add its own)</td></tr>
+  <tr><td><strong>Ordering</strong></td><td>Guaranteed in-order delivery to the app</td><td>None — arrival order is network's whim</td></tr>
+  <tr><td><strong>Message boundaries</strong></td><td>None — a byte stream; apps must frame (§4)</td><td>Preserved — one datagram in, one out</td></tr>
+  <tr><td><strong>Header size</strong></td><td>20–60 bytes</td><td>8 bytes</td></tr>
+  <tr><td><strong>First-byte latency</strong></td><td>Handshake + slow-start ramp (§6, §11)</td><td>Immediate — no ramp, no ceremony</td></tr>
+  <tr><td><strong>Congestion behavior</strong></td><td>Backs off under loss — a polite citizen</td><td>Doesn't care — politeness is your job</td></tr>
+  <tr><td><strong>State per connection</strong></td><td>Buffers, windows, timers at both ends</td><td>Effectively none</td></tr>
+  <tr><td><strong>Typical uses</strong></td><td>HTTP/1–2, databases, Redis, Kafka, SSH, gRPC</td><td>DNS, live audio/video, games, metrics, QUIC/HTTP-3</td></tr>
+</table>
+
+<p>The decision guidance for a backend engineer, compressed:</p>
+
+<ul>
+  <li><strong>Default to TCP.</strong> If the data must be complete and correct — API calls, queries, messages,
+  files — the choice is already made, and made well.</li>
+  <li><strong>Choose UDP when late data is worthless data</strong> — live media, game state, real-time telemetry —
+  because retransmission would deliver the past.</li>
+  <li><strong>Choose UDP for tiny one-shot exchanges with app-level retry</strong> — DNS-shaped problems where a
+  handshake would triple the cost.</li>
+  <li><strong>Choose UDP when you're implementing your own transport</strong> — you are QUIC, a game-netcode
+  author, or similarly serious; you now owe the network congestion control, and the burden of §9–§11 is yours.</li>
+  <li><strong>Audit your own stack:</strong> Tomcat/Spring Boot on 8080 — TCP. PostgreSQL 5432 — TCP. Redis
+  6379 — TCP. Kafka 9092 — TCP. SSH 22 — TCP. The exceptions you actually run: every DNS lookup your services
+  make (UDP 53, TCP fallback — Part 6), StatsD metrics (UDP 8125), and — increasingly — HTTP/3 to your CDN edge,
+  which is QUIC over UDP 443 (Parts 7–8 tell that story).</li>
+</ul>
+
+<p>One closing synthesis: "TCP vs UDP" is really <em>kernel transport vs userspace transport</em>. Choosing UDP
+for anything nontrivial means re-implementing loss detection, ordering, and congestion control yourself — which
+is why serious UDP systems converge on QUIC rather than raw datagrams, and why everything else in your stack
+happily stays on TCP.</p>
+
+<!-- ============================================================ -->
+<h2 id="interview">16. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>Walk me through the TCP three-way handshake. What is actually being exchanged?</summary>
+    <p>Client sends SYN with its randomized Initial Sequence Number x (plus options: MSS, SACK-permitted,
+    window scale, timestamps). Server replies SYN-ACK: its own ISN y, with ack=x+1. Client replies ACK with
+    ack=y+1. Both sides now hold each other's starting byte numbers — the foundation for all sequence/ACK
+    arithmetic — have negotiated options (settable only here), allocated kernel state, and proven they can both
+    send and receive. Cost: one full RTT before the first data byte (data may ride on the third packet). Strong
+    answers note SYN consumes one sequence number — hence the +1 — and can sketch the tcpdump flags
+    <code>[S]</code>, <code>[S.]</code>, <code>[.]</code>.</p>
+  </details>
+
+  <details><summary>Why three packets — why not two, and why not four?</summary>
+    <p>A connection requires both ISNs delivered <em>and acknowledged</em> — four logical messages: SYN(x),
+    ACK(x), SYN(y), ACK(y). The server's ACK of x and its own SYN(y) travel the same direction at the same
+    moment, so TCP coalesces them into one SYN-ACK: four messages, three packets. Four packets would work but
+    wastes one. Two cannot work: after just SYN + SYN-ACK, the server has no evidence its ISN y ever arrived —
+    it would commit state for a possibly-absent peer, unable to distinguish a genuine client from a delayed
+    duplicate SYN of a dead connection. Each side must have its number explicitly confirmed; three packets is
+    the provable minimum.</p>
+  </details>
+
+  <details><summary>What is TIME_WAIT for? Is a large number of TIME_WAIT sockets a problem?</summary>
+    <p>TIME_WAIT is held by the <em>active closer</em> (whoever sent the first FIN) for 2×MSL — Maximum Segment
+    Lifetime; 60 seconds total on Linux. Two purposes: (1) if the final ACK is lost, the peer retransmits its
+    FIN from LAST_ACK, and someone must still exist to re-ACK it — otherwise the peer gets an RST for a clean
+    close; (2) it quarantines the 4-tuple until stray delayed segments from the old connection have expired, so
+    they can't be misread as data on a new connection reusing it. Many TIME_WAITs are <em>normal</em> — a sign
+    of churning short-lived connections, not a leak (each expires on schedule). If counts threaten
+    ephemeral-port exhaustion, the fix is pooling/keep-alive, not sysctl folklore.</p>
+  </details>
+
+  <details><summary>Explain flow control vs congestion control.</summary>
+    <p>Both throttle the sender; they protect different victims. Flow control protects the <em>receiver</em>:
+    it advertises its free buffer (rwnd) in every ACK's window field and the sender never exceeds it — down to
+    a full stop on a zero window, with persist probes to detect reopening. Congestion control protects the
+    <em>network</em>: the sender maintains a private congestion window (cwnd), grown by slow start (doubling
+    per RTT) then AIMD (+1 MSS per RTT, halved on loss), treating loss as the network's "slow down" signal —
+    the lesson of the 1986 collapse. The true limit is min(rwnd, cwnd): explicit information from the receiver,
+    inference about the network. Bonus: name CUBIC (Linux default) and BBR (model-based pacing).</p>
+  </details>
+
+  <details><summary>"Connection refused" vs "connection timed out" — what does each tell you?</summary>
+    <p>Refused: your SYN reached a live machine whose OS answered with RST — nothing is listening on that port.
+    Fast (one RTT) and rich in information: routing, NAT, and firewalls all passed; suspect the service (down,
+    wrong port, bound to 127.0.0.1, container port unmapped). Timed out: your SYNs were silently dropped — a
+    firewall or AWS Security Group (which drop, never reject), a black-hole route, a dead host — and the client
+    retried with exponential backoff for ~2 minutes. Slow and ambiguous. Java:
+    <code>ConnectException: Connection refused</code> vs <code>SocketTimeoutException</code>; Node:
+    <code>ECONNREFUSED</code> vs <code>ETIMEDOUT</code>. Mid-stream <code>ECONNRESET</code> is the third
+    sibling: an established connection destroyed — peer crash, reboot, or middlebox idle-timeout.</p>
+  </details>
+
+  <details><summary>Why do we pool database connections? Answer in terms of TCP.</summary>
+    <p>Because connection establishment is round-trip-expensive and pooling amortizes it to zero. A fresh
+    PostgreSQL connection pays the TCP handshake (1 RTT), the TLS handshake (1–2 RTTs), and the database's
+    startup/authentication exchange (several RTTs) — at 70 ms cross-region RTT, roughly 400 ms before the first
+    query. Two further TCP reasons: a fresh connection starts in slow start with a tiny congestion window, so
+    early transfers are slow until cwnd grows; and churning connections piles up TIME_WAIT and burns ephemeral
+    ports. HikariCP, HTTP keep-alive, and long-lived Kafka/Redis connections are the same physics: pay the
+    connection tax once, reuse forever, validate idle connections so middleboxes haven't silently killed them.</p>
+  </details>
+
+  <details><summary>When would you choose UDP over TCP?</summary>
+    <p>Three honest cases. (1) Late data is worthless: live voice/video, game state, real-time telemetry —
+    retransmission delivers the past, so skip losses and stay current; TCP's reliability is actively harmful
+    here. (2) Tiny one-shot exchanges where a handshake would dominate and the app can retry: DNS (with TCP
+    fallback for big responses); StatsD metrics accept loss to keep the hot path non-blocking. (3) You are
+    building your own transport — QUIC being the proof it's possible and the warning of how much work it is.
+    Everything else — APIs, databases, queues, files — defaults to TCP. Strong answers add: raw UDP at scale
+    must implement congestion control or it's a bad citizen and a DDoS-amplification risk.</p>
+  </details>
+
+  <details><summary>What does "TCP is a byte stream" mean practically for application code?</summary>
+    <p>TCP transmits an ordered byte sequence with no record of how writes were grouped: two
+    <code>write()</code> calls may arrive as one <code>read()</code>, or one write as five reads — only content
+    and order are preserved. Code assuming "one data event = one message" works on localhost and corrupts in
+    production. So every TCP application protocol defines framing: length prefixes (Kafka, PostgreSQL),
+    delimiters (Redis RESP's CRLF, HTTP/1.1 header lines), or declared sizes (HTTP's Content-Length). Robust
+    readers loop: buffer, extract complete frames, retain the remainder. Noting that UDP preserves datagram
+    boundaries — one of the few things it does "better" — completes the answer.</p>
+  </details>
+
+  <details><summary>How does TCP recover a lost segment? Compare the two paths.</summary>
+    <p>Path one — RTO (Retransmission TimeOut): the sender times its oldest unACKed data against an adaptive
+    timeout derived from smoothed RTT plus variance (initial 1 s; 200 ms floor on Linux); expiry triggers
+    retransmission, and the RTO doubles per consecutive failure. Correct but costly — a full RTO of dead air,
+    which is what wrecks p99 latency. Path two — fast retransmit: out-of-order arrivals make the receiver
+    repeat its last cumulative ACK; three duplicate ACKs read as "exactly one segment died while later ones
+    survived," so the sender retransmits immediately. With SACK (negotiated at handshake) the receiver reports
+    precisely which ranges it holds, so only true holes are resent. After recovery the cumulative ACK leaps
+    forward over everything buffered out of order.</p>
+  </details>
+
+  <details><summary>What is a SYN flood, and how do SYN cookies defeat it?</summary>
+    <p>A SYN flood exploits the handshake's asymmetry: each spoofed SYN makes the server allocate a half-open
+    entry in its SYN queue while the attacker spends nothing and never completes step three. The queue fills;
+    legitimate SYNs are dropped. SYN cookies remove the memory cost: under pressure, the kernel encodes the
+    connection essentials (timestamp, MSS class) into a keyed hash used as the ISN of its SYN-ACK, then stores
+    nothing. A genuine client's final ACK must echo that ISN+1, letting the server validate and reconstruct
+    state from the ACK alone — attackers' half-opens now cost zero bytes. Trade-off: options the cookie can't
+    encode are lost, so cookies activate only on overflow. Related and self-inflicted: accept-queue overflow
+    (app accepting too slowly — GC pauses) drops handshakes with no attacker; check <code>ss -lnt</code> and
+    the listen-overflow counters.</p>
+  </details>
+
+  <details><summary>You see thousands of sockets in CLOSE_WAIT on your service. What happened?</summary>
+    <p>The peers closed; your application didn't. CLOSE_WAIT means the remote FIN arrived and was ACKed by your
+    kernel, which now waits — indefinitely — for <em>your process</em> to call <code>close()</code>. A pileup is
+    always an application-level socket leak: HTTP response bodies never closed, connections opened outside the
+    pool, exception paths skipping cleanup. The fix is guaranteed-cleanup constructs (Java try-with-resources,
+    Node ensuring <code>destroy()</code>/<code>end()</code> on error paths) plus leak detection (HikariCP's
+    <code>leakDetectionThreshold</code>). Contrast for the interviewer: TIME_WAIT piles indicate connection
+    <em>churn</em> (fix: pooling) and self-expire in 60 s; CLOSE_WAIT piles indicate a <em>bug</em> and persist
+    until the process restarts.</p>
+  </details>
+
+  <details><summary>A service makes two small writes then reads the reply, and every call takes ~40 ms longer than expected. Diagnose it.</summary>
+    <p>The Nagle/delayed-ACK interaction. Nagle (RFC 896) holds back small writes while an earlier small
+    segment is unACKed, to coalesce telnet-era tinygrams; delayed ACK (RFC 1122) makes the receiver postpone
+    its ACK up to ~40 ms hoping to piggyback it on response data. Write–write–read interlocks them: the sender
+    holds the second write awaiting an ACK; the receiver holds the ACK awaiting a response it can't form
+    without that write — a mutual-politeness stall broken only by the delayed-ACK timer. Fixes, best first:
+    write each logical message in one write; enable <code>TCP_NODELAY</code>
+    (<code>setTcpNoDelay(true)</code> in Java, <code>setNoDelay(true)</code> in Node) as Redis clients and
+    gRPC/Netty already do. Recognizing a ~40 ms quantum in latency histograms as this signature is
+    senior-engineer pattern matching.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">17. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "TCP guarantees delivery."</strong><br>
+  ✅ Nothing can guarantee delivery over a cuttable cable — if the path is truly gone, no protocol saves you.
+  TCP guarantees <em>detection and honest accounting</em>: every byte is tracked, lost data is retransmitted
+  with adaptive timeouts, and if the network stays broken, you get an explicit error instead of silent loss.
+  The contract is "delivered exactly once, in order — or you find out." Detect-and-retry-or-fail, not magic.</p>
+
+  <p><strong>❌ "UDP is always faster in a way that matters."</strong><br>
+  ✅ Packets travel the same wires at the same speed under both protocols. UDP genuinely saves the handshake
+  RTT, slow-start ramp, and retransmission stalls — decisive for one-shot lookups and live media, irrelevant
+  for a warm, pooled TCP connection in steady state. And if your data must be complete, you'll rebuild TCP's
+  machinery on UDP yourself — usually slower and buggier.</p>
+
+  <p><strong>❌ "The TCP handshake exchanges encryption keys."</strong><br>
+  ✅ The TCP handshake exchanges <em>sequence numbers and options</em> — nothing secret, everything in
+  cleartext (you read one in tcpdump in §6). Encryption is TLS (Transport Layer Security), a <em>separate</em>
+  handshake that runs after TCP's, with its own round trips and certificates — that's Part 8. The layering is
+  literal: TCP connect, then TLS handshake, then HTTP. Three different handshakes, three different jobs.</p>
+
+  <p><strong>❌ "TCP sends my messages."</strong><br>
+  ✅ TCP sends a <em>byte stream</em>. Your three writes may arrive as one read; your one write as five. No
+  message boundaries survive the trip — framing (length prefixes, delimiters, Content-Length) is the
+  application protocol's job, which is precisely why HTTP, Kafka, PostgreSQL, and Redis each define one. Code
+  that assumes one-write-one-read is a localhost demo with a production incident in its future.</p>
+
+  <p><strong>❌ "HTTP keep-alive and TCP keepalive are the same thing."</strong><br>
+  ✅ TCP keepalive = kernel-level <em>liveness probes</em> on idle connections (default: first probe after two
+  hours, opt-in via SO_KEEPALIVE). HTTP Keep-Alive = application-level <em>connection reuse</em> — many requests
+  per TCP connection, dodging the handshake tax (Part 7). One detects death; the other amortizes birth. They
+  share six letters and zero mechanism.</p>
+
+  <p><strong>❌ "All these TIME_WAIT sockets are a leak/bug — let's tune them away."</strong><br>
+  ✅ TIME_WAIT is a correctness feature: the active closer lingers 2×MSL to re-ACK retransmitted FINs and to let
+  stale segments die before the address pair is reused. Entries self-expire (60 s on Linux). Thousands of them
+  are a <em>signal</em> — you're churning short connections — and the cure is pooling/keep-alive, not registry
+  spells. The genuinely scary state is CLOSE_WAIT, which never expires and always means your code leaked a
+  socket.</p>
+
+  <p><strong>❌ "A TCP connection is a thing that exists in the network."</strong><br>
+  ✅ A connection is two blobs of kernel state at the <em>endpoints</em> — sequence numbers, buffers, timers —
+  and nothing in between (§1's end-to-end principle; routers stop reading at Layer 3). Its packets may even
+  take different routes. This is why idle connections "die" when a NAT or load balancer forgets its table
+  entry: there was never a circuit to keep alive, only two optimistic endpoints and some middleboxes with
+  memory.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p><strong>Looking back:</strong> Part 3 delivered packets to a <em>machine</em>; this part made the delivery
+  trustworthy (TCP) or honest about not being trustworthy (UDP), entirely from the endpoints — the end-to-end
+  principle in action. <strong>Looking ahead:</strong> all through this chapter we waved at "ports" as
+  "which app gets the data" and at mysterious source ports like <code>51742</code>. Time to make that precise:
+  what exactly is a <em>socket</em>? Where do ephemeral ports come from, and why do they run out? What does the
+  4-tuple really identify, how can ten thousand clients all connect to port 443 at once, and what is
+  <code>Address already in use</code> actually complaining about? That's
+  <a href="part05.html"><strong>Part 5 — Ports &amp; Sockets</strong></a>, where TCP meets your code's
+  <code>bind()</code>, <code>listen()</code>, and <code>accept()</code>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part03.html"><span class="dir">← Previous</span><span class="t">Part 3: IP Addresses</span></a>
+  <a href="part05.html"><span class="dir">Next →</span><span class="t">Part 5: Ports &amp; Sockets</span></a>
+</div>
+
+</main>
+</body>
+</html>

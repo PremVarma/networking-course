@@ -1,0 +1,1244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 14: Complete Request Journeys — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html" class="active"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 14 of 15</p>
+<h1>Complete Request Journeys — Every Layer, End to End</h1>
+<p class="lede">Thirteen parts ago you typed <code>localhost:8080</code> and we promised you would one day know what
+every character set in motion. This is the payoff. We will not teach a single new concept here — instead we
+take five real architectures you already half-know and trace one request through each, hop by hop, layer by
+layer, header by header, from the keystroke to the database row and all the way back. By the end you will be
+able to answer the most famous systems-design interview question on Earth without pausing for breath.</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this chapter exists</div>
+  <p>Every part so far taught one slice of the stack in isolation: DNS in Part 6, TLS in Part 8, the ALB in
+  Part 11, the Kubernetes Service in Part 12. Isolation is how you <em>learn</em> the pieces, but production is
+  where they all fire at once, in order, in milliseconds. The gap between "I understand TLS" and "I can explain
+  exactly where TLS terminates in our production path and why our app sees <code>http://</code> in its redirects"
+  is the gap between a mid-level engineer and a senior one. This chapter is pure <strong>synthesis</strong>: no
+  new vocabulary, just composition. Read it as the assembly instructions for everything you already own.</p>
+</div>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#primer">How to read a journey — the universal phases</a></li>
+    <li><a href="#j1">Journey 1 — Browser → Spring Boot (localhost)</a></li>
+    <li><a href="#j2">Journey 2 — Browser → ALB → ECS → Spring Boot</a></li>
+    <li><a href="#j3">Journey 3 — Browser → K8s Ingress → Service → Pod</a></li>
+    <li><a href="#j4">Journey 4 — Browser → Nginx → Spring Boot</a></li>
+    <li><a href="#j5">Journey 5 — Browser → CDN → Load Balancer → Origin</a></li>
+    <li><a href="#synthesis">Cross-journey synthesis</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="primer">How to read a journey — the universal phases</h2>
+
+<p>Before the five journeys, install one reusable mental template. <strong>Every</strong> web request — local or
+global, one hop or six — passes through the same six phases in the same order. The architectures differ only in
+<em>how many times</em> and <em>at how many machines</em> each phase happens. Memorize the phases and every
+journey becomes a variation on one theme.</p>
+
+<table>
+  <tr><th>#</th><th>Phase</th><th>The question</th><th>Solved by</th><th>Taught in</th></tr>
+  <tr><td>1</td><td><strong>Resolve the name</strong></td><td>What IP address is this hostname?</td><td>DNS — resolver, root, TLD, authoritative (Route 53)</td><td>Part 6</td></tr>
+  <tr><td>2</td><td><strong>Establish transport</strong></td><td>Open a reliable byte pipe to that IP:port</td><td>TCP three-way handshake (SYN / SYN-ACK / ACK)</td><td>Part 4, Part 5</td></tr>
+  <tr><td>3</td><td><strong>Secure it</strong></td><td>Prove identity, agree keys, encrypt</td><td>TLS handshake over the TCP pipe (ClientHello…)</td><td>Part 8</td></tr>
+  <tr><td>4</td><td><strong>Speak HTTP</strong></td><td>Send a request the server understands</td><td>HTTP request line + headers + body</td><td>Part 7</td></tr>
+  <tr><td>5</td><td><strong>Process</strong></td><td>Run the application logic, hit the database</td><td>Tomcat → DispatcherServlet → controller → JDBC → PostgreSQL</td><td>Parts 4/5/7</td></tr>
+  <tr><td>6</td><td><strong>Return</strong></td><td>Send the response back along the same pipes</td><td>HTTP response status + headers + body, decapsulated up the stack</td><td>Part 7</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — architecture only changes the count, never the phases</div>
+  <p>Journey 1 (localhost) runs each phase <em>once</em> on <em>one</em> machine. Journey 5 (CDN) runs phases 1–4
+  twice — once between the browser and the edge, once between the edge and the origin — across three continents.
+  The phases are invariant. When you walk into an interview and they sketch any architecture on a whiteboard,
+  silently overlay these six phases and you will never be lost.</p>
+</div>
+
+<h3>The layer ladder — our reusable notation</h3>
+
+<p>Throughout this chapter we describe each hop with a "layer ladder": a vertical strip showing which OSI layers
+(Part 2) the data passes through at that point. We will draw it the same way every time so your eye learns it.
+Read it top-to-bottom as data leaving a machine (encapsulation: each layer wraps the one above), and
+bottom-to-top as data arriving (decapsulation: each layer unwraps).</p>
+
+<div class="figure-title">Fig 14.0 — The layer ladder legend (reused in all five journeys)</div>
+<pre class="diagram">
+   LAYER LADDER — how to read every diagram in this chapter
+
+   L7  Application   HTTP / TLS records / DNS query   ── what the app means
+   L4  Transport     TCP segment  (ports, seq/ack)    ── which app, reliable
+   L3  Network       IP packet    (src/dst IP)        ── which machine on Earth
+   L2  Data Link     Ethernet frame (src/dst MAC)     ── which neighbour on wire
+   L1  Physical      bits as voltage / light / radio  ── the actual signal
+
+   ENCAPSULATION (sending)        DECAPSULATION (receiving)
+        L7 data                        bits ──► L1
+          │ wrap                         │ unwrap
+          ▼                              ▼
+        L4 + L7                        frame ──► L2
+          │ wrap                         │ unwrap
+          ▼                              ▼
+        L3 + L4 + L7                   packet ──► L3
+          │ wrap                         │ unwrap
+          ▼                              ▼
+        L2 + L3 + L4 + L7              segment ──► L4
+          │ wrap                         │ unwrap
+          ▼                              ▼
+        bits on the wire (L1)         L7 data delivered to the app
+</pre>
+
+<p>And here is the diagram legend — the symbols and the realistic addresses we reuse in every topology so you can
+follow the same cast of characters across all five journeys:</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 The cast — addresses we reuse everywhere</div>
+  <ul>
+    <li><strong>Client</strong> — a React SPA in a browser at public IP <code>198.51.100.25</code> (a real human, somewhere on the Internet).</li>
+    <li><strong>DNS</strong> — authoritative zone hosted on <strong>AWS Route 53</strong>; the browser's recursive resolver does the legwork (Part 6).</li>
+    <li><strong>ALB</strong> — Application Load Balancer, public IP <code>203.0.113.10</code>, in public subnets (Part 9/11).</li>
+    <li><strong>App tier</strong> — Spring Boot on ECS tasks or K8s pods at <code>10.0.10.x</code> in private subnets, listening on <code>:8080</code> (Part 11/12).</li>
+    <li><strong>Database</strong> — Amazon RDS for PostgreSQL at <code>10.0.20.5:5432</code> in isolated DB subnets (Part 11).</li>
+    <li><strong>CDN</strong> — Amazon CloudFront, an <strong>edge POP</strong> (point of presence) physically near the user (Part 1 latency / Part 3 anycast).</li>
+  </ul>
+  <p>Arrows: <code>──►</code> a request travelling forward, <code>◄──</code> a response travelling back,
+  <code>▲ ▼</code> movement up/down the layer ladder. <strong>We never type a raw angle bracket inside a
+  diagram</strong> — only box-drawing characters and these arrows.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — five routes, one set of rules of the road</div>
+  <p>Think of the five journeys as five different routes between your house and a friend's house: walking next
+  door (localhost), driving across town with one toll booth (Nginx), taking the highway through a managed
+  interchange (ALB), navigating a city with a central dispatcher rerouting you live (Kubernetes), and flying
+  internationally with a local connecting hub near each end (CDN). The vehicles, distances, and number of stops
+  differ wildly — but every route obeys the same traffic laws: you still need an address (DNS), you still merge
+  into traffic (TCP), you still show ID at secure checkpoints (TLS), you still speak to whoever greets you (HTTP).
+  Learn the laws once; the routes are just rearrangements.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="j1">Journey 1 — Browser → Spring Boot Application (the localhost baseline)</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 When you use this — and why you'd choose it</div>
+  <p><strong>When:</strong> local development on your laptop, or a single virtual machine (VM) with the app
+  exposed directly to the world — a hobby project, an internal tool, a demo box. <strong>Why choose it:</strong>
+  because it is the simplest thing that can possibly work. No load balancer, no proxy, no orchestration, nothing
+  to operate. One process, one port, one machine. This is the <em>baseline</em> every other journey is built on:
+  master this clean single-machine path and every later journey is just "the same thing, but with more
+  middlemen in front." We deliberately walk this one in the most detail, including the full vertical
+  encapsulation diagram, so you see the entire stack once with nothing hidden.</p>
+</div>
+
+<h3 id="j1-topology">1.a — The topology</h3>
+
+<p>Your React app, served by Vite on <code>:3000</code>, makes <code>fetch("http://localhost:8080/api/orders/42")</code>.
+Spring Boot is running on the same laptop on <code>:8080</code>; PostgreSQL runs in a Docker container publishing
+<code>:5432</code>. Everything is on one machine — the request never touches a physical cable. Here is the whole
+world for this journey:</p>
+
+<div class="figure-title">Fig 14.1 — Localhost topology: one machine wearing every hat</div>
+<pre class="diagram">
+  ┌──────────────────────────── YOUR LAPTOP (one machine) ────────────────────────────┐
+  │                                                                                    │
+  │   ┌─────────────┐         loopback 127.0.0.1          ┌────────────────────────┐   │
+  │   │  Browser    │   GET /api/orders/42  :8080         │  Spring Boot (JVM)     │   │
+  │   │  React SPA  │ ──────────────────────────────────► │  embedded Tomcat :8080 │   │
+  │   │  (client)   │ ◄────────────────────────────────── │  DispatcherServlet     │   │
+  │   └─────────────┘   200 OK + JSON                      │  OrderController       │   │
+  │                                                        └───────────┬────────────┘   │
+  │                                                                    │ JDBC           │
+  │                              loopback 127.0.0.1 :5432              │ SELECT … id=42 │
+  │                                                                    ▼                │
+  │                                                        ┌────────────────────────┐   │
+  │                                                        │  PostgreSQL (Docker)   │   │
+  │                                                        │  listening :5432       │   │
+  │                                                        └────────────────────────┘   │
+  │                                                                                    │
+  │   Nothing here uses the Ethernet/Wi-Fi NIC. All traffic rides the virtual          │
+  │   loopback interface (lo / lo0) — the kernel hands bytes back to itself.           │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — localhost is real networking minus the cable</div>
+  <p>Back in Part 3 we said <code>127.0.0.1</code> (and the name <code>localhost</code>) is the <em>loopback</em>
+  address: a virtual network interface the kernel implements in software. A request to <code>localhost:8080</code>
+  still runs the full Layer 4 / Layer 3 machinery — there is a real TCP three-way handshake, real ports, real
+  sequence numbers — it just never descends to Layer 2/Layer 1 (no Ethernet frame, no NIC, no voltage). That is
+  exactly why port conflicts (<code>Address already in use</code>), connection refusals, and TCP states all
+  happen locally. Local testing genuinely exercises Layers 3–7.</p>
+</div>
+
+<h3 id="j1-steps">1.b — Step-by-step walkthrough</h3>
+
+<ol>
+  <li><strong>Keystroke / fetch.</strong> The browser's JavaScript engine calls <code>fetch("http://localhost:8080/api/orders/42")</code>. The browser parses the URL: scheme <code>http</code> (so port defaults would be 80, but the URL overrides to <code>8080</code>), host <code>localhost</code>, path <code>/api/orders/42</code>.</li>
+  <li><strong>Name resolution (the trivial case).</strong> <code>localhost</code> does not go to DNS. The OS checks its hosts file first — on Linux/macOS <code>/etc/hosts</code>, on Windows <code>C:\Windows\System32\drivers\etc\hosts</code> — which maps <code>localhost → 127.0.0.1</code>. Resolution is instant and offline. (This is the Part 6 resolver order: hosts file before DNS.)</li>
+  <li><strong>TCP three-way handshake.</strong> The browser opens a socket from an ephemeral port (say <code>54312</code>) to <code>127.0.0.1:8080</code>. The kernel runs the Part 4 handshake against itself: <code>SYN → SYN-ACK → ACK</code>. The connection moves to <code>ESTABLISHED</code>. Over loopback this takes microseconds.</li>
+  <li><strong>TLS? Usually skipped in dev.</strong> The scheme is <code>http</code>, not <code>https</code>, so there is <em>no</em> TLS handshake. Bytes go in the clear. (In dev this is normal and fine — the data never leaves your machine. Part 8's whole threat model is "data crossing networks owned by strangers," which does not apply here.)</li>
+  <li><strong>HTTP request.</strong> The browser writes the raw HTTP/1.1 request bytes into the socket: a request line, host header, and standard headers (Part 7).</li>
+  <li><strong>Tomcat accepts.</strong> Spring Boot's embedded Tomcat has a listening socket on <code>:8080</code>. Its acceptor thread accepts the connection, a worker thread reads the request bytes, and parses them into an <code>HttpServletRequest</code>.</li>
+  <li><strong>DispatcherServlet routes.</strong> Spring's front controller (the <code>DispatcherServlet</code>) matches <code>GET /api/orders/42</code> against handler mappings and dispatches to <code>OrderController.getOrder(42)</code>.</li>
+  <li><strong>JDBC to PostgreSQL.</strong> The controller calls the repository; Hibernate/JDBC issues <code>SELECT * FROM orders WHERE id = 42</code>. This opens (or reuses from the HikariCP pool) a <em>second</em> TCP connection — Spring Boot is now a client — to <code>127.0.0.1:5432</code>, speaking the PostgreSQL wire protocol (Part 5: another protocol on another port).</li>
+  <li><strong>Database responds.</strong> PostgreSQL executes the query and streams result rows back over the 5432 connection. JDBC maps them into a Java object.</li>
+  <li><strong>Build the response.</strong> The controller returns the order object; Spring serializes it to JSON via Jackson, sets <code>Content-Type: application/json</code>, and Tomcat writes the HTTP response bytes back into the browser's socket.</li>
+  <li><strong>Render.</strong> The browser reads <code>200 OK</code>, parses the JSON body, and your React component re-renders. Done — typically in single-digit milliseconds because nothing left the machine.</li>
+</ol>
+
+<h3 id="j1-encap">1.c — The full vertical encapsulation (see the whole stack once)</h3>
+
+<p>Because this is the simplest case, it is the perfect place to watch a single HTTP request get wrapped layer by
+layer on the way out and unwrapped on the way in. This is the Part 2 encapsulation concept made concrete. Read
+the left column top-to-bottom (browser sending), the right column bottom-to-top (Tomcat receiving):</p>
+
+<div class="figure-title">Fig 14.2 — One GET request, fully encapsulated and decapsulated (loopback)</div>
+<pre class="diagram">
+   BROWSER SENDING (encapsulate, top ──► down)        TOMCAT RECEIVING (decapsulate, bottom ──► up)
+
+   L7  HTTP  ┌──────────────────────────────┐         ┌──────────────────────────────┐  HTTP  L7
+             │ GET /api/orders/42 HTTP/1.1   │         │ GET /api/orders/42 HTTP/1.1   │
+             │ Host: localhost:8080          │   the   │ Host: localhost:8080          │  parsed into
+             │ Accept: application/json      │  EXACT  │ Accept: application/json      │  HttpServletRequest
+             └───────────────┬──────────────┘  SAME   └───────────────▲──────────────┘
+                             │ wrap in TCP     BYTES                   │ unwrap
+   L4  TCP   ┌───────────────▼──────────────┐         ┌───────────────┴──────────────┐  TCP   L4
+             │ src port 54312  dst port 8080 │         │ src port 54312  dst port 8080 │
+             │ seq / ack, flags=PSH,ACK      │ ──────► │ checksum OK, in-order         │
+             └───────────────┬──────────────┘         └───────────────▲──────────────┘
+                             │ wrap in IP                             │ unwrap
+   L3  IP    ┌───────────────▼──────────────┐         ┌───────────────┴──────────────┐  IP    L3
+             │ src 127.0.0.1  dst 127.0.0.1  │         │ src 127.0.0.1  dst 127.0.0.1  │
+             └───────────────┬──────────────┘         └───────────────▲──────────────┘
+                             │ wrap in frame                          │ unwrap
+   L2  link  ┌───────────────▼──────────────┐         ┌───────────────┴──────────────┐  link  L2
+             │ loopback "frame" (no real MAC,│ ──────► │ loopback frame                │
+             │  no Ethernet — virtual iface) │         │                               │
+             └───────────────┬──────────────┘         └───────────────▲──────────────┘
+                             │                                        │
+   L1        ┌───────────────▼───────────────────────────────────────┴──────────────┐  L1
+             │  NO physical layer — the kernel copies the buffer from the send queue  │
+             │  straight to the receive queue. Bits never become voltage.            │
+             └───────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — encapsulation is nested envelopes</div>
+  <p>Your HTTP request is a letter. TCP seals it in an envelope marked "to apartment 8080, from apartment 54312"
+  (ports = apartment numbers). IP seals <em>that</em> in a bigger envelope marked with building addresses (here,
+  both addresses are "this same building," 127.0.0.1). The link layer would put a courier's hand-label on it for
+  the next street. On loopback the courier is the building's internal mailroom: it never steps outside. At the
+  destination each envelope is opened in reverse order until the original letter reaches the right desk
+  (Tomcat). Every later journey adds more envelopes and more couriers — but the letter inside never changes.</p>
+</div>
+
+<h3 id="j1-table">1.d — Per-step table</h3>
+
+<table>
+  <tr><th>Step</th><th>What happens</th><th>OSI layer(s)</th><th>Protocol(s)</th><th>Headers / addresses</th><th>Device / component</th></tr>
+  <tr><td>1</td><td>Browser parses URL, calls fetch</td><td><span class="osi-badge">L7</span></td><td>—</td><td>host=localhost, port=8080, path=/api/orders/42</td><td>Browser / JS engine</td></tr>
+  <tr><td>2</td><td><code>localhost → 127.0.0.1</code> via hosts file (no DNS)</td><td><span class="osi-badge">L7</span></td><td>hosts-file lookup</td><td>127.0.0.1</td><td>OS resolver (<code>/etc/hosts</code>)</td></tr>
+  <tr><td>3</td><td>TCP handshake to 127.0.0.1:8080</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>src 127.0.0.1:54312 → dst 127.0.0.1:8080; SYN/SYN-ACK/ACK</td><td>OS kernel (loopback iface)</td></tr>
+  <tr><td>4</td><td>No TLS — plaintext HTTP in dev</td><td>—</td><td>(none)</td><td>scheme=http</td><td>—</td></tr>
+  <tr><td>5</td><td>Browser writes HTTP request bytes</td><td><span class="osi-badge">L7</span></td><td>HTTP/1.1</td><td>GET line, Host, Accept, User-Agent</td><td>Browser socket</td></tr>
+  <tr><td>6</td><td>Tomcat accepts + parses request</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span></td><td>HTTP/1.1, TCP</td><td>HttpServletRequest built</td><td>Embedded Tomcat (:8080)</td></tr>
+  <tr><td>7</td><td>DispatcherServlet → OrderController</td><td><span class="osi-badge">L7</span></td><td>HTTP (app)</td><td>handler mapping match</td><td>Spring MVC</td></tr>
+  <tr><td>8</td><td>JDBC opens/reuses TCP to 5432, runs SELECT</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>PostgreSQL wire / TCP / IP</td><td>src 127.0.0.1:5xxxx → dst 127.0.0.1:5432</td><td>HikariCP pool → PostgreSQL</td></tr>
+  <tr><td>9</td><td>PostgreSQL returns result rows</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span></td><td>PostgreSQL wire / TCP</td><td>row data messages</td><td>PostgreSQL (Docker)</td></tr>
+  <tr><td>10</td><td>Jackson serializes JSON, Tomcat writes response</td><td><span class="osi-badge">L7</span></td><td>HTTP/1.1</td><td>200 OK, Content-Type: application/json</td><td>Spring MVC / Tomcat</td></tr>
+  <tr><td>11</td><td>Browser parses JSON, React re-renders</td><td><span class="osi-badge">L7</span></td><td>HTTP/1.1</td><td>response body consumed</td><td>Browser</td></tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 The raw exchange (curl rewritten with arrows, never angle brackets)</div>
+  <pre class="code">$ curl -v http://localhost:8080/api/orders/42
+
+  *   Trying 127.0.0.1:8080 ...
+  *   Connected to localhost (127.0.0.1) port 8080
+  ──►  GET /api/orders/42 HTTP/1.1
+  ──►  Host: localhost:8080
+  ──►  User-Agent: curl/8.4.0
+  ──►  Accept: */*
+  ──►  (empty line ends the request headers)
+
+  ◄──  HTTP/1.1 200 OK
+  ◄──  Content-Type: application/json
+  ◄──  Content-Length: 84
+  ◄──  Date: Thu, 18 Jun 2026 09:14:02 GMT
+  ◄──
+  ◄──  {"id":42,"item":"Keyboard","qty":1,"status":"SHIPPED"}</pre>
+</div>
+
+<h3 id="j1-debug">1.e — What could break here + how you'd debug it</h3>
+
+<div class="callout misconception">
+  <div class="callout-title">🛠 Follow the failure (Journey 1)</div>
+  <ul>
+    <li><strong><code>Connection refused</code> instantly</strong> → nothing is listening on 8080. Spring Boot did not start, or bound to a different port. The TCP <code>SYN</code> got an immediate <code>RST</code> (Part 4). Debug: <code>nc -vz localhost 8080</code> or <code>lsof -i :8080</code> / <code>netstat -ano</code> to see what (if anything) holds the port.</li>
+    <li><strong><code>Address already in use</code> on startup</strong> → a previous run still owns 8080 (Part 5 port binding). Kill the stale process or change the port.</li>
+    <li><strong>App starts but DB calls fail with <code>Connection refused</code> to 5432</strong> → the Postgres container is not running or the <code>-p 5432:5432</code> publish is missing (Part 12 Docker port mapping). Debug: <code>docker ps</code>, then <code>psql -h localhost -p 5432</code>.</li>
+    <li><strong>Browser shows a CORS error</strong> → not a network failure at all. The request <em>succeeded</em> over the wire, but the React app on <code>:3000</code> called the API on <code>:8080</code> — a different origin — and the server did not return the right <code>Access-Control-Allow-Origin</code> header (Part 7). Fix it server-side, not in the network.</li>
+    <li><strong>Hangs forever</strong> → rare on loopback, but a deadlocked controller or an exhausted HikariCP pool will hold the HTTP connection open with no response. Thread dump the JVM.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="j2">Journey 2 — Browser → AWS ALB → ECS → Spring Boot</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 When you use this — and why you'd choose it</div>
+  <p><strong>When:</strong> standard production on AWS <em>without</em> Kubernetes — you want managed
+  infrastructure, autoscaling, and zero servers to patch, but you are not ready for the operational weight of an
+  orchestrator. <strong>Why choose it:</strong> an Application Load Balancer (Part 9) plus ECS (Elastic Container
+  Service, Part 12) running Fargate gives you a public, TLS-terminated, health-checked, horizontally-scalable
+  front door with almost no undifferentiated heavy lifting. This is the workhorse AWS architecture for a
+  Spring Boot REST API behind a React SPA. The single most important new idea versus Journey 1: there are now
+  <strong>two separate TCP connections</strong> and TLS lives on only the first one.</p>
+</div>
+
+<h3 id="j2-topology">2.a — The topology</h3>
+
+<div class="figure-title">Fig 14.3 — Production AWS: ALB in public subnets, ECS tasks in private subnets, RDS isolated</div>
+<pre class="diagram">
+                  THE INTERNET
+   ┌──────────────┐
+   │  Browser     │  client 198.51.100.25
+   │  React SPA   │
+   └──────┬───────┘
+          │  (1) DNS: app.example.com ?  ──►  Route 53 ALIAS ──►  203.0.113.10
+          │  (2) TCP + (3) TLS handshake to 203.0.113.10:443   [TLS TERMINATES HERE]
+          ▼
+  ╔═══════════════════════════ AWS VPC  10.0.0.0/16 ═══════════════════════════════╗
+  ║                                                                                ║
+  ║   ┌─────────┐   IGW    ┌──────────── PUBLIC SUBNETS ────────────┐              ║
+  ║   │ Internet│ ───────► │   ┌────────────────────────────────┐   │              ║
+  ║   │ Gateway │          │   │  Application Load Balancer      │   │              ║
+  ║   └─────────┘          │   │  203.0.113.10  :443 (HTTPS)     │   │              ║
+  ║                        │   │  ACM cert for app.example.com   │   │              ║
+  ║                        │   │  L7 path routing + health check │   │              ║
+  ║                        │   └───────────────┬────────────────┘   │              ║
+  ║   SG: alb-sg allows :443 from 0.0.0.0/0    │  (4) NEW TCP conn   │              ║
+  ║                        └────────────────────┼──── :8080 (HTTP) ──┘              ║
+  ║                                             ▼  [plaintext inside VPC]           ║
+  ║                        ┌──────────── PRIVATE SUBNETS ────────────┐              ║
+  ║                        │   ┌────────────────────────────────┐   │              ║
+  ║                        │   │  ECS task: Spring Boot          │   │              ║
+  ║                        │   │  10.0.10.42 :8080               │   │              ║
+  ║   SG: app-sg allows    │   │  Tomcat → DispatcherServlet     │   │              ║
+  ║   :8080 from alb-sg     │   └───────┬────────────────┬───────┘   │              ║
+  ║   ONLY                  └───────────┼────────────────┼───────────┘              ║
+  ║                           (5) JDBC  │                │ (6) egress to ext API    ║
+  ║                                     ▼                ▼                          ║
+  ║          ┌──────── DB SUBNETS ──────┐      ┌──────────────────┐                 ║
+  ║          │  RDS PostgreSQL          │      │   NAT Gateway    │ ──► Internet    ║
+  ║          │  10.0.20.5 :5432         │      │  (in public sub) │     (Stripe…)   ║
+  ║          │  SG: db-sg allows :5432  │      └──────────────────┘                 ║
+  ║          │  from app-sg ONLY        │                                           ║
+  ║          └──────────────────────────┘                                           ║
+  ╚════════════════════════════════════════════════════════════════════════════════╝
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — two TCP connections, one TLS leg</div>
+  <p>The browser does <strong>not</strong> have a TCP connection to your Spring Boot app. It has a connection to
+  the <em>ALB</em>. The ALB, acting as a reverse proxy (Part 10), opens a <em>completely separate</em> connection
+  to a chosen ECS task. So the journey has two transport legs:</p>
+  <ul>
+    <li><strong>Leg A: browser ↔ ALB</strong> — over the public Internet, <strong>encrypted (HTTPS/TLS)</strong>, terminated at the ALB using a certificate from ACM (AWS Certificate Manager).</li>
+    <li><strong>Leg B: ALB ↔ ECS task</strong> — inside the VPC, usually <strong>plaintext HTTP on :8080</strong> (the VPC is private; many teams stop here, though you can re-encrypt — see the three-level block below).</li>
+  </ul>
+  <p>This split is why your app sees the ALB's IP as the "client," not the browser's — and why <code>X-Forwarded-For</code> exists.</p>
+</div>
+
+<h3 id="j2-steps">2.b — Step-by-step walkthrough</h3>
+
+<ol>
+  <li><strong>DNS resolution via Route 53.</strong> The browser resolves <code>app.example.com</code>. The authoritative zone in Route 53 holds an <strong>ALIAS</strong> record (an AWS-specific record like a CNAME but resolvable at the zone apex) pointing at the ALB. The resolver returns one of the ALB's public IPs, e.g. <code>203.0.113.10</code> (Part 6).</li>
+  <li><strong>TCP handshake to the ALB.</strong> The browser opens TCP to <code>203.0.113.10:443</code>. Packets enter the VPC through the <strong>Internet Gateway</strong> (IGW), land in the public subnet, and are admitted by the ALB's security group <code>alb-sg</code> (allows 443 from anywhere). Handshake completes (Part 4/11).</li>
+  <li><strong>TLS handshake — terminates at the ALB.</strong> Over that TCP pipe the browser performs the Part 8 TLS handshake: <code>ClientHello</code> with SNI (Server Name Indication) <code>app.example.com</code> → ALB selects the matching ACM certificate → key exchange → encrypted tunnel. <strong>TLS ends here.</strong> The ALB now holds the plaintext request.</li>
+  <li><strong>HTTP request + L7 routing.</strong> The browser sends <code>GET /api/orders/42</code>. The ALB, an L7 device, reads the path, matches a listener rule (e.g. <code>/api/*</code> → the <code>orders</code> target group), and picks a <strong>healthy</strong> target using the target group's health checks (Part 9 — only targets passing <code>GET /actuator/health</code> are eligible).</li>
+  <li><strong>New connection to the ECS task.</strong> The ALB opens a fresh TCP connection (often from a keep-alive pool) to the chosen task at <code>10.0.10.42:8080</code>, plaintext HTTP. The app's security group <code>app-sg</code> allows 8080 <em>only</em> from <code>alb-sg</code> (Part 11 SG-to-SG reference) — the task is unreachable from the Internet directly.</li>
+  <li><strong>Forwarded headers.</strong> The ALB adds <code>X-Forwarded-For: 198.51.100.25</code> (the real client IP), <code>X-Forwarded-Proto: https</code> (the original scheme), and <code>X-Forwarded-Port: 443</code>. Without these, Spring Boot would believe the client is the ALB and that the connection was plain HTTP.</li>
+  <li><strong>Spring Boot processes.</strong> Tomcat accepts, DispatcherServlet routes to <code>OrderController</code> exactly as in Journey 1 — the app is identical; only what is in front of it changed.</li>
+  <li><strong>JDBC to RDS.</strong> The controller queries PostgreSQL at <code>10.0.20.5:5432</code>. The DB security group <code>db-sg</code> allows 5432 only from <code>app-sg</code> (the Part 11 SG chain: Internet → alb-sg → app-sg → db-sg).</li>
+  <li><strong>Optional egress to an external API.</strong> If the controller calls Stripe, that outbound request leaves the private subnet via the <strong>NAT Gateway</strong> (Part 11) — private tasks have no public IP, so the NAT GW in the public subnet performs source NAT and gives them Internet egress.</li>
+  <li><strong>Response unwinds.</strong> Spring Boot writes the JSON response on Leg B → ALB receives it → ALB writes it back to the browser over the still-encrypted Leg A (re-applying TLS) → browser renders.</li>
+</ol>
+
+<h3 id="j2-xff">2.c — The X-Forwarded-For header set (and the redirect bug it prevents)</h3>
+
+<p>Here is the exact header set the ALB presents to your Spring Boot app on Leg B. Notice the request body is
+identical to Journey 1 — the only difference is the three <code>X-Forwarded-*</code> lines the proxy injected:</p>
+
+<div class="figure-title">Fig 14.4 — What Spring Boot actually receives behind the ALB</div>
+<pre class="code">  ──►  GET /api/orders/42 HTTP/1.1
+  ──►  Host: app.example.com
+  ──►  X-Forwarded-For: 198.51.100.25        (the REAL browser IP)
+  ──►  X-Forwarded-Proto: https              (original scheme — TLS was on Leg A)
+  ──►  X-Forwarded-Port: 443
+  ──►  X-Amzn-Trace-Id: Root=1-664f...        (ALB request trace)
+  ──►  User-Agent: Mozilla/5.0 ...
+  ──►  Accept: application/json
+
+       Without forward-headers handling, request.getRemoteAddr() returns
+       10.0.x.x (the ALB), and request.isSecure() returns FALSE — so any
+       redirect Spring builds comes out as  http://app.example.com/...
+       which the browser then blocks as mixed content.</pre>
+
+<div class="callout example">
+  <div class="callout-title">🧪 The one-line fix every Spring Boot team needs behind a proxy</div>
+  <pre class="code"># application.properties — trust the proxy's forwarded headers
+server.forward-headers-strategy=native      # or =framework
+
+# Now:
+#   request.getRemoteAddr()  ──►  198.51.100.25   (real client, from X-Forwarded-For)
+#   request.isSecure()       ──►  true            (from X-Forwarded-Proto: https)
+#   redirects + cookies      ──►  built as https://app.example.com/...</pre>
+  <p>This single property is the most common "works locally, breaks behind the load balancer" fix in the
+  Spring world. The classic symptom — "my login redirect drops the user onto <code>http://</code> and they get a
+  security warning" — is <code>X-Forwarded-Proto</code> being ignored (Part 9).</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — where does TLS live?</div>
+    <p>The padlock in the browser proves the connection between the <em>browser and the ALB</em> is encrypted.
+    From the ALB to your app, traffic is usually plain text — but that hop is inside Amazon's private network, not
+    the public Internet, so it is considered safe for most apps.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — TLS termination vs re-encryption</div>
+    <p>The ALB <em>terminates</em> TLS: it decrypts the request so it can read the path and route at L7. By
+    default Leg B (ALB → task) is HTTP. You can switch the target group to HTTPS so the ALB <em>re-encrypts</em>
+    to the task — this is "TLS re-encryption" (sometimes loosely called end-to-end). You then run TLS twice and
+    your app must present its own certificate on 8080.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — when re-encryption is actually required</div>
+    <p>Compliance regimes (PCI-DSS for cardholder data, HIPAA, FedRAMP) often mandate encryption in transit
+    <em>everywhere</em>, including inside the VPC, because the threat model includes a compromised host on the
+    same subnet sniffing the wire. Then you re-encrypt Leg B (ALB target group protocol = HTTPS, app holds a
+    cert) or push TLS all the way to the pod with a service mesh (Journey 3, Part 13 mTLS). The cost is double
+    handshakes and double CPU for crypto; the benefit is no plaintext anywhere. Most non-regulated apps
+    rationally accept plaintext inside the VPC and terminate once at the ALB.</p>
+  </div>
+</div>
+
+<h3 id="j2-table">2.d — Per-step table</h3>
+
+<table>
+  <tr><th>Step</th><th>What happens</th><th>OSI layer(s)</th><th>Protocol(s)</th><th>Headers / addresses</th><th>Device / component</th></tr>
+  <tr><td>1</td><td>Resolve app.example.com (ALIAS)</td><td><span class="osi-badge">L7</span></td><td>DNS</td><td>app.example.com → 203.0.113.10</td><td>Route 53 + resolver</td></tr>
+  <tr><td>2</td><td>TCP handshake to ALB via IGW</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>198.51.100.25 → 203.0.113.10:443</td><td>IGW, alb-sg, ALB</td></tr>
+  <tr><td>3</td><td>TLS handshake — terminates at ALB</td><td><span class="osi-badge">L5</span> <span class="osi-badge">L6</span></td><td>TLS 1.3</td><td>SNI=app.example.com, ACM cert</td><td>ALB (203.0.113.10)</td></tr>
+  <tr><td>4</td><td>HTTP request; ALB L7 path-routes to healthy target</td><td><span class="osi-badge">L7</span></td><td>HTTP/1.1 (or 2)</td><td>GET /api/orders/42, Host header</td><td>ALB listener rule + health check</td></tr>
+  <tr><td>5</td><td>ALB opens NEW TCP conn to ECS task</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP, HTTP</td><td>10.0.0.x → 10.0.10.42:8080 (plaintext)</td><td>ALB ↔ app-sg ↔ ECS task</td></tr>
+  <tr><td>6</td><td>ALB injects X-Forwarded-* headers</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>X-Forwarded-For: 198.51.100.25; Proto: https</td><td>ALB</td></tr>
+  <tr><td>7</td><td>Tomcat → DispatcherServlet → controller</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>handler mapping</td><td>Spring Boot (10.0.10.42)</td></tr>
+  <tr><td>8</td><td>JDBC SELECT to RDS</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>PostgreSQL wire / TCP / IP</td><td>10.0.10.42 → 10.0.20.5:5432</td><td>app-sg → db-sg → RDS</td></tr>
+  <tr><td>9</td><td>External API egress via NAT GW</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP (+TLS to Stripe)</td><td>src NAT to NAT-GW public IP</td><td>NAT Gateway</td></tr>
+  <tr><td>10</td><td>Response: task → ALB → re-encrypt → browser</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L6</span></td><td>HTTP, TLS</td><td>200 OK + JSON</td><td>ECS task, ALB</td></tr>
+</table>
+
+<h3 id="j2-debug">2.e — What could break here + how you'd debug it</h3>
+
+<div class="callout misconception">
+  <div class="callout-title">🛠 Follow the failure (Journey 2)</div>
+  <ul>
+    <li><strong>Page won't resolve</strong> → Route 53 record missing/typo, or resolver cache stale (Part 6). Debug: <code>dig app.example.com</code> — confirm it returns the ALB IP.</li>
+    <li><strong>Connection times out (no SYN-ACK)</strong> → almost always a security group or NACL (Part 11): <code>alb-sg</code> not allowing 443, or the task's <code>app-sg</code> not allowing 8080 from <code>alb-sg</code>. A timeout (not a refusal) is the signature of a firewall silently dropping packets. Debug: VPC Flow Logs, check SG/NACL rules.</li>
+    <li><strong>HTTP 502 Bad Gateway from the ALB</strong> → the ALB reached a target but got a malformed/closed response: the app crashed, returned a bad response, or closed the keep-alive connection early (Part 9). Debug: app logs + ALB <code>HTTPCode_Target_5XX</code> metrics.</li>
+    <li><strong>HTTP 503 Service Unavailable</strong> → <em>no healthy targets</em> in the target group — every task is failing its health check (Part 9). Debug: target group health tab; check <code>/actuator/health</code>, deployment state, task crash loops.</li>
+    <li><strong>HTTP 504 Gateway Timeout</strong> → a target was selected but did not respond within the ALB idle timeout — slow query, slow downstream, deadlock (Part 9). Debug: app latency metrics, slow-query logs, thread dumps.</li>
+    <li><strong>Logins redirect to <code>http://</code> / wrong host</strong> → <code>X-Forwarded-Proto</code>/<code>Host</code> ignored. Set <code>server.forward-headers-strategy</code> (Part 9, fix above).</li>
+    <li><strong>External API calls hang from the app</strong> → no route to the Internet: missing NAT Gateway or route table entry (Part 11). Debug: route tables, NAT GW status.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="j3">Journey 3 — Browser → Kubernetes Ingress → Service → Pod</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 When you use this — and why you'd choose it</div>
+  <p><strong>When:</strong> containerized microservices running on Kubernetes (EKS on AWS). You have many
+  services, you deploy constantly, you need self-healing, rolling updates, and service discovery built in.
+  <strong>Why choose it:</strong> Kubernetes turns the manual wiring of Journey 2 into declarative objects — a
+  <code>Service</code> gives you a stable virtual address in front of a churning set of pods, an
+  <code>Ingress</code> gives you L7 routing, and the control plane reschedules dead pods automatically. The
+  defining new idea here: <strong>pod IPs are ephemeral and the client never sees them</strong> — the Service
+  abstraction (Part 12) hides all the churn behind one stable name.</p>
+</div>
+
+<h3 id="j3-topology">3.a — The topology</h3>
+
+<p>This is the canonical four-hop chain from Part 12, plus an east-west call from Part 13. North-south
+(client → pod) is the inbound path; east-west (pod → pod) is service-to-service inside the cluster.</p>
+
+<div class="figure-title">Fig 14.5 — Kubernetes north-south (in) and east-west (service-to-service)</div>
+<pre class="diagram">
+   Browser 198.51.100.25
+        │ (1) DNS app.example.com ──► cloud LB hostname ──► NLB/ALB public IP
+        │ (2) TCP + (3) TLS
+        ▼
+  ╔════════════════════════ EKS CLUSTER inside the VPC ════════════════════════════╗
+  ║  ┌──── PUBLIC SUBNETS ────┐                                                     ║
+  ║  │  Cloud Load Balancer   │  (NLB L4 or ALB L7) 203.0.113.10:443                ║
+  ║  └───────────┬────────────┘                                                     ║
+  ║              │ (4) forwards to Ingress Controller pods (NodePort/target)        ║
+  ║              ▼                                                                   ║
+  ║  ┌──────────────────────────────┐  L7, TERMINATES TLS                           ║
+  ║  │ Ingress Controller pod        │  (Nginx / Envoy)                             ║
+  ║  │ routes by host + path         │  app.example.com /api ──► orders Service     ║
+  ║  └───────────┬──────────────────┘                                              ║
+  ║              │ (5) to ClusterIP Service (virtual IP, e.g. 10.96.12.7:80)        ║
+  ║              ▼                                                                   ║
+  ║  ┌──────────────────────────────┐  L4 — kube-proxy iptables/IPVS DNAT           ║
+  ║  │ Service: orders (ClusterIP)   │  load-balances across READY pod endpoints    ║
+  ║  └───────────┬──────────────────┘                                              ║
+  ║              │ (6) DNAT to a healthy pod IP (ephemeral!)                        ║
+  ║              ▼                                                                   ║
+  ║  ┌──────────────────────────────┐                                              ║
+  ║  │ Pod: orders-7f9c  10.0.10.31  │  Spring Boot :8080                           ║
+  ║  │  (selected by readiness)      │                                             ║
+  ║  └───────────┬──────────────────┘                                              ║
+  ║              │ (7) EAST-WEST: needs the customer record                        ║
+  ║              │  GET http://customer/api/...  ──► CoreDNS resolves "customer"    ║
+  ║              ▼  (optionally via Envoy sidecars doing mTLS — Part 13)            ║
+  ║  ┌──────────────────────────────┐     ┌──────────────────────────────┐         ║
+  ║  │ Service: customer (ClusterIP) │ ──► │ Pod: customer-55ab 10.0.10.58 │        ║
+  ║  └──────────────────────────────┘     └───────────────┬──────────────┘         ║
+  ║                                                        │ JDBC                   ║
+  ║                                                        ▼ 10.0.20.5:5432 (RDS)   ║
+  ╚════════════════════════════════════════════════════════════════════════════════╝
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the Service is the stable mask over ephemeral pods</div>
+  <p>Pod <code>orders-7f9c</code> at <code>10.0.10.31</code> might be killed and rescheduled as
+  <code>orders-2k1d</code> at <code>10.0.10.77</code> thirty seconds from now (Part 12 — pod IPs are
+  ephemeral). The browser, the cloud LB, and the Ingress never know or care, because they all target the
+  <strong>Service</strong> — a stable virtual IP (ClusterIP) that <code>kube-proxy</code> programs into every
+  node's iptables/IPVS rules. The Service's endpoint list is continuously updated to contain only
+  <em>ready</em> pods. This is exactly the load-balancer indirection of Part 9, implemented as kernel packet
+  rules instead of a hardware box.</p>
+</div>
+
+<h3 id="j3-steps">3.b — Step-by-step walkthrough</h3>
+
+<ol>
+  <li><strong>DNS to the cloud LB.</strong> <code>app.example.com</code> resolves (via Route 53, Part 6) to the public IP of the cloud Load Balancer that an Ingress/Service-of-type-LoadBalancer provisioned — an NLB (L4) or ALB (L7) sitting in the public subnets (Part 11).</li>
+  <li><strong>TCP handshake</strong> to the LB at <code>203.0.113.10:443</code> (Part 4), admitted by the LB's security group.</li>
+  <li><strong>TLS handshake.</strong> Depending on setup, TLS terminates either at the cloud LB or is passed through (L4 NLB) to terminate at the <strong>Ingress Controller</strong> pod. In the common Nginx-Ingress pattern, the NLB passes TCP through and the Ingress Controller terminates TLS (Part 8/12).</li>
+  <li><strong>Ingress Controller L7 routing.</strong> The Ingress Controller pod (Nginx or Envoy) now holds the plaintext request. It reads <code>Host: app.example.com</code> and path <code>/api/orders/42</code>, matches an <code>Ingress</code> rule, and selects the backend Service <code>orders</code> (Parts 10/12).</li>
+  <li><strong>To the ClusterIP Service.</strong> The controller sends the request to the Service virtual IP, e.g. <code>10.96.12.7:80</code>. This IP is not assigned to any machine — it exists only as iptables/IPVS rules (Part 12).</li>
+  <li><strong>kube-proxy DNAT to a pod.</strong> The node's kube-proxy rules perform <strong>DNAT</strong> (destination NAT): the packet destined for the Service IP is rewritten to a specific <em>ready</em> pod IP, e.g. <code>10.0.10.31:8080</code>, chosen across the endpoint set (L4 load balancing, Part 9/12). Readiness probes (Part 9) decide which pods are eligible.</li>
+  <li><strong>Pod processes.</strong> Spring Boot in pod <code>orders-7f9c</code> handles the request — identical app code to Journeys 1 and 2.</li>
+  <li><strong>East-west call.</strong> The orders pod needs customer data. It calls <code>http://customer/api/customers/9</code>. <strong>CoreDNS</strong> (the cluster DNS, Part 12) resolves the short name <code>customer</code> to the customer Service's ClusterIP. The request then repeats steps 5–6 inside the cluster: Service → kube-proxy DNAT → a healthy customer pod.</li>
+  <li><strong>Optional sidecar mTLS.</strong> If a service mesh (Istio/Linkerd, Part 13) is installed, the orders pod's traffic is transparently intercepted by its <strong>Envoy sidecar</strong>, which opens a <strong>mutual-TLS</strong> connection to the customer pod's sidecar — encrypting and authenticating east-west traffic without the app knowing.</li>
+  <li><strong>Database.</strong> The customer pod runs JDBC to RDS at <code>10.0.20.5:5432</code> (the SG chain still applies — node/pod security group allowed by <code>db-sg</code>).</li>
+  <li><strong>Response unwinds</strong> back through each hop in reverse, TLS re-applied on the public leg, to the browser.</li>
+</ol>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the Service is a department phone extension</div>
+  <p>Calling pod <code>10.0.10.31</code> directly is like memorizing one specific employee's personal mobile
+  number — useless the moment they leave the company. Calling the <code>orders</code> Service is like dialing the
+  "Orders Department" extension: the switchboard (kube-proxy) routes you to whichever clerk is currently on shift
+  and available (ready). Staff turnover (pod churn) is invisible to callers. CoreDNS is the internal company
+  directory that turns the department <em>name</em> into that extension number.</p>
+</div>
+
+<h3 id="j3-table">3.c — Per-step table</h3>
+
+<table>
+  <tr><th>Step</th><th>What happens</th><th>OSI layer(s)</th><th>Protocol(s)</th><th>Headers / addresses</th><th>Device / component</th></tr>
+  <tr><td>1</td><td>Resolve app.example.com to cloud LB</td><td><span class="osi-badge">L7</span></td><td>DNS</td><td>→ 203.0.113.10</td><td>Route 53 + resolver</td></tr>
+  <tr><td>2</td><td>TCP handshake to cloud LB</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>198.51.100.25 → 203.0.113.10:443</td><td>NLB/ALB, SG</td></tr>
+  <tr><td>3</td><td>TLS terminates (LB or Ingress pod)</td><td><span class="osi-badge">L5</span> <span class="osi-badge">L6</span></td><td>TLS 1.3</td><td>SNI=app.example.com</td><td>Ingress Controller (Nginx/Envoy)</td></tr>
+  <tr><td>4</td><td>Ingress L7 host/path routing</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>Host + /api/* → orders Service</td><td>Ingress Controller pod</td></tr>
+  <tr><td>5</td><td>Forward to ClusterIP Service VIP</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>dst 10.96.12.7:80 (virtual)</td><td>Service (kube object)</td></tr>
+  <tr><td>6</td><td>kube-proxy DNAT to ready pod</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>rewrite dst → 10.0.10.31:8080</td><td>kube-proxy (iptables/IPVS)</td></tr>
+  <tr><td>7</td><td>Pod (Spring Boot) handles request</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>handler mapping</td><td>orders pod 10.0.10.31</td></tr>
+  <tr><td>8</td><td>East-west: CoreDNS resolves "customer"</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span></td><td>DNS / TCP</td><td>customer → 10.96.20.4 (ClusterIP)</td><td>CoreDNS + Service</td></tr>
+  <tr><td>9</td><td>Sidecar mTLS to customer pod (optional)</td><td><span class="osi-badge">L5</span> <span class="osi-badge">L6</span> <span class="osi-badge">L7</span></td><td>mTLS / HTTP</td><td>SPIFFE identity, mutual certs</td><td>Envoy sidecars (mesh)</td></tr>
+  <tr><td>10</td><td>customer pod → RDS</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>PostgreSQL wire / TCP</td><td>10.0.10.58 → 10.0.20.5:5432</td><td>customer pod → RDS</td></tr>
+</table>
+
+<h3 id="j3-debug">3.d — What could break here + how you'd debug it</h3>
+
+<div class="callout misconception">
+  <div class="callout-title">🛠 Follow the failure (Journey 3)</div>
+  <ul>
+    <li><strong>503 from the Ingress with no pods serving</strong> → the Service has <em>zero ready endpoints</em>: readiness probes failing, or the Service selector labels don't match any pod labels (Part 12). Debug: <code>kubectl get endpoints orders</code> (empty = no targets), <code>kubectl describe pod</code>, check probe config.</li>
+    <li><strong>East-west call fails with name not resolving</strong> → CoreDNS issue or wrong service name/namespace (Part 12). Debug: <code>kubectl exec</code> into the pod and <code>nslookup customer</code>; check the cross-namespace FQDN <code>customer.default.svc.cluster.local</code>.</li>
+    <li><strong>Intermittent 502/connection resets right after deploy</strong> → traffic hit a pod that was terminating during a rolling update without proper <code>preStop</code>/graceful shutdown (Part 12). Debug: ensure readiness gates and <code>terminationGracePeriodSeconds</code>.</li>
+    <li><strong>mTLS handshake failures east-west</strong> → mesh certificate/identity mismatch or a policy denying the call (Part 13). Debug: Envoy/Istio proxy logs, <code>istioctl</code> auth checks.</li>
+    <li><strong>DB connection times out from a pod</strong> → security group on the worker nodes / RDS not allowing 5432 (Part 11). Debug: VPC Flow Logs, SG rules — same as Journey 2.</li>
+    <li><strong>504 at the Ingress</strong> → backend pod too slow (Part 9). Debug: pod latency, slow queries; identical reasoning to the ALB 504.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="j4">Journey 4 — Browser → Nginx → Spring Boot</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 When you use this — and why you'd choose it</div>
+  <p><strong>When:</strong> a classic VM or bare-metal deployment, or any self-managed reverse proxy where you do
+  not have (or do not want) a cloud load balancer — a single EC2 instance, a DigitalOcean droplet, an
+  on-premises server. <strong>Why choose it:</strong> Nginx is the canonical reverse proxy (Part 10). On one host
+  it can terminate TLS, serve your React static build directly, proxy API calls to Spring Boot, hold keep-alive
+  upstream connections, and upgrade WebSockets — all from one config file you fully control. The key insight:
+  <strong>Nginx is doing by hand exactly what the ALB did as a managed service in Journey 2.</strong> Same role
+  (L7 reverse proxy + TLS termination + load balancing), different operator — you instead of AWS.</p>
+</div>
+
+<h3 id="j4-topology">4.a — The topology</h3>
+
+<div class="figure-title">Fig 14.6 — One host: Nginx out front, serving static React and proxying /api to Spring Boot</div>
+<pre class="diagram">
+   Browser 198.51.100.25
+        │ (1) DNS app.example.com ──► 203.0.113.10  (the host's public IP)
+        │ (2) TCP + (3) TLS to :443
+        ▼
+  ┌──────────────────────────── ONE VM / HOST (203.0.113.10) ──────────────────────────┐
+  │                                                                                     │
+  │   ┌───────────────────────────────────────────────────────┐                        │
+  │   │  Nginx  :443  (TLS TERMINATES HERE)                    │                        │
+  │   │                                                        │                        │
+  │   │   location /        ──►  serve /var/www/react/  (files)│  static React SPA      │
+  │   │   location /api/    ──►  proxy_pass 127.0.0.1:8080     │  ──┐                    │
+  │   │   location /ws/     ──►  proxy_pass + Upgrade headers  │    │ keep-alive         │
+  │   └────────────────────────────────────────────────────────┘    │ upstream pool      │
+  │                                                                  ▼                    │
+  │                                              ┌────────────────────────────┐          │
+  │                                              │  Spring Boot (Tomcat)       │          │
+  │                                              │  127.0.0.1:8080  (loopback) │          │
+  │                                              └───────────────┬────────────┘          │
+  │                                                              │ JDBC                   │
+  │                                                              ▼ (DB local or remote)   │
+  │                                              ┌────────────────────────────┐          │
+  │                                              │  PostgreSQL :5432           │          │
+  │                                              └────────────────────────────┘          │
+  │   Spring Boot binds 127.0.0.1 only — it is unreachable from outside; the ONLY         │
+  │   public door is Nginx on :443. (Same private-app pattern as Journey 2's app-sg.)     │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<h3 id="j4-steps">4.b — Step-by-step walkthrough</h3>
+
+<ol>
+  <li><strong>DNS.</strong> <code>app.example.com</code> resolves to the host's public IP <code>203.0.113.10</code> (an A record this time, not an ALIAS — there is no AWS LB to alias to). Part 6.</li>
+  <li><strong>TCP handshake</strong> to <code>203.0.113.10:443</code> (Part 4). The host's firewall (security group, ufw, or iptables) must allow 443.</li>
+  <li><strong>TLS terminates at Nginx.</strong> Nginx holds the certificate (e.g. from Let's Encrypt) and performs the Part 8 handshake. It now has the plaintext request. (This is the same termination role the ALB played — but you provisioned the cert and configured the cipher suite yourself.)</li>
+  <li><strong>Nginx decides: static or proxy.</strong> Nginx matches the request path against its <code>location</code> blocks (Part 10):
+    <ul>
+      <li><code>GET /</code> or <code>/assets/app.js</code> → served <strong>directly from disk</strong> (<code>/var/www/react/</code>). Spring Boot is never touched. This is why Nginx in front of a SPA is so efficient — static files never enter the JVM.</li>
+      <li><code>GET /api/orders/42</code> → <code>proxy_pass http://127.0.0.1:8080</code> to Spring Boot.</li>
+    </ul>
+  </li>
+  <li><strong>The proxy_set_header chain.</strong> When proxying, Nginx rewrites/adds headers exactly like the ALB's <code>X-Forwarded-*</code> — but here <em>you write the rules</em> (Part 9/10):
+    <pre class="code">  proxy_set_header Host              $host;
+  proxy_set_header X-Real-IP         $remote_addr;
+  proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;</pre>
+  </li>
+  <li><strong>Keep-alive upstream.</strong> Nginx maintains a pool of persistent TCP connections to <code>127.0.0.1:8080</code> (Part 4/7 keep-alive), so it does not pay a fresh handshake to Spring Boot on every request — the same reuse principle as connection pooling.</li>
+  <li><strong>Spring Boot processes</strong> the request (Tomcat → DispatcherServlet → controller → JDBC → PostgreSQL) — identical to every journey.</li>
+  <li><strong>WebSocket upgrade (live feature).</strong> For a live notifications feature, the browser opens <code>wss://app.example.com/ws/notifications</code>. The request arrives as an HTTP/1.1 <code>Upgrade: websocket</code> request (Part 7). Nginx must be told to pass the upgrade through:
+    <pre class="code">  location /ws/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }</pre>
+  Now the connection is upgraded end-to-end and Spring Boot can push messages over the long-lived socket.</li>
+  <li><strong>Response</strong> flows back through Nginx, re-encrypted over the browser's TLS leg.</li>
+</ol>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — Journey 4 and Journey 2 are the same shape</div>
+  <p>Lay Fig 14.6 next to Fig 14.3 and the structure is identical: a public L7 entry point that terminates TLS,
+  reads the path, injects forwarded headers, and proxies to a private app on 8080 over a second connection. The
+  ALB <em>is</em> a managed, horizontally-scaled, multi-tenant Nginx (conceptually). Everything you learned about
+  one transfers to the other. The differences are operational: who patches it, who scales it, who holds the cert,
+  who writes the routing rules — AWS for the ALB, you for Nginx.</p>
+</div>
+
+<h3 id="j4-table">4.c — Per-step table</h3>
+
+<table>
+  <tr><th>Step</th><th>What happens</th><th>OSI layer(s)</th><th>Protocol(s)</th><th>Headers / addresses</th><th>Device / component</th></tr>
+  <tr><td>1</td><td>Resolve app.example.com (A record)</td><td><span class="osi-badge">L7</span></td><td>DNS</td><td>→ 203.0.113.10</td><td>Resolver + authoritative DNS</td></tr>
+  <tr><td>2</td><td>TCP handshake to host :443</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>198.51.100.25 → 203.0.113.10:443</td><td>Host firewall, Nginx</td></tr>
+  <tr><td>3</td><td>TLS terminates at Nginx</td><td><span class="osi-badge">L5</span> <span class="osi-badge">L6</span></td><td>TLS 1.3</td><td>Let's Encrypt cert, SNI</td><td>Nginx</td></tr>
+  <tr><td>4a</td><td>Static path served from disk</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>GET /assets/app.js → file</td><td>Nginx (file serving)</td></tr>
+  <tr><td>4b</td><td>/api path proxied to upstream</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>GET /api/orders/42</td><td>Nginx proxy_pass</td></tr>
+  <tr><td>5</td><td>proxy_set_header adds forwarded headers</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>X-Real-IP, X-Forwarded-For/Proto</td><td>Nginx</td></tr>
+  <tr><td>6</td><td>Keep-alive upstream conn to 8080</td><td><span class="osi-badge">L4</span></td><td>TCP (HTTP keep-alive)</td><td>127.0.0.1 → 127.0.0.1:8080</td><td>Nginx ↔ Tomcat</td></tr>
+  <tr><td>7</td><td>Spring Boot → JDBC → PostgreSQL</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span></td><td>HTTP / PG wire / TCP</td><td>→ :5432</td><td>Spring Boot, PostgreSQL</td></tr>
+  <tr><td>8</td><td>WebSocket Upgrade proxied</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span></td><td>HTTP/1.1 Upgrade → WS</td><td>Upgrade: websocket; Connection: upgrade</td><td>Nginx + Spring Boot</td></tr>
+  <tr><td>9</td><td>Response re-encrypted to browser</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L6</span></td><td>HTTP, TLS</td><td>200 OK + JSON / WS frames</td><td>Nginx</td></tr>
+</table>
+
+<h3 id="j4-debug">4.d — What could break here + how you'd debug it</h3>
+
+<div class="callout misconception">
+  <div class="callout-title">🛠 Follow the failure (Journey 4)</div>
+  <ul>
+    <li><strong>502 Bad Gateway from Nginx</strong> → upstream Spring Boot is down or not listening on 127.0.0.1:8080 (Part 9/10). Nginx's own error log says it plainly: <code>connect() failed (111: Connection refused) while connecting to upstream</code>. Debug: <code>systemctl status</code> the app, <code>curl 127.0.0.1:8080</code> on the host.</li>
+    <li><strong>504 Gateway Timeout</strong> → app too slow; exceeded <code>proxy_read_timeout</code> (Part 9). Debug: app latency, raise timeout only if the slowness is legitimate.</li>
+    <li><strong>WebSocket connects then immediately drops / 400</strong> → missing <code>proxy_http_version 1.1</code> and the <code>Upgrade</code>/<code>Connection</code> headers (Part 7). The classic Nginx WebSocket bug.</li>
+    <li><strong>TLS error / "your connection is not private"</strong> → expired or misconfigured certificate (Part 8). Debug: <code>openssl s_client -connect app.example.com:443</code> to inspect the cert chain and expiry; check the Let's Encrypt renewal cron.</li>
+    <li><strong>App builds redirects to <code>http://</code></strong> → <code>X-Forwarded-Proto</code> not set in <code>proxy_set_header</code>, or Spring not configured to trust it (Part 9). Same fix as Journey 2.</li>
+    <li><strong>Static assets 404 but /api works</strong> → wrong <code>root</code>/<code>try_files</code> for the SPA; SPA client-side routes need <code>try_files $uri /index.html</code>. Config issue, not network.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="j5">Journey 5 — Browser → CDN → Load Balancer → Application</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 When you use this — and why you'd choose it</div>
+  <p><strong>When:</strong> a global application serving a mix of static and dynamic content to latency-sensitive
+  users on every continent — an e-commerce site, a media platform, any product where a user in Sydney and a user
+  in São Paulo both expect a snappy experience while your origin lives in <code>us-east-1</code>.
+  <strong>Why choose it:</strong> a CDN (Content Delivery Network) like Amazon CloudFront puts hundreds of
+  <strong>edge POPs</strong> (points of presence) physically close to users worldwide. It terminates TLS near the
+  user (killing handshake latency — Part 1's latency weapon), serves cacheable assets from the edge without ever
+  touching your origin, and forwards only the uncacheable requests over an optimized backbone to the origin
+  (which is the ALB or Nginx from the earlier journeys). The defining new idea: <strong>there are now two
+  HTTP legs (browser↔edge, edge↔origin) and a cache that can make the second leg disappear entirely.</strong></p>
+</div>
+
+<h3 id="j5-topology">5.a — The topology (with the two cache paths)</h3>
+
+<p>A CDN is, in Part 10's terms, a giant geographically-distributed reverse proxy. The single most important
+thing to understand is the <strong>branch</strong> at the edge: a cache <em>hit</em> never leaves the edge, while
+a cache <em>miss</em> (and all dynamic requests) is forwarded to the origin. We draw both paths:</p>
+
+<div class="figure-title">Fig 14.7 — CDN: anycast to the nearest edge, then HIT (stop) vs MISS (go to origin)</div>
+<pre class="diagram">
+   Browser 198.51.100.25  (in Sydney)
+        │ (1) DNS app.example.com ──► Route 53 geo/anycast ──► nearest CloudFront edge IP
+        │ (2) TCP + (3) TLS to the EDGE (terminates ~10 ms away — Part 1)
+        ▼
+  ┌──────────────── CloudFront EDGE POP (Sydney) ─ acts as reverse proxy ────────────┐
+  │                                                                                  │
+  │   (4) request arrives:  GET /assets/app.js     OR     GET /api/orders/42         │
+  │                                                                                  │
+  │        ┌──────────────── CACHE LOOKUP by cache key ──────────────┐               │
+  │        │                                                         │               │
+  │   ─────┴── HIT (cacheable + fresh) ───┐         ┌──── MISS / dynamic / no-store ──┴────┐
+  │        served straight from edge      │         │  forward to ORIGIN over CDN backbone │
+  │        NEVER touches origin           │         │  (optimized, persistent, warm TLS)   │
+  │        latency ≈ 10 ms                │         ▼                                      │
+  │        ◄── 200 OK (X-Cache: Hit)      │   ── optional Origin Shield (one regional ──   │
+  └───────────────────────────────────────┘      cache layer that absorbs misses) ──┐     │
+                                                                                     ▼     │
+                                      ╔═══════════ ORIGIN in us-east-1 (Part 2/4 journeys) ═══════════╗
+                                      ║   ┌──────────────┐      ┌──────────────┐                      ║
+                                      ║   │  ALB / Nginx │ ──►  │ Spring Boot  │ ──► RDS 10.0.20.5    ║
+                                      ║   │ 203.0.113.10 │      │ 10.0.10.42   │     :5432            ║
+                                      ║   └──────────────┘      └──────────────┘                      ║
+                                      ║   round trip Sydney ◄──► us-east-1 ≈ 200 ms                    ║
+                                      ╚═══════════════════════════════════════════════════════════════╝
+                                            ◄── response flows back; edge CACHES it per Cache-Control
+                                                so the NEXT user in Sydney gets a HIT
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the CDN only owns the cacheable half</div>
+  <p>The CDN does <strong>not</strong> serve "everything." It serves what is <em>cacheable</em>: static assets
+  (JS/CSS/images/fonts), and any response your origin explicitly marks cacheable via <code>Cache-Control</code>
+  (Part 7). Your <code>app.js</code> with <code>Cache-Control: public, max-age=31536000, immutable</code> is
+  served from the Sydney edge in ~10 ms and never touches <code>us-east-1</code>. But <code>GET /api/orders/42</code>
+  — personalized, dynamic — is marked <code>Cache-Control: no-store</code>, so it is always forwarded to the
+  origin, paying the ~200 ms round trip (but over the CDN's optimized backbone, which is still faster and more
+  reliable than the open Internet). Knowing which half is which is the whole game.</p>
+</div>
+
+<h3 id="j5-steps">5.b — Step-by-step walkthrough (both paths)</h3>
+
+<ol>
+  <li><strong>DNS resolves to the nearest edge.</strong> <code>app.example.com</code> is a CNAME/ALIAS to a CloudFront distribution. CloudFront uses <strong>anycast</strong> (Part 3 — one IP advertised from many locations) and geo-aware DNS (Part 6) so the Sydney user's resolver returns an edge IP whose nearest POP is in Sydney. The user reaches an edge ~10 ms away instead of an origin ~200 ms away.</li>
+  <li><strong>TCP handshake to the edge</strong> (Part 4) — fast, because the edge is geographically close. Round-trip-dependent handshakes (TCP + TLS) are exactly what proximity speeds up.</li>
+  <li><strong>TLS terminates at the edge.</strong> CloudFront presents your certificate (from ACM) and completes the Part 8 handshake near the user. Terminating TLS close to the client is a major latency win — the multi-round-trip handshake happens over 10 ms legs, not 200 ms legs.</li>
+  <li><strong>The edge computes a cache key and looks it up.</strong> The cache key is normally the host + path (+ selected query strings/headers). Now the branch:</li>
+  <li><strong>Path A — cache HIT.</strong> For <code>GET /assets/app.js</code>, if a fresh copy is in the edge cache, CloudFront returns it immediately with a header like <code>X-Cache: Hit from cloudfront</code>. <strong>The origin is never contacted.</strong> Total time ≈ the 10 ms edge round trip. This is the magic of a CDN.</li>
+  <li><strong>Path B — cache MISS or dynamic.</strong> For <code>GET /api/orders/42</code> (or a static asset not yet cached at this edge), CloudFront forwards the request to the <strong>origin</strong> over its optimized private backbone. Optionally it first checks an <strong>Origin Shield</strong> — a single designated regional cache that consolidates requests from all edges so your origin sees far fewer requests (and a higher cache-hit ratio).</li>
+  <li><strong>The origin is just an earlier journey.</strong> The origin is your ALB (Journey 2) or Nginx (Journey 4) in <code>us-east-1</code>. From the origin's perspective, CloudFront is simply a client at the edge's IP — it processes the request through Spring Boot → RDS exactly as before. (CloudFront forwards the real client IP in <code>CloudFront-Viewer-Address</code> / <code>X-Forwarded-For</code>, Part 9.)</li>
+  <li><strong>Response caches on the way back.</strong> The origin's response travels back to the edge. If its <code>Cache-Control</code> permits, the edge <strong>stores</strong> it, so the <em>next</em> Sydney user requesting the same asset gets a HIT (Path A). <code>ETag</code>/<code>Last-Modified</code> (Part 7) let the edge later revalidate cheaply with a conditional request (<code>If-None-Match</code> → <code>304 Not Modified</code>) instead of re-downloading.</li>
+  <li><strong>Browser renders</strong> from whichever path served it — indistinguishable to the user except in speed.</li>
+</ol>
+
+<div class="figure-title">Fig 14.8 — The same request, two outcomes (latency contrast)</div>
+<pre class="diagram">
+   CACHE HIT (static asset, already at edge)         CACHE MISS / DYNAMIC (must reach origin)
+
+   Browser ──► Edge (Sydney) ──► cache ✓             Browser ──► Edge (Sydney) ──► cache ✗
+   Browser ◄── Edge   200 OK                          Edge ──► Origin (us-east-1) over backbone
+                                                       Origin ──► Spring Boot ──► RDS
+   total ≈ 10 ms                                       Origin ◄── response, Edge caches it
+   X-Cache: Hit from cloudfront                        Browser ◄── Edge   200 OK
+                                                       total ≈ 200 ms (+ origin processing)
+                                                       X-Cache: Miss from cloudfront
+</pre>
+
+<table>
+  <tr><th>Path</th><th>Round-trip latency</th><th>Touches origin?</th><th>Typical content</th></tr>
+  <tr><td><strong>Edge cache HIT</strong></td><td>~10 ms (local POP)</td><td>No</td><td>JS/CSS/images/fonts, cacheable API responses</td></tr>
+  <tr><td><strong>Edge cache MISS / dynamic</strong></td><td>~200 ms (Sydney↔us-east-1) + processing</td><td>Yes</td><td>Personalized API calls, <code>no-store</code> responses</td></tr>
+</table>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the CDN edge is a neighborhood library branch</div>
+  <p>The origin in <code>us-east-1</code> is the national archive — authoritative, but far away. Each CDN edge is
+  your local library branch. If the book (asset) you want is on the branch shelf (cache hit), you walk out with it
+  in two minutes. If it is not (cache miss), the branch requests it from the national archive over a fast
+  inter-library courier (the CDN backbone), lends it to you, and <em>keeps a copy on the shelf</em> so the next
+  patron gets it instantly. Rare, one-of-a-kind, constantly-changing documents (dynamic/personalized requests)
+  always go to the archive. The Origin Shield is a single regional warehouse that all branches ask first, so the
+  national archive is rarely bothered.</p>
+</div>
+
+<h3 id="j5-tls">5.c — Where TLS terminates and re-encrypts across the CDN journey</h3>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — two padlocks, end to end</div>
+    <p>There are two encrypted legs: browser-to-edge and edge-to-origin. The browser's padlock is the first one.
+    The CDN decrypts at the edge so it can decide hit-vs-miss, then re-encrypts to talk to your origin. Your data
+    is encrypted on the public Internet the whole way; it is briefly in plaintext only inside the edge and inside
+    your origin, which you control.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — terminate, inspect, re-originate</div>
+    <p>CloudFront <em>terminates</em> the viewer TLS at the edge (Viewer Protocol Policy). It must — it cannot
+    compute a cache key or read <code>Cache-Control</code> on encrypted bytes. On a miss it opens a
+    <em>separate</em> TLS connection to the origin (Origin Protocol Policy = HTTPS), so the edge↔origin leg is
+    re-encrypted. That is two independent TLS sessions, just like Journey 2 had browser↔ALB and (optionally)
+    ALB↔task, but stretched across continents.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — the security side-benefits fall out for free</div>
+    <p>Because every viewer connection terminates at the CDN edge, the CDN becomes a natural enforcement point:
+    it absorbs volumetric DDoS (the edge fleet has more capacity than any origin), runs a WAF (Web Application
+    Firewall) to filter malicious requests before they reach you, and offloads all TLS handshake CPU from your
+    origin. The origin can then be locked down to accept connections <em>only</em> from the CDN (via an origin
+    access identity or a shared secret header + security group), shrinking its attack surface to one well-defended
+    front door. The CDN is simultaneously a latency tool, a caching tool, and a security perimeter — three wins
+    from one architectural move (Part 10's reverse-proxy benefits, globalized).</p>
+  </div>
+</div>
+
+<h3 id="j5-table">5.d — Per-step table</h3>
+
+<table>
+  <tr><th>Step</th><th>What happens</th><th>OSI layer(s)</th><th>Protocol(s)</th><th>Headers / addresses</th><th>Device / component</th></tr>
+  <tr><td>1</td><td>DNS → nearest edge via anycast/geo</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L3</span></td><td>DNS / anycast</td><td>app.example.com → edge IP (Sydney)</td><td>Route 53 + CloudFront</td></tr>
+  <tr><td>2</td><td>TCP handshake to edge (~10 ms)</td><td><span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>TCP / IP</td><td>198.51.100.25 → edge:443</td><td>CloudFront edge POP</td></tr>
+  <tr><td>3</td><td>TLS terminates at the edge</td><td><span class="osi-badge">L5</span> <span class="osi-badge">L6</span></td><td>TLS 1.3</td><td>ACM cert, SNI=app.example.com</td><td>CloudFront edge</td></tr>
+  <tr><td>4</td><td>Compute cache key, look up</td><td><span class="osi-badge">L7</span></td><td>HTTP (CDN cache logic)</td><td>cache key = host + path (+ qs)</td><td>CloudFront edge cache</td></tr>
+  <tr><td>5A</td><td><strong>HIT</strong>: serve from edge, skip origin</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>X-Cache: Hit; Cache-Control respected</td><td>CloudFront edge</td></tr>
+  <tr><td>5B</td><td><strong>MISS</strong>: forward to origin over backbone</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span></td><td>HTTP / TLS / TCP</td><td>X-Cache: Miss; new TLS to origin</td><td>Edge → (Origin Shield) → origin</td></tr>
+  <tr><td>6</td><td>Origin (ALB/Nginx) processes (Journey 2/4)</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>X-Forwarded-For = real client IP</td><td>ALB/Nginx → Spring Boot</td></tr>
+  <tr><td>7</td><td>Spring Boot → RDS</td><td><span class="osi-badge">L7</span> <span class="osi-badge">L4</span> <span class="osi-badge">L3</span></td><td>PG wire / TCP</td><td>10.0.10.42 → 10.0.20.5:5432</td><td>Spring Boot, RDS</td></tr>
+  <tr><td>8</td><td>Response cached at edge per Cache-Control</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>Cache-Control, ETag, Last-Modified</td><td>CloudFront edge</td></tr>
+  <tr><td>9</td><td>Browser renders</td><td><span class="osi-badge">L7</span></td><td>HTTP</td><td>body consumed</td><td>Browser</td></tr>
+</table>
+
+<h3 id="j5-debug">5.e — What could break here + how you'd debug it</h3>
+
+<div class="callout misconception">
+  <div class="callout-title">🛠 Follow the failure (Journey 5)</div>
+  <ul>
+    <li><strong>Stale content served after a deploy</strong> → the edge is serving a cached old asset that hasn't expired (Part 7 <code>Cache-Control</code>/TTL). This is why teams fingerprint filenames (<code>app.4f3a1.js</code>) — a new build = a new URL = a guaranteed fresh fetch. Debug: check <code>X-Cache</code> and <code>Age</code> headers; invalidate the distribution.</li>
+    <li><strong>Everything is a cache MISS (low hit ratio)</strong> → cache key includes too much (e.g. forwarding all query strings or cookies), or origin sends <code>Cache-Control: no-store</code> on assets. Debug: CloudFront cache statistics; tighten the cache policy.</li>
+    <li><strong>502/504 from CloudFront</strong> → the <em>origin</em> is failing or slow (Part 9 — same 502/504 semantics, now reported by the CDN). Debug: hit the origin directly (bypass the CDN) to isolate whether it's the edge or the origin.</li>
+    <li><strong>TLS error at the edge</strong> → certificate/SNI mismatch on the distribution, or the viewer used an unsupported protocol (Part 8). Debug: <code>openssl s_client -connect</code> the edge hostname; check the distribution's certificate and minimum TLS version.</li>
+    <li><strong>Redirect loop / wrong scheme</strong> → origin ignoring <code>X-Forwarded-Proto</code> from CloudFront and bouncing HTTPS→HTTP (Part 9). Same forward-headers fix.</li>
+    <li><strong>403 from CloudFront</strong> → WAF rule blocked the request, or origin-access restriction misconfigured. Debug: WAF logs.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="synthesis">Cross-journey synthesis — what changes and what never does</h2>
+
+<p>Five journeys, one set of phases. Now compress them into a single mental table you can recall under interview
+pressure. Read down each column to see how the <em>same</em> property morphs as you add middlemen.</p>
+
+<div class="figure-title">Fig 14.9 — Master comparison of all five journeys</div>
+<table>
+  <tr>
+    <th>Property</th>
+    <th>J1 — localhost</th>
+    <th>J2 — ALB → ECS</th>
+    <th>J3 — K8s Ingress</th>
+    <th>J4 — Nginx</th>
+    <th>J5 — CDN</th>
+  </tr>
+  <tr>
+    <td><strong>Network hops (client → app)</strong></td>
+    <td>0 (loopback)</td>
+    <td>1 (ALB)</td>
+    <td>2–3 (LB → Ingress → Service)</td>
+    <td>1 (Nginx)</td>
+    <td>2 (edge → origin LB)</td>
+  </tr>
+  <tr>
+    <td><strong>Where TLS terminates</strong></td>
+    <td>none (plain HTTP)</td>
+    <td>ALB (re-encrypt to task optional)</td>
+    <td>Ingress pod (or LB); mTLS east-west</td>
+    <td>Nginx</td>
+    <td>edge POP; re-encrypts to origin</td>
+  </tr>
+  <tr>
+    <td><strong>TLS handshakes on the path</strong></td>
+    <td>0</td>
+    <td>1 (browser↔ALB) [+1 if re-encrypt]</td>
+    <td>1 public [+1 per mesh hop]</td>
+    <td>1</td>
+    <td>2 (browser↔edge, edge↔origin)</td>
+  </tr>
+  <tr>
+    <td><strong>L3/L4 devices</strong></td>
+    <td>loopback iface</td>
+    <td>IGW, NAT GW, ALB targets</td>
+    <td>NLB, kube-proxy (iptables DNAT)</td>
+    <td>host firewall</td>
+    <td>anycast routing, backbone</td>
+  </tr>
+  <tr>
+    <td><strong>L7 devices</strong></td>
+    <td>none (app only)</td>
+    <td>ALB</td>
+    <td>Ingress controller, Envoy sidecars</td>
+    <td>Nginx</td>
+    <td>CDN edge + origin LB</td>
+  </tr>
+  <tr>
+    <td><strong>Where the real client IP lives</strong></td>
+    <td>directly (it's you)</td>
+    <td><code>X-Forwarded-For</code> at app</td>
+    <td><code>X-Forwarded-For</code> at pod</td>
+    <td><code>X-Real-IP</code>/<code>XFF</code> at app</td>
+    <td>XFF, grows edge→origin</td>
+  </tr>
+  <tr>
+    <td><strong>Typical latency</strong></td>
+    <td>~1 ms</td>
+    <td>region RTT + app</td>
+    <td>region RTT + app</td>
+    <td>region RTT + app</td>
+    <td>~10 ms hit / ~200 ms miss</td>
+  </tr>
+  <tr>
+    <td><strong>Choose when…</strong></td>
+    <td>dev / single VM</td>
+    <td>prod AWS, no K8s</td>
+    <td>many microservices on K8s</td>
+    <td>self-managed VM / on-prem</td>
+    <td>global, static-heavy, latency-sensitive</td>
+  </tr>
+</table>
+
+<h3 id="syn-always">Things that are ALWAYS true, regardless of architecture</h3>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 The invariants — true in every journey above</div>
+  <ol>
+    <li><strong>It always starts with DNS.</strong> Name → IP is phase one, every single time (Part 6). Even
+    <code>localhost</code> resolves (via the hosts file). No connection happens until you have an IP.</li>
+    <li><strong>There is always a TCP + TLS handshake cost per <em>new</em> connection</strong> (Parts 4/8). Every
+    fresh connection pays round trips before any data moves — which is precisely why keep-alive, connection
+    pooling (HikariCP), HTTP/2 multiplexing, and TLS session resumption exist <em>everywhere</em>. Reuse is the
+    universal optimization.</li>
+    <li><strong>Every L7 hop can read and rewrite headers</strong> — which makes each L7 hop a place to route,
+    cache, authenticate, compress, or (if misconfigured) break. More L7 hops = more power and more failure modes.</li>
+    <li><strong>The real client IP survives only via <code>X-Forwarded-For</code></strong> across L7 hops
+    (Part 9). The moment a proxy opens a new connection, the app's view of "the client" becomes the proxy unless
+    XFF carries the truth — and the app must be told to trust it.</li>
+    <li><strong>More hops = more places to debug, but also more places to cache, secure, and route.</strong> Each
+    middleman is a liability and an asset simultaneously. The art of architecture is adding exactly the hops whose
+    benefit (caching at the edge, TLS offload, L7 routing) outweighs their latency and operational cost.</li>
+    <li><strong>The application code barely changes.</strong> The exact same Spring Boot controller ran in all
+    five journeys. What changed was everything <em>in front of it</em>. Your app is the constant; the network is
+    the variable.</li>
+  </ol>
+</div>
+
+<h3 id="syn-xff">How X-Forwarded-For accumulates across hops</h3>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — the header that remembers the client</div>
+    <p>When a proxy forwards your request, it tells the next server "hey, the real person who sent this is at
+    this IP" using the <code>X-Forwarded-For</code> header. Without it, your app would think the proxy is the
+    user.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — it's a comma-separated trail</div>
+    <p>Each proxy <em>appends</em> the IP it saw to <code>X-Forwarded-For</code>, building a left-to-right trail:
+    the original client is leftmost, each subsequent proxy is added on the right. With two proxies (CDN edge then
+    origin LB) the app sees two IPs. Your code must pick the correct entry — usually the leftmost
+    <em>trusted</em> one — to identify the true client.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — why you must count your trusted hops</div>
+    <p>Because clients can <em>forge</em> <code>X-Forwarded-For</code>, you cannot blindly trust the leftmost
+    value — an attacker could prepend a fake IP. The correct rule: trust only the entries appended by
+    infrastructure <em>you</em> control, which means configuring the number of trusted proxy hops (Spring's
+    <code>ForwardedHeaderFilter</code> with a trusted-proxies list, or a framework strategy). In Journey 5 with a
+    CDN <em>and</em> an origin LB, that's two trusted hops; getting the count wrong either exposes you to IP
+    spoofing or makes you attribute traffic to your own load balancer.</p>
+  </div>
+</div>
+
+<div class="figure-title">Fig 14.10 — X-Forwarded-For growing at each hop (CDN journey)</div>
+<pre class="code">  Browser sends (no XFF — it's the origin of the chain):
+  ──►  GET /api/orders/42 HTTP/1.1
+  ──►  Host: app.example.com
+
+  After the CloudFront EDGE forwards to origin (appends client IP):
+  ──►  GET /api/orders/42 HTTP/1.1
+  ──►  X-Forwarded-For: 198.51.100.25
+  ──►  X-Forwarded-Proto: https
+
+  After the ORIGIN ALB forwards to the app (appends the edge's IP):
+  ──►  GET /api/orders/42 HTTP/1.1
+  ──►  X-Forwarded-For: 198.51.100.25, 130.176.0.7      (client, then edge)
+  ──►  X-Forwarded-Proto: https
+
+       The app reads the LEFTMOST TRUSTED entry  ──►  198.51.100.25  = the true client.
+       Trust exactly 2 hops here (edge + ALB); never trust beyond your own infrastructure.</pre>
+
+<h3 id="syn-failmap">The "follow the failure" debugging map (all journeys)</h3>
+
+<p>This is the table to internalize for on-call and for interviews. Map a <em>symptom</em> to the most likely
+layer/hop and the tool that confirms it. It spans everything you learned in Parts 4–12.</p>
+
+<table>
+  <tr><th>Symptom</th><th>Most likely layer / hop</th><th>Taught in</th><th>Tool / next step</th></tr>
+  <tr><td>Page won't resolve (name not found)</td><td>DNS</td><td>Part 6</td><td><code>dig</code> / <code>nslookup</code> — does the name return an IP?</td></tr>
+  <tr><td>"Connection refused" <em>instantly</em></td><td>L4 — nothing listening on that port</td><td>Part 4/5</td><td><code>nc -vz host port</code> — got an immediate RST</td></tr>
+  <tr><td>"Connection times out" (no response)</td><td>L3/L4 — firewall / SG / NACL dropping packets</td><td>Part 11</td><td>VPC Flow Logs; check SG/NACL rules</td></tr>
+  <tr><td>HTTP 502 Bad Gateway</td><td>L7 — origin/upstream returned a bad/closed response</td><td>Part 9</td><td>App logs; is the upstream up and well-formed?</td></tr>
+  <tr><td>HTTP 503 Service Unavailable</td><td>L7 — no healthy targets / backends</td><td>Part 9</td><td>Target group / <code>kubectl get endpoints</code> — any ready?</td></tr>
+  <tr><td>HTTP 504 Gateway Timeout</td><td>L7 — origin too slow, exceeded idle/read timeout</td><td>Part 9</td><td>App latency, slow-query logs, thread dump</td></tr>
+  <tr><td>"Your connection is not private" / TLS error</td><td>L5/L6 — cert expired, wrong SNI, bad chain</td><td>Part 8</td><td><code>openssl s_client -connect host:443</code></td></tr>
+  <tr><td>CORS error in the browser console</td><td>L7 — missing <code>Access-Control-Allow-Origin</code></td><td>Part 7</td><td>Fix server headers; the request actually succeeded</td></tr>
+  <tr><td>Login redirects to <code>http://</code> / mixed content</td><td>L7 — <code>X-Forwarded-Proto</code> ignored</td><td>Part 9</td><td>Set <code>server.forward-headers-strategy</code></td></tr>
+  <tr><td>Stale content after deploy</td><td>L7 — CDN cache TTL not expired</td><td>Part 7</td><td>Fingerprint filenames; invalidate; check <code>X-Cache</code>/<code>Age</code></td></tr>
+  <tr><td>App sees the LB's IP as the client</td><td>L7 — XFF not trusted/parsed</td><td>Part 9</td><td>Configure trusted proxies; read leftmost trusted XFF</td></tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 The all-in-one bisection trick</div>
+  <p>When a request fails through a multi-hop journey, <strong>bisect the path</strong>: test each hop in
+  isolation, working from the inside out. Curl the app directly on the host (<code>curl 127.0.0.1:8080</code>) —
+  if that works, the app is fine and the problem is in front of it. Curl the origin LB directly (bypass the CDN)
+  — if that works, the problem is the edge/cache. Each hop you eliminate halves the search space. This single
+  habit — "isolate the layer that broke its contract" — is the through-line of this entire course (it is exactly
+  the Part 1/Part 2 idea that debugging is finding <em>which layer's contract was violated</em>).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>Walk me through what happens from typing a URL to seeing the page. (The all-time classic.)</summary>
+    <p>Span every phase: <strong>(1) DNS</strong> — the browser resolves the hostname via its recursive resolver,
+    walking root → TLD → authoritative (Route 53), getting an IP (Part 6). <strong>(2) TCP</strong> — it opens a
+    socket to that IP:443 and completes the three-way handshake, SYN/SYN-ACK/ACK (Part 4). <strong>(3) TLS</strong>
+    — over that pipe it runs the TLS handshake: ClientHello with SNI, the server presents its certificate, keys
+    are agreed, an encrypted tunnel forms (Part 8). <strong>(4) HTTP</strong> — the browser sends
+    <code>GET /</code> with headers (Part 7). <strong>(5) The front door</strong> — that endpoint is usually a
+    load balancer or reverse proxy (ALB/Nginx, Part 9/10) which terminates TLS, reads the path, picks a healthy
+    backend, and opens a <em>second</em> connection to the app, adding <code>X-Forwarded-For</code>.
+    <strong>(6) The app</strong> — Tomcat → DispatcherServlet → controller (Part 7) runs the logic and issues a
+    JDBC query to PostgreSQL on 5432 (Part 4/5). <strong>(7) Return</strong> — the response unwinds back through
+    the proxy (re-encrypted) to the browser, which parses HTML/JSON and renders, firing more requests for assets
+    (often served from a CDN edge, Part 14). Strong answers name where TLS terminates and that there are multiple
+    TCP connections, not one.</p>
+  </details>
+
+  <details><summary>In Journey 2 (browser → ALB → ECS), how many TLS handshakes occur, and where?</summary>
+    <p>By default <strong>one</strong>: the browser ↔ ALB handshake, terminated at the ALB using an ACM
+    certificate. The ALB → ECS task leg (Leg B) is plaintext HTTP inside the VPC, so no second handshake. If you
+    enable re-encryption (target group protocol = HTTPS, app presents its own cert), there are <strong>two</strong>
+    — one per leg. The key teaching point: the browser never has a TLS (or even TCP) connection to your Spring
+    Boot app; it connects to the ALB, which is a separate reverse-proxy connection.</p>
+  </details>
+
+  <details><summary>Where does the real client IP live after an ALB (or any reverse proxy)?</summary>
+    <p>In the <code>X-Forwarded-For</code> request header, which the ALB injects with the original client's IP
+    (<code>198.51.100.25</code>). At the TCP level, <code>request.getRemoteAddr()</code> returns the
+    <em>ALB's</em> private IP, because the app's connection is to the ALB, not the browser. To recover the true
+    client you must read XFF — and configure the app to trust it (Spring's
+    <code>server.forward-headers-strategy</code>). With multiple proxies (CDN + ALB) XFF is a comma-separated
+    trail, client-first; trust only the hops you operate.</p>
+  </details>
+
+  <details><summary>Explain the cache hit vs miss path in a CDN.</summary>
+    <p>On a <strong>hit</strong>, the requested object is fresh in the nearest edge POP's cache; CloudFront
+    returns it directly (~10 ms) and the origin is never contacted (<code>X-Cache: Hit</code>). On a
+    <strong>miss</strong> (or any uncacheable/dynamic request marked <code>no-store</code>), the edge forwards
+    the request over the CDN's optimized backbone to the origin (the ALB/Nginx, ~200 ms for a Sydney↔us-east-1
+    round trip), optionally via an Origin Shield, then caches the response on the way back per its
+    <code>Cache-Control</code>/<code>ETag</code> so the next user gets a hit. The CDN only caches what is
+    cacheable; personalized data always reaches the origin.</p>
+  </details>
+
+  <details><summary>How does adding a CDN change latency, and why?</summary>
+    <p>It cuts latency for two reasons. First, the <strong>TLS/TCP handshakes terminate at an edge ~10 ms away</strong>
+    instead of an origin ~200 ms away — and handshakes are multi-round-trip, so proximity multiplies the saving
+    (Part 1: latency is distance-bound). Second, cacheable assets are served entirely from the edge, never paying
+    the origin round trip at all. Dynamic requests still go to the origin, but over an optimized, persistent,
+    pre-warmed backbone that is faster and more reliable than the open Internet. Net effect: static-heavy pages
+    feel near-instant worldwide; even dynamic calls get a modest boost.</p>
+  </details>
+
+  <details><summary>Given a 504, where do you look — and how is it different from 502 and 503?</summary>
+    <p>A <strong>504 Gateway Timeout</strong> means the proxy/LB selected a backend but the backend did not
+    respond within the timeout — so look at the <em>backend's speed</em>: slow database queries, a deadlock, an
+    overwhelmed thread pool, a slow downstream dependency. Tools: app latency dashboards, slow-query logs, a JVM
+    thread dump. Contrast: <strong>502 Bad Gateway</strong> = the backend <em>answered</em> but with a malformed
+    or prematurely-closed response (often a crash or a keep-alive mismatch) — look at app crash logs.
+    <strong>503 Service Unavailable</strong> = there were <em>no healthy backends at all</em> — look at health
+    checks and readiness (target group / <code>kubectl get endpoints</code>). All three are from Part 9, and the
+    distinction is exactly what separates a confident answer from a guess.</p>
+  </details>
+
+  <details><summary>Why are there two TCP connections behind a load balancer, not one?</summary>
+    <p>Because the load balancer (or any reverse proxy) operates at L4/L7 by <em>terminating</em> the client
+    connection and originating a new one to the backend. The client↔LB connection and the LB↔backend connection
+    are independent: they can use different protocols (HTTPS vs HTTP), different keep-alive pools, even different
+    HTTP versions. This is what lets the LB read the path to route (L7), reuse warm backend connections, and
+    present one stable public endpoint while backends churn. It is also why the app can't see the client's TCP
+    source IP and needs XFF.</p>
+  </details>
+
+  <details><summary>A user in Sydney says the site is slow but your origin is in us-east-1. What do you suspect and check?</summary>
+    <p>Geography: a ~200 ms round trip per request, multiplied by every uncached asset and every handshake. First
+    check whether a CDN is in front and what the cache-hit ratio is (<code>X-Cache</code>/<code>Age</code>
+    headers) — a low hit ratio means the edge isn't helping. If there's no CDN, that's the fix: put CloudFront in
+    front so TLS terminates near the user and static assets serve from a Sydney edge. Also check for chatty
+    behaviour — many sequential API round trips each pay the full transcontinental latency (Part 1's N+1
+    problem). The lever is moving content closer (edge caching) and reducing round trips, not bandwidth.</p>
+  </details>
+
+  <details><summary>In Kubernetes, the pod IP changed but clients never noticed. Why?</summary>
+    <p>Because clients target the <strong>Service</strong>, not the pod. The Service has a stable virtual IP
+    (ClusterIP) that <code>kube-proxy</code> programs into every node's iptables/IPVS rules, DNAT-ing traffic to
+    whichever ready pod IPs currently back it (Part 12). When a pod dies and is rescheduled with a new IP, the
+    endpoint list updates automatically and the Service keeps routing — the ephemeral pod IP is an internal
+    implementation detail the client never sees. CoreDNS resolves the Service <em>name</em> to that stable VIP,
+    so even the name-to-address mapping is insulated from pod churn.</p>
+  </details>
+
+  <details><summary>Where exactly does TLS terminate in each of the five journeys, and where is traffic ever plaintext?</summary>
+    <p>J1: no TLS at all (plain HTTP on loopback). J2: at the ALB; plaintext on the ALB→task leg inside the VPC
+    (unless re-encrypted). J3: at the cloud LB or Ingress controller pod; plaintext between Service/pod unless a
+    mesh adds mTLS east-west. J4: at Nginx; plaintext on Nginx→Spring Boot (loopback). J5: at the CDN edge near
+    the user, then re-encrypted edge→origin, then terminates again at the origin LB. The pattern: TLS terminates
+    at the outermost L7 device that needs to read the request, and any "plaintext" leg is deliberately kept on a
+    network you control (a VPC, a single host's loopback).</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "There's one TCP connection from my browser straight to my app."</strong><br>
+  ✅ Behind any proxy or load balancer, the browser connects to the <em>proxy</em>, and the proxy opens a
+  separate connection to the app. Every L7 hop is its own TCP (and possibly TLS) connection. In the CDN journey
+  there are at least two; with a CDN plus an origin LB plus a mesh, more. This is why the app can't see the
+  browser's source IP and why <code>X-Forwarded-For</code> exists.</p>
+
+  <p><strong>❌ "TLS is end-to-end to my application by default."</strong><br>
+  ✅ TLS almost always terminates at the <em>edge</em> — the ALB, the Ingress controller, Nginx, or the CDN edge —
+  not at your app. The leg from there to your app is frequently plaintext (inside a VPC or on loopback). True
+  end-to-end encryption to the pod requires deliberate work: re-encryption at the LB, or a service mesh doing
+  mTLS. The padlock proves browser-to-edge security, not browser-to-app.</p>
+
+  <p><strong>❌ "The CDN serves everything."</strong><br>
+  ✅ A CDN serves only what is <em>cacheable</em>: static assets and responses your origin marks cacheable. Every
+  dynamic, personalized, or <code>no-store</code> request is forwarded to the origin and pays the full origin
+  latency. A CDN with a 30% hit ratio is leaving most requests going to <code>us-east-1</code> anyway — the goal
+  is to maximize what's cacheable, not to assume the edge handles all traffic.</p>
+
+  <p><strong>❌ "More hops always means slower."</strong><br>
+  ✅ Not when a hop <em>caches</em>. A CDN adds a hop yet makes static content dramatically faster, because the
+  edge cache serves it in ~10 ms instead of a ~200 ms origin trip. The right hops (edge caches, nearby replicas)
+  reduce latency; only the wrong hops add it. Architecture is choosing which hops earn their keep.</p>
+
+  <p><strong>❌ "The app sees the browser's IP directly behind a load balancer."</strong><br>
+  ✅ It sees the load balancer's IP at the TCP layer. The real client IP survives only in
+  <code>X-Forwarded-For</code> (or <code>X-Real-IP</code>), and only if the app is configured to trust and parse
+  it. Forget this and your rate-limiting, geo-blocking, and audit logs all attribute every request to your own
+  load balancer.</p>
+
+  <p><strong>❌ "localhost and production take totally different network paths."</strong><br>
+  ✅ The <em>phases</em> are identical — resolve, transport, (secure,) HTTP, process, return — and the application
+  code is byte-for-byte the same. Production just inserts middlemen (LB, proxy, CDN) in front and adds TLS. The
+  request your controller handles looks the same; what changed is everything before it reaches the controller.
+  That's why "works locally, breaks in prod" is nearly always a middleman issue (a header, a cert, an SG), not an
+  app-logic issue.</p>
+
+  <p><strong>❌ "A 502 and a 504 are basically the same error."</strong><br>
+  ✅ They point at different problems. 502 = the backend answered badly or closed early (it's broken). 504 = the
+  backend didn't answer in time (it's slow). 503 = there was no healthy backend to ask. Treating them as
+  interchangeable sends you debugging the wrong layer; the status code <em>is</em> the diagnosis (Part 9).</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You arrived here having learned every piece in isolation across <a href="part13.html"><strong>Part 13 —
+  Microservices Networking</strong></a> and before. This chapter was the assembly: five real architectures, one
+  request traced through each, every layer and header accounted for. You can now answer "what happens when you
+  type a URL?" with the confidence of someone who has watched the bytes move. One chapter remains — the grand
+  synthesis that steps back from individual journeys to the durable principles, mental models, and judgment that
+  turn all fourteen parts into <em>mastery</em>: <a href="part15.html"><strong>Part 15 — Backend
+  Mastery</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part13.html"><span class="dir">← Previous</span><span class="t">Part 13: Microservices Networking</span></a>
+  <a href="part15.html"><span class="dir">Next →</span><span class="t">Part 15: Backend Mastery</span></a>
+</div>
+
+</main>
+</body>
+</html>

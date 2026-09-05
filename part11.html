@@ -1,0 +1,1793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 11: Cloud Networking (AWS) — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html" class="active"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 11 of 15</p>
+<h1>Cloud Networking — AWS From First Principles</h1>
+<p class="lede">For ten parts you have built a mental model of real networking: IP addresses and CIDR blocks,
+routers and routing tables, TCP, ports, firewalls, DNS, load balancers. Now we put that model in a data center
+you will never visit and rent it by the hour. The good news, and the whole thesis of this chapter:
+<strong>Amazon Web Services did not invent new networking.</strong> It took the routers, switches, firewalls,
+and cabling you already understand and turned them into API calls. Every box you are about to draw is a piece of
+Parts 1–10 you have already met — just software-defined and rented.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#framing">It's the same networking, rented</a></li>
+    <li><a href="#regions-az">Regions and Availability Zones</a></li>
+    <li><a href="#vpc">The VPC — your virtual LAN</a></li>
+    <li><a href="#subnets">Subnets — slicing the VPC</a></li>
+    <li><a href="#route-tables">Route tables — what makes a subnet public</a></li>
+    <li><a href="#igw">The Internet Gateway</a></li>
+    <li><a href="#nat">NAT Gateway — outbound for private subnets</a></li>
+    <li><a href="#security-groups">Security Groups — the stateful firewall</a></li>
+    <li><a href="#nacls">NACLs — the stateless subnet wall</a></li>
+    <li><a href="#firewalls-together">Putting the firewalls together</a></li>
+    <li><a href="#elb-in-vpc">The ALB, finally placed</a></li>
+    <li><a href="#other-essentials">Other essentials (RDS, endpoints, peering…)</a></li>
+    <li><a href="#packet-journey">Browser → AWS → ALB → EC2 (centerpiece)</a></li>
+    <li><a href="#cost-debug">Cost &amp; debugging wisdom</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="framing">1. The whole point: it's the same networking, rented</h2>
+
+<p>Before a single AWS term, internalize the frame that makes this entire chapter easy. Open any AWS architecture
+diagram and you will see boxes labelled VPC, subnet, route table, internet gateway, NAT gateway, security group.
+Every one of those is a thing you already understand from Parts 1–10:</p>
+
+<table>
+  <tr><th>AWS thing you'll meet</th><th>Is really…</th><th>Which you learned in…</th></tr>
+  <tr><td>VPC (Virtual Private Cloud)</td><td>your own private LAN/WAN with a CIDR block</td><td>Part 1 (LAN), Part 3 (CIDR)</td></tr>
+  <tr><td>Subnet</td><td>a subnet — the exact /24 split of a /16</td><td>Part 3 (subnetting)</td></tr>
+  <tr><td>Route table</td><td>a routing table with longest-prefix match</td><td>Part 3 (routing, default gateway)</td></tr>
+  <tr><td>Internet Gateway (IGW)</td><td>the default gateway + public-IP NAT</td><td>Part 3 (gateway, NAT)</td></tr>
+  <tr><td>NAT Gateway</td><td>the home-router NAT, as a managed box</td><td>Part 3 (NAT blocks inbound)</td></tr>
+  <tr><td>Security Group (SG)</td><td>a stateful L4 firewall on the instance</td><td>Parts 4–5 (TCP, ports, security-group tease)</td></tr>
+  <tr><td>NACL (Network ACL)</td><td>a stateless packet filter at the subnet edge</td><td>Parts 3–5 (IP/port filtering)</td></tr>
+  <tr><td>Application Load Balancer (ALB)</td><td>the L7 load balancer / reverse proxy</td><td>Parts 9–10 (ALB, reverse proxy)</td></tr>
+  <tr><td>Route 53</td><td>DNS, with health checks and ALIAS records</td><td>Part 6 (DNS, Route 53 tease)</td></tr>
+  <tr><td>ACM (Certificate Manager)</td><td>where your TLS certificate lives</td><td>Part 8 (HTTPS/TLS, ACM tease)</td></tr>
+</table>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why cloud networking exists in this shape</div>
+  <p>Networking is the one part of the cloud that <em>cannot</em> be a thin abstraction, because packets are
+  physical (Part 1: the Internet is glass under oceans). When a thousand companies share Amazon's data centers,
+  each one needs the illusion that it owns a private, isolated network — its own address space, its own firewall
+  rules, its own routers — even though their traffic rides the same physical fiber and the same physical switches
+  as everyone else's. The entire VPC system exists to deliver that illusion: <strong>software-defined networking
+  (SDN)</strong> that gives you a private virtual network carved out of shared hardware, configured entirely
+  through API calls instead of a screwdriver and a cable. You are renting a slice of a router, not a router.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — racking iron and waiting weeks</div>
+  <p>Before AWS, "I need a new server behind a load balancer in a private network segment" was a multi-week
+  capital project, and most of the work was networking. You filed a request; weeks later a server arrived on a
+  pallet. Someone <strong>racked</strong> it (bolted it into a rack), ran power, and ran a <strong>physical
+  Ethernet cable</strong> from its NIC (Part 1) to a port on a top-of-rack switch. A network engineer configured
+  a <strong>VLAN</strong> (Virtual LAN — a way to slice one physical switch into isolated broadcast domains, the
+  ancestor of the subnet) so your app servers couldn't see the finance department's. A separate hardware
+  <strong>firewall appliance</strong> (a Cisco ASA or a Juniper, costing tens of thousands of dollars) was
+  cabled in and its rules typed by hand. Adding a load balancer meant buying an <strong>F5 BIG-IP</strong> box
+  and cabling it too. Want a second server for redundancy? Repeat everything, and pray you cabled the redundant
+  path correctly. Lead time: weeks to months. Mistakes meant a site visit. AWS's insight was that <em>all of
+  that is information, not hardware</em> — a VLAN is a table entry, a firewall rule is a row, a route is a row —
+  so it virtualized every one of those boxes into an API. A VPC with subnets, route tables, an internet gateway,
+  a NAT gateway, security groups, and a load balancer is now a 60-second <code>terraform apply</code>. That is
+  the entire revolution: weeks of cabling collapsed into a few hundred lines of declarative config.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — your private office inside a giant shared skyscraper</div>
+  <p>Picture AWS as an enormous skyscraper (a Region) that thousands of companies rent space in. Your
+  <strong>VPC is your company's private, isolated office</strong> inside that building: you get your own internal
+  address scheme for desks, your own locked doors, and a guarantee that the company two floors up cannot wander
+  into your space — even though you share the building's foundation, elevators, and electrical grid. We will grow
+  this analogy through the whole chapter: <strong>subnets are floors</strong> of your office; the
+  <strong>internet gateway is the lobby door</strong> to the public street; the <strong>NAT gateway is the
+  staff-only side exit</strong> your people can leave through but no outsider can enter; <strong>security groups
+  are bouncers</strong> standing at each individual room checking each person's badge; and <strong>NACLs are the
+  rules posted at the entrance to each floor</strong>. Keep this building in your head — every AWS networking
+  concept slots into it.</p>
+</div>
+
+<p>One discipline for this whole chapter, because it is what separates engineers who "use AWS" from engineers who
+<em>understand</em> it: every time a new term appears, silently translate it back to Parts 1–10. "This is the
+CIDR math from Part 3." "This is the L4 firewall from Parts 4–5." "This is the ALB from Part 9." If you keep
+doing that translation, AWS networking stops being a pile of new acronyms and becomes a thin, familiar skin over
+networking you already own.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>AWS networking is normal networking — IP addresses, routers, firewalls — except you set it all up by
+    clicking buttons or running code instead of plugging in cables. Nothing about the underlying TCP/IP changed.
+    Amazon just turned the hardware into software you rent.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>AWS implements software-defined networking: virtual routers, virtual firewalls, and virtual network
+    segments multiplexed onto shared physical hardware, configured via API. A VPC is your isolated address space;
+    subnets, route tables, gateways, and security groups are the virtualized equivalents of VLANs, routing
+    tables, edge routers, and firewall appliances. The packets are ordinary IP packets (Part 3) carrying ordinary
+    TCP segments (Part 4).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The illusion is delivered by an SDN data plane (AWS's Nitro system offloads VPC encapsulation to dedicated
+    hardware on each host). Your packets are wrapped in an overlay encapsulation (a mapping layer the
+    <em>Mapping Service</em> maintains) so that two VPCs can both use <code>10.0.0.0/16</code> without colliding
+    on the physical network — overlapping private ranges (Part 3, RFC 1918) are fine because they are isolated by
+    the overlay, which is also why peering two VPCs with overlapping CIDRs is impossible. Security groups and
+    routing are enforced in that data plane, not by a box in the path, which is why they scale horizontally and
+    have no single bottleneck.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="regions-az">2. Regions and Availability Zones — geography is destiny</h2>
+
+<p>Everything in AWS lives somewhere on Earth, and Part 1 already told you why that matters: latency is bounded
+by distance and the speed of light (~200 km/ms in fiber), and "the cloud" is physical buildings. AWS organizes
+its physical footprint into two nested units you must understand before you can place a single subnet.</p>
+
+<h3>2.1 A Region is a geographic area</h3>
+
+<p>A <strong>Region</strong> is a named geographic area containing a cluster of AWS data centers — for example
+<code>us-east-1</code> (Northern Virginia), <code>eu-west-1</code> (Ireland), or <code>ap-south-1</code>
+(Mumbai). When you "deploy to AWS," you first choose a Region, and that choice is a Part 1 latency decision: put
+your servers near your users. An <code>ap-south-1</code> deployment serves Mumbai users in single-digit
+milliseconds and US East Coast users in ~200 ms (Part 1's table). Regions are almost completely isolated from
+each other — separate power, separate networks — and most AWS resources (VPCs, subnets, instances) live in
+exactly one Region. Cross-region traffic is WAN traffic (Part 1): expensive, higher latency, and crosses the
+public backbone or AWS's private inter-region links.</p>
+
+<h3>2.2 An Availability Zone is one (or more) discrete data centers</h3>
+
+<p>Inside a Region, an <strong>AZ</strong> (Availability Zone) is one or more discrete data centers with
+<strong>independent power, cooling, and physical networking</strong>. A Region like <code>ap-south-1</code> has
+three AZs (<code>ap-south-1a</code>, <code>1b</code>, <code>1c</code>). The defining property: an AZ is a
+<strong>failure domain</strong>. A power event, a flood, a fire, a network partition in one AZ should not take
+down another AZ. Crucially, AZs within a Region are connected to each other by AWS-owned, low-latency,
+high-bandwidth private fiber — single-digit-millisecond round trips, exactly the MAN-like behavior Part 1
+described ("a Region behaves like a MAN — multiple data centers in one metro area, linked by AWS-owned fiber").</p>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why multi-AZ is the fundamental availability unit</div>
+  <p>Here is the single most important operational fact in this entire chapter, and the reason every diagram you
+  will draw has things duplicated side by side: <strong>an AZ can fail, and AWS designs for it, so you must
+  too.</strong> A real AWS outage is usually "AZ <code>us-east-1b</code> is having trouble," not "AWS is down."
+  If your database and all your app servers live in one AZ, that AZ's bad afternoon is your outage. The
+  fundamental availability pattern in AWS is therefore: <strong>spread your system across 2 or 3 AZs</strong>,
+  so the loss of any one AZ leaves a healthy copy running. Multi-AZ is not a premium feature you add later — it
+  is the baseline shape of a correct deployment. Almost every "why is it built this way?" question in this
+  chapter resolves to "so that one AZ can fail without taking you down."</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — Regions are cities, AZs are buildings on different power grids</div>
+  <p>A Region is a city (Mumbai). The AZs are three office buildings in that city, deliberately placed far enough
+  apart to be on different power substations and flood plains, but close enough that a courier can run between
+  them in a couple of minutes (that's the low-latency private fiber). You rent desks in all three buildings so
+  that if one building loses power, your business keeps running from the other two. Putting all your staff in one
+  building to "keep them close" is exactly the mistake of a single-AZ deployment.</p>
+</div>
+
+<div class="figure-title">Fig 11.1 — A Region contains multiple Availability Zones</div>
+<pre class="diagram">
+   AWS REGION  ap-south-1  (Mumbai)
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                                                                  │
+  │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
+  │   │     AZ        │    │     AZ        │    │     AZ        │      │
+  │   │ ap-south-1a   │    │ ap-south-1b   │    │ ap-south-1c   │     │
+  │   │               │    │               │    │               │     │
+  │   │  data center  │    │  data center  │    │  data center  │     │
+  │   │  own power    │    │  own power    │    │  own power    │     │
+  │   │  own cooling  │    │  own cooling  │    │  own cooling  │     │
+  │   │  own network  │    │  own network  │    │  own network  │     │
+  │   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘       │
+  │          │                   │                    │              │
+  │          └───────────────────┼────────────────────┘             │
+  │                   AWS-owned private fiber                        │
+  │              low latency (~1 ms), high bandwidth                 │
+  │            (this is the MAN-like fabric from Part 1)             │
+  └──────────────────────────────────────────────────────────────────┘
+
+    a Region is geography; an AZ is a failure domain.
+    correct designs span 2 to 3 AZs so any one can fail.
+</pre>
+
+<p>A note you will hit later: there are also <strong>Local Zones</strong> (AZ-like extensions placed in metro
+areas closer to users for ultra-low latency) and <strong>edge locations</strong> (the global CDN points where
+CloudFront caches content — Part 14 walks the full path through one). For this chapter, "Region contains AZs"
+is the unit you need.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A Region is a city where AWS has data centers (Mumbai, Virginia, Ireland). An Availability Zone is one
+    data center building in that city, with its own power. You spread your app across two or three buildings so
+    that if one loses power, the others keep your app running.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Regions are isolated geographic clusters; AZs are isolated failure domains within a Region, linked by
+    low-latency private fiber (~1 ms). Resources are Region-scoped or AZ-scoped. Cross-AZ traffic is fast but
+    metered; cross-region traffic is WAN-class latency and cost. High availability means deploying redundant
+    capacity in ≥2 AZs and letting a load balancer (Part 9) route around a failed one.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>AZ identifiers like <code>us-east-1a</code> are randomized per account (your <code>1a</code> may be my
+    <code>1c</code>) to spread load; use AZ IDs (<code>use1-az1</code>) when you need a stable cross-account
+    reference. AZs are correlated-failure boundaries: the design assumption is independence, but control-plane
+    dependencies can still cause multi-AZ events (the famous large <code>us-east-1</code> incidents). Quorum
+    systems (3-AZ deployments for etcd, ZooKeeper, RDS Multi-AZ) exist precisely so that losing one AZ leaves a
+    majority — this is the same WAN-boundary math from Part 1 applied at metro scale.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="vpc">3. The VPC — your own virtual network</h2>
+
+<p>Now the centerpiece construct. A <strong>VPC</strong> (Virtual Private Cloud) is your own logically isolated
+virtual network inside an AWS Region. Part 1 made you a promise — "an AWS VPC is your <em>virtual LAN</em>" —
+and this is where we deliver it. A VPC is a software-defined LAN/WAN that you own: you pick its address range,
+you carve it into subnets, you write its routing and firewall rules, and nothing gets in or out until you wire
+it up.</p>
+
+<h3>3.1 You pick its CIDR block</h3>
+
+<p>The first decision when you create a VPC is its <strong>CIDR block</strong> — and this is the exact CIDR math
+from Part 3, no new concept. You choose a private RFC 1918 range (Part 3 explained why private: these addresses
+are reusable and not routable on the public Internet, so every company can use <code>10.0.0.0/16</code> inside
+their own VPC without colliding). The convention this whole course uses:</p>
+
+<pre class="code">VPC CIDR:  10.0.0.0/16
+
+  /16  means the first 16 bits are fixed (10.0.) and the last 16 bits vary.
+  addresses:  10.0.0.0  through  10.0.255.255
+  count:      2^(32-16) = 2^16 = 65,536 IP addresses
+
+  this is exactly the Part 3 calculation:
+    host bits = 32 minus 16 = 16   then   2^16 = 65,536 addresses
+</pre>
+
+<p>Sixty-five thousand addresses is a generous home for a serious application. Why so big? Because you will slice
+it into subnets, and you want room for each tier in each AZ, plus headroom to grow (Part 12: every Kubernetes
+pod will consume a VPC IP, so you can burn addresses fast). AWS lets a VPC CIDR be anywhere from <code>/16</code>
+(65,536 addresses) to <code>/28</code> (16 addresses); <code>/16</code> is the standard starting choice.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — one VPC spans the whole Region</div>
+  <p>A VPC is <strong>Region-wide</strong>: a single VPC stretches across <em>all</em> the Availability Zones in
+  its Region. You do not create a VPC per AZ. You create one VPC for the Region, and then you place subnets
+  inside it, each subnet pinned to one AZ. This is the inverse of a common beginner belief that a VPC lives in
+  one AZ — it does not. The VPC is the building; the AZs are floors-with-independent-power that the building
+  spans.</p>
+</div>
+
+<h3>3.2 Default isolation — nothing in or out until you wire it</h3>
+
+<p>A freshly created VPC is a sealed room. Instances inside it can talk to each other (there is an automatic
+local route — section 5), but there is <strong>no path to the Internet</strong> in either direction until you
+add the components in sections 6 and 7. This default-deny posture is a security feature, and it maps to the
+analogy: your private office in the skyscraper has no door to the street until you install one. Everything in
+this chapter after the VPC is, in some sense, you deciding exactly which doors to cut and who may pass through
+them.</p>
+
+<div class="figure-title">Fig 11.2 — A VPC is a Region-wide private network you carve up</div>
+<pre class="diagram">
+   AWS REGION  ap-south-1
+  ┌────────────────────────────────────────────────────────────────────┐
+  │                                                                    │
+  │   VPC   10.0.0.0/16   "my-app-vpc"   (65,536 private addresses)    │
+  │  ┌──────────────────────────────────────────────────────────────┐ │
+  │  │                                                              │ │
+  │  │   spans ALL AZs in the Region. isolated by default:          │ │
+  │  │   no traffic in or out until you add a gateway + routes.     │ │
+  │  │                                                              │ │
+  │  │   ┌───── AZ 1a ─────┐   ┌───── AZ 1b ─────┐                  │ │
+  │  │   │  (subnets live  │   │  (subnets live  │   ... carved up   │ │
+  │  │   │   here, §4)     │   │   here, §4)     │       in §4       │ │
+  │  │   └─────────────────┘   └─────────────────┘                  │ │
+  │  └──────────────────────────────────────────────────────────────┘ │
+  └────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — creating the VPC from the CLI</div>
+  <pre class="code">$ aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+      --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=my-app-vpc}]'
+
+# sketch of the response:
+{
+  "Vpc": {
+    "VpcId": "vpc-0a1b2c3d4e5f6a7b8",
+    "CidrBlock": "10.0.0.0/16",
+    "State": "available",
+    "IsDefault": false
+  }
+}</pre>
+  <p>One API call replaced what used to be a VLAN-design meeting and a network engineer's afternoon (see the
+  history callout). The VPC now exists, Region-wide and empty. Everything else is filling it in.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A VPC is your own private network inside AWS, like your home Wi-Fi network but virtual and bigger. You pick
+    its range of IP addresses (we use <code>10.0.0.0/16</code>, which is 65,536 addresses). By default nothing
+    can reach it from the Internet until you deliberately open a door.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A VPC is a Region-wide, software-defined L3 network with an admin-chosen RFC 1918 CIDR. It provides
+    isolation (overlapping private ranges across VPCs are fine), an implicit local route for intra-VPC
+    reachability, and default-deny to the Internet. You subdivide it into per-AZ subnets and attach gateways,
+    route tables, and firewalls to define connectivity.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Plan CIDR ranges before you build, because changing them later is painful: VPC CIDRs cannot overlap if you
+    ever want to peer or attach to a Transit Gateway (§12), and IPv4 exhaustion inside a VPC (Part 12's pods)
+    forces secondary CIDR blocks. The VPC is also where you decide IPv6 (dual-stack), DNS resolution/hostnames
+    settings (which make Route 53 private zones and internal service discovery work — Part 13), and whether to
+    use a custom DHCP option set. Treat the address plan as an API contract: it is the hardest thing to change
+    after services depend on it.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="subnets">4. Subnets — slicing the VPC, one per AZ</h2>
+
+<p>A VPC's <code>/16</code> is too big to be useful as one flat network. You slice it into
+<strong>subnets</strong>, and this is precisely the subnetting worked example Part 3 promised you: take
+<code>10.0.0.0/16</code> and split it into <code>/24</code> pieces. Each <code>/24</code> is a subnet with 256
+addresses (Part 3: host bits = 32 − 24 = 8, so 2⁸ = 256).</p>
+
+<pre class="code">Splitting the VPC  10.0.0.0/16  into /24 subnets (the Part 3 promise, delivered):
+
+  10.0.0.0/24    addresses 10.0.0.0   - 10.0.0.255    (256 addrs)
+  10.0.1.0/24    addresses 10.0.1.0   - 10.0.1.255    (256 addrs)
+  10.0.10.0/24   addresses 10.0.10.0  - 10.0.10.255   (256 addrs)
+  10.0.11.0/24   addresses 10.0.11.0  - 10.0.11.255   (256 addrs)
+  10.0.20.0/24   addresses 10.0.20.0  - 10.0.20.255   (256 addrs)
+  ... up to 10.0.255.0/24  ──►  256 possible /24 subnets in one /16
+
+  the third octet (0, 1, 10, 11, 20) is just a label we chose to keep
+  tiers readable. nothing magic about the numbers.
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — a subnet lives in exactly ONE Availability Zone</div>
+  <p>This is the rule that forces the shape of every AWS diagram. A VPC spans all AZs, but a <strong>subnet is
+  pinned to exactly one AZ</strong> and never spans two. So if you want your app tier present in two AZs (and you
+  do — §2: any AZ can fail), you create <strong>two</strong> app subnets: one in AZ-a, one in AZ-b. This is why
+  real architectures show subnets in mirrored pairs: each tier is duplicated, once per AZ, for high
+  availability.</p>
+</div>
+
+<h3>4.1 The crucial distinction: public vs private subnet</h3>
+
+<p>Every AWS tutorial talks about "public subnets" and "private subnets," and here is the honest truth that the
+console's friendly UI obscures: <strong>there is no "public" checkbox that makes a subnet public.</strong> A
+subnet is not public because of a setting on the subnet. A subnet is public for exactly one reason, which §5
+makes rigorous:</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 The single rule that defines public vs private</div>
+  <p>A subnet is <strong>public</strong> if and only if its <em>route table</em> has a route sending
+  <code>0.0.0.0/0</code> (all non-local traffic) to an <strong>Internet Gateway</strong>. A subnet is
+  <strong>private</strong> if its route table has no such route (it sends <code>0.0.0.0/0</code> to a NAT gateway,
+  or nowhere). "Public" and "private" are <em>descriptions of the route table</em>, not properties of the subnet.
+  Burn this in now; it is the most-misunderstood fact in AWS networking and the answer to an interview question
+  you will be asked.</p>
+</div>
+
+<h3>4.2 The three-tier layout — the architecture this chapter builds</h3>
+
+<p>The canonical, secure layout for a Spring Boot application is three tiers of subnets, each duplicated per AZ.
+We anchor the entire chapter on this exact deployment: a Spring Boot app on EC2/ECS in private app subnets,
+behind an ALB in public subnets, talking to RDS PostgreSQL in private database subnets.</p>
+
+<table>
+  <tr><th>Tier</th><th>Subnets (AZ-a / AZ-b)</th><th>What lives here</th><th>Public or private?</th></tr>
+  <tr><td><strong>Public</strong></td><td>10.0.0.0/24 &amp; 10.0.1.0/24</td><td>ALB, NAT gateways (the only Internet-facing things)</td><td>Public (route to IGW)</td></tr>
+  <tr><td><strong>Private app</strong></td><td>10.0.10.0/24 &amp; 10.0.11.0/24</td><td>EC2 / ECS running Spring Boot</td><td>Private (route to NAT)</td></tr>
+  <tr><td><strong>Private data</strong></td><td>10.0.20.0/24 &amp; (10.0.21.0/24)</td><td>RDS PostgreSQL (primary + standby)</td><td>Private (often no Internet route at all)</td></tr>
+</table>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — subnets are floors of your office</div>
+  <p>Your VPC office occupies several floors. The <strong>public floor</strong> (lobby level) is the only one with
+  a door to the street; you put your reception desk there — the load balancer — because reception is the only
+  thing the public should ever reach. The <strong>app floors</strong> are private: staff work there, the
+  elevator can reach them, but there is no street door. The <strong>data floor</strong> (the vault) is the most
+  private of all — only the app floors can send a request down to it, and it has no way to reach the street even
+  for outbound. Visitors never get past reception; that's the whole security model.</p>
+</div>
+
+<div class="figure-title">Fig 11.3 — Three-tier VPC: subnets mirrored across two AZs</div>
+<pre class="diagram">
+   VPC   10.0.0.0/16
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │                                                                          │
+  │   ┌──────────── AZ ap-south-1a ────────────┐  ┌──────── AZ ap-south-1b ──┐│
+  │   │                                        │  │                          ││
+  │   │  PUBLIC subnet   10.0.0.0/24           │  │  PUBLIC   10.0.1.0/24     ││
+  │   │  ┌──────────────────────────────────┐  │  │  ┌────────────────────┐   ││
+  │   │  │  ALB node     NAT gateway        │  │  │  │  ALB node   NAT GW  │   ││
+  │   │  └──────────────────────────────────┘  │  │  └────────────────────┘   ││
+  │   │                                        │  │                          ││
+  │   │  PRIVATE app    10.0.10.0/24           │  │  PRIVATE app 10.0.11.0/24 ││
+  │   │  ┌──────────────────────────────────┐  │  │  ┌────────────────────┐   ││
+  │   │  │  EC2 / ECS:  Spring Boot :8080   │  │  │  │  EC2/ECS  :8080     │   ││
+  │   │  └──────────────────────────────────┘  │  │  └────────────────────┘   ││
+  │   │                                        │  │                          ││
+  │   │  PRIVATE data   10.0.20.0/24           │  │  PRIVATE data 10.0.21.0/24││
+  │   │  ┌──────────────────────────────────┐  │  │  ┌────────────────────┐   ││
+  │   │  │  RDS PostgreSQL primary :5432    │  │  │  │  RDS standby :5432  │   ││
+  │   │  └──────────────────────────────────┘  │  │  └────────────────────┘   ││
+  │   └────────────────────────────────────────┘  └──────────────────────────┘│
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+   each tier exists in BOTH AZs so the loss of one AZ leaves a healthy copy.
+   only the PUBLIC subnets touch the Internet; app and data stay private.
+</pre>
+
+<p>Part 12 will run Kubernetes pods inside these very private app subnets, and Part 14 will walk a full
+browser-to-EC2 request through this exact picture. For now, hold the shape: three tiers, two AZs, one tier
+exposed.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A subnet is a slice of your VPC's addresses, and each slice lives in one data center (AZ). You make
+    "public" subnets for the load balancer (which the Internet can reach) and "private" subnets for your app and
+    database (which it can't). You duplicate each slice in two AZs so a data-center failure doesn't take you
+    down.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Subnets are CIDR sub-ranges of the VPC, each bound to one AZ. "Public" vs "private" is determined entirely
+    by the associated route table's <code>0.0.0.0/0</code> target (IGW = public, NAT/none = private), not by any
+    subnet flag. The standard secure layout is three tiers (public LB, private app, private data), each mirrored
+    per AZ for HA. AWS reserves 5 addresses in every subnet (first four + last), so a /24 yields 251 usable.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Right-size subnets to the workload: EKS with the VPC CNI assigns a VPC IP per pod, so app subnets often
+    need to be larger than /24 or you exhaust addresses and pods fail to schedule (Part 12). The five reserved
+    addresses per subnet are the network address, VPC router (<code>.1</code>), the Amazon-provided DNS resolver
+    at base+2 (<code>.2</code> — important for §12's endpoints and Part 6's DNS), a reserved
+    <code>.3</code>, and the broadcast address. Keep data subnets with <em>no</em> route to IGW or NAT for
+    defense in depth; reach AWS services from them via VPC endpoints (§12) instead.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="route-tables">5. Route tables — the mechanism that defines public vs private</h2>
+
+<p>This is the section that makes "public subnet" stop being magic. A <strong>route table</strong> is a set of
+rules that says, for a given destination IP range, where to send the packet next. It is <em>exactly</em> the
+routing table from Part 3 — longest-prefix match and all — now attached to subnets.</p>
+
+<div class="osi-badge">OSI Layer 3 (Network) — route tables forward by destination IP, the L3 job from Part 3</div>
+
+<p>Every subnet is associated with exactly one route table (multiple subnets can share one). When a packet leaves
+an instance, AWS consults that subnet's route table and applies <strong>longest-prefix match</strong> (Part 3):
+the most specific matching route wins. Two routes matter most.</p>
+
+<h3>5.1 The local route — why intra-VPC traffic "just works"</h3>
+
+<p>Every route table is born with one route you cannot remove: the <strong>local route</strong> for the VPC's own
+CIDR. It is what makes any instance in the VPC able to reach any other instance in the VPC, across subnets and
+across AZs, with no configuration. This is the implicit "everything inside the building can reach everything
+else inside the building" rule.</p>
+
+<pre class="code">Every route table contains this, automatically and permanently:
+
+  Destination        Target      Meaning
+  ---------------    --------    --------------------------------------
+  10.0.0.0/16        local       "for any address inside THIS VPC,
+                                  deliver it directly within the VPC"
+
+  this is why your Spring Boot app in 10.0.10.0/24 can reach RDS in
+  10.0.20.0/24 with zero routing config — both match the local route.
+</pre>
+
+<h3>5.2 The default route — the 0.0.0.0/0 entry that decides everything</h3>
+
+<p>The <strong>default route</strong>, destination <code>0.0.0.0/0</code>, matches <em>everything not already
+matched</em> by a more specific route (Part 3: it is the lowest-priority catch-all, the "default gateway"). Its
+<em>target</em> is the single bit that makes a subnet public or private. Compare the two route tables side by
+side — this is the heart of the chapter:</p>
+
+<pre class="code">PUBLIC subnet route table  (associated with 10.0.0.0/24 and 10.0.1.0/24)
+
+  Destination        Target          Meaning
+  ---------------    -----------    -----------------------------------
+  10.0.0.0/16        local          intra-VPC traffic stays inside
+  0.0.0.0/0          igw-0abc123    everything else ──► Internet Gateway
+
+      this line is the entire reason this subnet is "public".
+
+
+PRIVATE app subnet route table  (associated with 10.0.10.0/24 / 10.0.11.0/24)
+
+  Destination        Target          Meaning
+  ---------------    -----------    -----------------------------------
+  10.0.0.0/16        local          intra-VPC traffic stays inside
+  0.0.0.0/0          nat-0def456    everything else ──► NAT Gateway
+                                    (outbound only; no inbound, §7)
+
+      same shape, different target. NAT instead of IGW = private.
+
+
+PRIVATE data subnet route table  (most locked down)
+
+  Destination        Target          Meaning
+  ---------------    -----------    -----------------------------------
+  10.0.0.0/16        local          intra-VPC only. NO 0.0.0.0/0 route.
+                                    RDS cannot reach the Internet at all.
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the route table IS the definition of "public"</div>
+  <p>Look at the three tables above. The subnets are identical kinds of objects. The <em>only</em> difference
+  between "public," "private-with-egress," and "private-isolated" is one row: where <code>0.0.0.0/0</code>
+  points. Internet Gateway → public. NAT gateway → private-but-can-go-out. No default route → fully isolated.
+  When someone asks "what makes a subnet public?", the entire correct answer is: <strong>a route to an Internet
+  Gateway for <code>0.0.0.0/0</code> in its route table</strong> (plus a public IP on the instance, §6). There is
+  no other mechanism.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — inspecting a route table from the CLI</div>
+  <pre class="code">$ aws ec2 describe-route-tables --route-table-ids rtb-public
+
+# sketch of the routes for the PUBLIC subnet's table:
+"Routes": [
+  { "DestinationCidrBlock": "10.0.0.0/16", "GatewayId": "local",          "State": "active" },
+  { "DestinationCidrBlock": "0.0.0.0/0",   "GatewayId": "igw-0abc123def", "State": "active" }
+]
+
+# and the PRIVATE app subnet's table:
+"Routes": [
+  { "DestinationCidrBlock": "10.0.0.0/16", "GatewayId":    "local",       "State": "active" },
+  { "DestinationCidrBlock": "0.0.0.0/0",   "NatGatewayId": "nat-0def456",  "State": "active" }
+]</pre>
+  <p>When you debug "why can't this instance reach the Internet?", this output is the first thing to read: is
+  there a <code>0.0.0.0/0</code> route, and does it point where you think it does?</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A route table is a list of directions: "to reach these addresses, go this way." Every subnet uses one.
+    The <code>local</code> line lets everything inside your VPC talk to everything else. The
+    <code>0.0.0.0/0</code> line means "everything else (the Internet)" — and whether it points to the Internet
+    Gateway or the NAT gateway is literally what makes the subnet public or private.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Route tables forward by destination CIDR using longest-prefix match (Part 3). The immutable local route
+    (<code>VPC-CIDR → local</code>) provides intra-VPC reachability across subnets/AZs. The default route
+    (<code>0.0.0.0/0</code>) target classifies the subnet: IGW = public, NAT gateway = private-egress, absent =
+    isolated. Subnet-to-route-table association is the unit of policy; subnets without an explicit association use
+    the VPC's main route table.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Beyond IGW/NAT, route targets include VPC peering connections (<code>pcx-</code>), Transit Gateway
+    attachments (<code>tgw-</code>), VPC endpoints (gateway endpoints inject prefix-list routes for S3/DynamoDB,
+    §12), virtual private gateways (Site-to-Site VPN), and egress-only IGWs (IPv6). Longest-prefix match lets you
+    layer specific overrides (a <code>/32</code> blackhole route, or a more-specific route to a peered VPC) above
+    the catch-all. Misrouted <code>0.0.0.0/0</code> is the single most common cause of "my private instance can
+    unexpectedly reach the Internet" (it was placed in a public subnet) or "my app can't pull dependencies" (no
+    NAT route) — always read the effective route table for the instance's subnet first.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="igw">6. The Internet Gateway — the VPC's door to the world</h2>
+
+<p>The <strong>IGW</strong> (Internet Gateway) is the component that connects your VPC to the public Internet. You
+create one, attach it to the VPC, and point public subnets' <code>0.0.0.0/0</code> route at it (§5). It is the
+lobby door of your office building.</p>
+
+<div class="osi-badge">OSI Layer 3 (Network) — the IGW routes packets and performs 1:1 NAT on public IPs</div>
+
+<h3>6.1 It is not a bottleneck and not a single point of failure</h3>
+
+<p>A beginner worries: "if all my Internet traffic goes through one gateway, isn't that a bottleneck or a single
+point of failure?" No. The IGW is a <strong>horizontally scaled, redundant, fully managed</strong> AWS
+component — it is not a box sitting in a rack that can fall over. AWS implements it in the SDN fabric across the
+Region; it imposes no bandwidth limit and has no AZ affinity. You attach exactly one IGW per VPC and never think
+about its capacity again. (Contrast this with the NAT gateway in §7, which <em>is</em> per-AZ and <em>does</em>
+have throughput characteristics and cost.)</p>
+
+<h3>6.2 The IGW also performs the public-IP NAT</h3>
+
+<p>Here is the Part 3 NAT callback. Instances inside the VPC have <em>private</em> addresses
+(<code>10.0.x.x</code>). The public Internet cannot route to a <code>10.x</code> address (Part 3: RFC 1918 ranges
+are non-routable publicly). So how does an instance with a public IP communicate? The IGW performs
+<strong>1:1 NAT</strong> (Network Address Translation): it maintains a mapping between the instance's private IP
+and its assigned public IP (or Elastic IP), rewriting the source address on the way out and the destination
+address on the way in. This is the exact NAT mechanism from Part 3, done by the gateway.</p>
+
+<div class="figure-title">Fig 11.4 — The IGW translates between private and public addresses (1:1 NAT)</div>
+<pre class="diagram">
+   INSIDE THE VPC                 IGW                        PUBLIC INTERNET
+  ┌──────────────────┐    ┌────────────────────┐
+  │ instance         │    │  Internet Gateway   │
+  │ private 10.0.0.5 │    │  (managed, scaled,  │
+  │ public  203.0.113.7   │   redundant)        │
+  └────────┬─────────┘    └─────────┬──────────┘
+           │  src = 10.0.0.5         │  src REWRITTEN to 203.0.113.7
+           │ ──────────────────────► │ ──────────────────────────────►  to 93.184.x.x
+           │                         │
+           │  dst = 10.0.0.5         │  dst was 203.0.113.7, rewritten
+           │ ◄────────────────────── │ ◄──────────────────────────────  reply
+                                     │
+        the instance only ever sees its private IP;
+        the world only ever sees the public IP. that's 1:1 NAT (Part 3).
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — "public" requires BOTH a route AND a public IP</div>
+  <p>A subnet is truly Internet-reachable only when <strong>two</strong> conditions hold together: (1) its route
+  table sends <code>0.0.0.0/0</code> to the IGW (§5), <em>and</em> (2) the instance actually has a public IP or
+  Elastic IP for the IGW to translate. A "public subnet" instance with no public IP can still be reached
+  <em>inbound</em> by nothing, and reaches <em>out</em> by nothing, because the IGW has no public address to map.
+  Both pieces, or no Internet.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The Internet Gateway is the door between your VPC and the public Internet. It also translates your
+    instance's private address (<code>10.0.x.x</code>) to a public one the Internet understands, just like your
+    home router does. AWS runs it redundantly, so it never becomes a bottleneck.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>One IGW attaches per VPC; it is a horizontally scaled managed component with no bandwidth cap or AZ
+    affinity. It provides Internet routing for public subnets (target of <code>0.0.0.0/0</code>) and performs
+    static 1:1 NAT between an instance's private IP and its public/Elastic IP (Part 3). Internet reachability
+    requires both the IGW route and an assigned public IP.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The IGW's NAT is stateless 1:1 address mapping, distinct from the NAT gateway's stateful port-address
+    translation (§7). Auto-assigned public IPv4 changes on stop/start; an Elastic IP (§12) is the stable
+    alternative. For IPv6, addresses are globally routable so there is no NAT — you use an egress-only Internet
+    Gateway to get outbound-only semantics. AWS now charges for all public IPv4 addresses, which (with the NAT
+    gateway's cost) is pushing architectures toward fewer public IPs, IPv6, and VPC endpoints.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="nat">7. The NAT Gateway — outbound-only for private subnets</h2>
+
+<p>Your Spring Boot servers live in private subnets and have no public IP — good, the Internet cannot reach them.
+But they still need to <em>initiate</em> outbound connections: pull container images from a registry, download
+Maven/npm dependencies, call the Stripe API, fetch secrets, reach an S3 bucket. How does a machine with no public
+address reach out? The <strong>NAT Gateway</strong> (NAT GW) is the answer, and it is the home-router NAT from
+Part 3, delivered as a managed AWS service.</p>
+
+<div class="osi-badge">OSI Layers 3–4 — NAT rewrites IP addresses (L3) and tracks ports for the connection (L4)</div>
+
+<h3>7.1 Outbound yes, inbound no — exactly the home-router model</h3>
+
+<p>Part 3 taught you that home NAT lets every device on your LAN reach the Internet through one public IP, while
+<em>blocking unsolicited inbound</em> connections (nobody on the Internet can open a connection to your laptop
+behind the router). The NAT gateway does precisely this for a private subnet: private instances make outbound
+connections through it, the NAT gateway's public/Elastic IP appears as the source to the outside world, and
+return traffic for those connections is allowed back — but <strong>no one outside can initiate</strong> a
+connection inward, because there is no inbound mapping until the inside starts the conversation.</p>
+
+<h3>7.2 It lives in a public subnet; private route tables point at it</h3>
+
+<p>The wiring is the elegant part. The NAT gateway itself sits in a <strong>public</strong> subnet (so it can
+reach the IGW), and the <strong>private</strong> subnets' route tables send <code>0.0.0.0/0</code> to the NAT
+gateway (§5). So an outbound packet from a private app server flows: private EC2 → NAT GW (in the public subnet)
+→ IGW → Internet, and the response retraces the path back. One NAT gateway per AZ is the HA pattern (if the NAT
+gateway lived in only AZ-a, an AZ-a failure would cut off AZ-b's outbound traffic — so you deploy one per AZ and
+point each AZ's private route table at its own AZ's NAT gateway).</p>
+
+<div class="figure-title">Fig 11.5 — Outbound path: private EC2 reaches the Internet via NAT GW then IGW</div>
+<pre class="diagram">
+   PRIVATE app subnet 10.0.10.0/24      PUBLIC subnet 10.0.0.0/24
+  ┌───────────────────────────────┐    ┌───────────────────────────┐
+  │  EC2 Spring Boot               │    │   NAT Gateway              │
+  │  private 10.0.10.42            │    │   (Elastic IP 203.0.113.9) │       ┌──────────┐
+  │  NO public IP                  │    │                            │       │ Internet │
+  │                                │    │                            │  IGW  │ e.g.     │
+  │  needs: pull image, call API   │    │                            │       │ registry │
+  └───────────────┬───────────────┘    └────────────┬──────────────┘       │ / Stripe │
+                  │ 1. 0.0.0.0/0 ──► NAT (route table) │                       └────┬─────┘
+                  │ ────────────────────────────────► │                            │
+                  │                                    │ 2. src rewritten to        │
+                  │                                    │    203.0.113.9, ──► IGW     │
+                  │                                    │ ─────────────────────────► │
+                  │                                    │ ◄───────────────────────── │
+                  │ ◄──────────────────────────────── │  3. reply retraces:        │
+                  │   4. NAT maps reply back to        │     IGW ──► NAT ──► EC2       │
+                  │      10.0.10.42                    │                            │
+
+   outbound works; inbound from the Internet to 10.0.10.42 is IMPOSSIBLE
+   (no public IP, no inbound mapping) — exactly the Part 3 home-router behavior.
+</pre>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why this design is the security win</div>
+  <p>This is the whole reason your app servers stay private. They get everything they need from the outside world
+  (dependencies, APIs, secrets) <em>without ever being reachable from it</em>. An attacker scanning the public
+  Internet finds your ALB (which only speaks HTTPS) and nothing else — your Spring Boot servers and your database
+  are simply not addressable from outside. Outbound-without-inbound is the asymmetry (Part 1: who initiates) that
+  makes private subnets safe yet functional.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the famous NAT gateway bill surprise</div>
+  <p>The NAT gateway is one of the most notorious lines on a surprise AWS bill, for two reasons: an hourly charge
+  <em>plus</em> a per-gigabyte <strong>data processing charge</strong> on everything that flows through it. The
+  classic horror story: a team routes large S3 transfers or cross-service traffic through the NAT gateway by
+  accident and gets a five-figure data-processing bill. Two fixes you should know:</p>
+  <ul>
+    <li>For S3 and DynamoDB, use a <strong>gateway VPC endpoint</strong> (§12) — traffic skips the NAT gateway
+    entirely and the data-processing charge with it, and it's free.</li>
+    <li>Don't over-provision: one NAT gateway per AZ is the pattern, but a dev environment can share a single one
+    (trading some HA for cost).</li>
+  </ul>
+  <p>The cost lesson connects to Part 1: data has a price proportional to how far and through how much
+  infrastructure it travels. Keep chatty traffic local and off the NAT path.</p>
+</div>
+
+<h3>7.3 NAT Gateway vs NAT instance</h3>
+
+<table>
+  <tr><th></th><th>NAT Gateway (modern)</th><th>NAT instance (legacy)</th></tr>
+  <tr><td><strong>What it is</strong></td><td>Managed AWS service</td><td>An EC2 instance you run with NAT software</td></tr>
+  <tr><td><strong>Management</strong></td><td>Zero — AWS patches/scales it</td><td>You patch, monitor, size it</td></tr>
+  <tr><td><strong>Availability</strong></td><td>Redundant within its AZ</td><td>Single instance = SPOF unless you build failover</td></tr>
+  <tr><td><strong>Throughput</strong></td><td>Scales automatically to tens of Gbps</td><td>Limited by the instance type you chose</td></tr>
+  <tr><td><strong>Direction</strong></td><td>Outbound only (no inbound)</td><td>Outbound only (no inbound)</td></tr>
+  <tr><td><strong>Use today</strong></td><td>The default choice</td><td>Rare; only for niche cost/feature reasons</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — IGW vs NAT GW in one sentence</div>
+  <p>An <strong>Internet Gateway</strong> makes a subnet's instances reachable <em>both ways</em> (they can be
+  given public IPs and accept inbound connections). A <strong>NAT Gateway</strong> gives private instances
+  <em>outbound-only</em> Internet access and is itself unreachable for inbound from the Internet. IGW = two-way
+  door for public servers; NAT GW = one-way staff exit for private servers.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Your private servers have no public address, so the Internet can't reach them — but they still need to
+    download things and call other services. The NAT gateway is a one-way door: your servers can go out through
+    it, but nothing outside can come in. It's the same thing your home router does for your laptop.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>A NAT gateway lives in a public subnet with an Elastic IP; private route tables target it for
+    <code>0.0.0.0/0</code>. It performs stateful source NAT (PAT) so many private instances share one public IP
+    for outbound flows, and only return traffic for established flows is allowed back — no inbound initiation.
+    Deploy one per AZ for HA. Watch the hourly + per-GB data-processing cost; use gateway endpoints for S3/DynamoDB
+    to bypass it.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>A NAT gateway supports up to ~55,000 simultaneous connections per unique destination (more across many
+    destinations) and can exhaust ports under extreme fan-out to a single endpoint — a real failure mode for
+    chatty egress to one API. It is AZ-scoped: route each private subnet to a NAT gateway in its <em>own</em> AZ
+    to keep the path same-AZ and avoid cross-AZ data charges (and to survive an AZ loss). NAT gateways do not
+    work for inbound or for protocols that embed addresses without ALG support; for private inbound from on-prem
+    use a different path (VPN/Direct Connect, §12). The cost model makes VPC endpoints and same-AZ design
+    financially, not just architecturally, important.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="security-groups">8. Security Groups — the stateful, identity-aware firewall</h2>
+
+<p>Now the firewalls, and this is where Parts 4 and 5 become concrete. A <strong>Security Group</strong> (SG) is
+a virtual firewall you attach to a resource — an <strong>ENI</strong> (Elastic Network Interface, the virtual
+NIC of an instance), an EC2 instance, an ECS task, an ALB, an RDS database. It controls which traffic, by
+protocol and port and source, is allowed in and out.</p>
+
+<div class="osi-badge">OSI Layers 3–4 — SGs filter by IP (L3) and by port/protocol (L4) — the firewall from Parts 4–5</div>
+
+<p>Why L3/L4? Because an SG rule is written in terms of an IP range (Layer 3, Part 3) and a port + protocol
+(Layer 4, Parts 4–5): "allow TCP 443 from 0.0.0.0/0." It does not understand HTTP paths or headers — that's
+Layer 7, the ALB's job (§11). An SG is the stateful packet filter from Parts 4–5, attached to your resource and
+configured by API.</p>
+
+<h3>8.1 Three properties that define how SGs behave</h3>
+
+<p><strong>(1) Allow-only — there is no "deny."</strong> An SG contains only <em>allow</em> rules. You cannot
+write "deny traffic from this IP" in a security group. The evaluation is simply: <em>is there any rule that
+allows this packet?</em> If yes, it passes; if no rule matches, it is dropped (implicit deny). This surprises
+people coming from traditional firewalls — to block something with a security group, you simply don't allow it.
+(NACLs in §9 are where explicit deny lives.)</p>
+
+<p><strong>(2) Stateful — return traffic is automatic.</strong> This is the Part 4 connection-state callback, and
+it is the most important behavioral difference from NACLs. A security group is <strong>stateful</strong>: if you
+allow an inbound connection, the response is <em>automatically</em> allowed back out, and vice versa, because the
+SG tracks the state of each connection (Part 4: TCP connections have state — the handshake, established, etc.).
+You allow inbound TCP 443; when your server replies, that reply flows out without you writing any outbound rule,
+because the SG remembers "this is the return half of an allowed connection." You never write rules for return
+traffic.</p>
+
+<p><strong>(3) SG rules can reference other SGs — the killer feature.</strong> A source or destination in an SG
+rule does not have to be an IP range. It can be <em>another security group's ID</em>. "Allow TCP 8080 from
+<code>sg-alb</code>" means "allow port 8080 from anything that has the ALB's security group attached" — with no
+IP addresses anywhere. This is <strong>identity-based, IP-free microsegmentation</strong>: you describe the
+<em>role</em> of the allowed source, not its address. When the ALB scales out and adds nodes with new private
+IPs, your rule keeps working because it references the group, not the addresses.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — security groups are bouncers checking each person's badge</div>
+  <p>A security group is a bouncer standing at the door of one specific room (one instance), checking every
+  person trying to enter. The bouncer has a list of who's allowed in — but the list isn't names and addresses,
+  it's <em>badges</em>: "anyone wearing an ALB badge may enter on port 8080." It doesn't matter how many ALB
+  staff there are or what their employee numbers are; the badge is the credential. And the bouncer is
+  stateful: once it lets someone in, it remembers them and lets them walk back out without re-checking. The
+  implicit-deny rule is just "no badge on my list? you don't get in" — there's no separate "banned" list at the
+  room door (that's the floor-level NACL's job, §9).</p>
+</div>
+
+<h3>8.2 The three-tier SG chain — the most important practical diagram</h3>
+
+<p>Here is how the identity-based feature builds a complete, IP-free security model for our Spring Boot
+deployment. Three security groups, each referencing the one in front of it, form a chain where every tier can
+<em>only</em> be reached by the tier that should reach it:</p>
+
+<pre class="code">sg-alb   (attached to the Application Load Balancer)
+  INBOUND
+    Allow  TCP 443   from  0.0.0.0/0        ◄──  the public may reach the ALB on HTTPS
+    Allow  TCP 80    from  0.0.0.0/0        ◄──  (optional) to redirect to 443
+  OUTBOUND
+    (stateful: replies auto-allowed; egress to targets handled below)
+
+
+sg-app   (attached to the EC2 / ECS instances running Spring Boot on 8080)
+  INBOUND
+    Allow  TCP 8080  from  sg-alb           ◄──  ONLY the ALB may reach the app
+  OUTBOUND
+    Allow  TCP 5432  to    sg-db            ◄──  the app may reach the database
+    Allow  TCP 443   to    0.0.0.0/0        ◄──  the app may call external HTTPS (via NAT)
+
+
+sg-db    (attached to the RDS PostgreSQL instance on 5432)
+  INBOUND
+    Allow  TCP 5432  from  sg-app           ◄──  ONLY the app tier may reach the database
+  OUTBOUND
+    (none needed; stateful replies go back to the app automatically)
+</pre>
+
+<p>Read what this achieves. The database accepts connections from <em>nothing</em> except instances carrying
+<code>sg-app</code>. The app accepts connections from <em>nothing</em> except the ALB. The ALB is the only thing
+the public can reach, and only on 443. There is not a single IP address in the app or db rules — if you add a
+third app server or replace the database, the rules need no edits. This chain is the single most important
+practical pattern in AWS networking, and you should be able to draw it from memory.</p>
+
+<div class="figure-title">Fig 11.6 — The three-tier security-group chain (each tier reachable only by the one in front)</div>
+<pre class="diagram">
+   INTERNET            ALB                  APP (EC2/ECS)        DATABASE (RDS)
+  ┌─────────┐    ┌──────────────┐    ┌──────────────────┐    ┌───────────────┐
+  │ clients │    │  sg-alb       │    │  sg-app           │    │  sg-db        │
+  │         │    │              │    │                  │    │               │
+  │         │──► │ allow 443     │──► │ allow 8080        │──► │ allow 5432    │
+  │  :443   │    │ from          │    │ from sg-alb       │    │ from sg-app   │
+  │         │    │ 0.0.0.0/0     │    │ (nobody else!)    │    │ (nobody else!)│
+  └─────────┘    └──────────────┘    └──────────────────┘    └───────────────┘
+                       │                     │                      │
+        the ONLY thing │      reachable ONLY │       reachable ONLY │
+        public-facing  │      by the ALB     │       by the app     │
+
+   no IP addresses anywhere — each rule names the SG (the "badge") allowed in.
+   stateful: every reply flows back automatically, no return rules written.
+</pre>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the SG rule as CLI / Terraform</div>
+  <pre class="code"># "allow 8080 on the app SG, but ONLY from the ALB's SG":
+$ aws ec2 authorize-security-group-ingress \
+    --group-id sg-app \
+    --protocol tcp --port 8080 \
+    --source-group sg-alb           # note: source is a GROUP, not a CIDR
+
+# the same idea in Terraform:
+resource "aws_security_group_rule" "app_from_alb" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.app.id
+  from_port = 8080  to_port = 8080  protocol = "tcp"
+  source_security_group_id = aws_security_group.alb.id   # identity, not IP
+}</pre>
+  </div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A security group is a firewall around one server (or the load balancer, or the database). It only has
+    "allow" rules — to block something, you just don't allow it. It's smart about replies: if you allow a request
+    in, the answer goes back out automatically. The best trick: a rule can say "allow the app servers" by name
+    instead of by IP address.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>SGs are stateful, allow-only L3/L4 filters attached to ENIs (instances, ALB, RDS). Inbound and outbound
+    rules are evaluated as "does any rule permit this?"; return traffic for established connections is
+    auto-permitted (stateful, Part 4). Rules can reference other SGs as source/destination, enabling identity-based
+    microsegmentation that survives scaling and IP churn. The canonical pattern is a tiered chain:
+    ALB-SG ⟵ public, app-SG ⟵ ALB-SG, db-SG ⟵ app-SG.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>SG references resolve in the data plane to the current member ENIs' addresses, updated automatically — this
+    is how they track autoscaling. SGs are evaluated per-ENI, so a multi-homed instance can have different rules
+    per interface. There are account limits (rules per SG, SGs per ENI) that matter at scale. Because SGs are
+    allow-only and stateful, they cannot express "block this specific bad IP" — that requires a NACL deny (§9) or
+    AWS Network Firewall / WAF. Over-broad egress (<code>0.0.0.0/0</code> on all ports) is a common finding;
+    least-privilege egress (only 443 + the DB port) limits blast radius and data exfiltration paths.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="nacls">9. NACLs — the stateless wall at the subnet boundary</h2>
+
+<p>The second firewall operates at a different level. A <strong>NACL</strong> (Network Access Control List) is a
+firewall attached to a <em>subnet</em>, filtering every packet that crosses the subnet boundary in or out. Where
+a security group wraps one resource, a NACL wraps a whole floor.</p>
+
+<div class="osi-badge">OSI Layers 3–4 — NACLs filter by IP (L3) and port/protocol (L4) at the subnet edge</div>
+
+<h3>9.1 Three properties — and they are nearly the opposite of an SG's</h3>
+
+<p><strong>(1) Stateless — you must allow both directions.</strong> This is the headline difference and the
+classic gotcha, and it is the Part 5 ephemeral-ports callback. A NACL is <strong>stateless</strong>: it does not
+remember connections. If you allow an inbound packet, the <em>response is not automatically allowed back</em> —
+you must write a separate outbound rule for the return traffic. And because the return traffic goes to the
+client's <strong>ephemeral port</strong> (Part 5: the OS picks a high-numbered random source port, typically
+1024–65535, for each outbound connection), your outbound rule must allow that whole ephemeral port range. Forget
+this and connections hang: the request gets in, the server replies, and the reply is silently dropped on the way
+out.</p>
+
+<p><strong>(2) Allow AND deny.</strong> Unlike security groups, NACLs support explicit <em>deny</em> rules. This
+is what makes them useful as a coarse blocklist: "deny all traffic from this known-bad IP range across the entire
+subnet," which an SG cannot express.</p>
+
+<p><strong>(3) Numbered and ordered — first match wins.</strong> NACL rules have rule numbers (e.g. 100, 200,
+300). They are evaluated in ascending numeric order, and the <em>first</em> rule that matches a packet decides
+its fate — lower numbers win. (Security groups have no order; all rules are simply OR-ed together.) There is a
+final implicit <code>*</code> rule that denies anything unmatched.</p>
+
+<p>The <strong>default NACL</strong> that comes with a VPC allows all inbound and all outbound traffic — so out of
+the box NACLs are wide open and the security groups do all the work. Most teams leave NACLs permissive and use
+them only as a targeted backstop.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — NACLs are the rules posted at the entrance to each floor</div>
+  <p>If security groups are bouncers at each room door checking badges, a NACL is the <strong>list of rules
+  posted at the elevator lobby of an entire floor</strong>: "this floor admits these kinds of people and forbids
+  those." It applies to everyone entering or leaving the floor, before they ever reach a room. And it is
+  forgetful (stateless): it doesn't track who walked in, so if you want people to be able to walk back out, you
+  must post a separate "exit allowed" rule — and exits leave through whatever door number they happened to use
+  (the ephemeral ports). The floor rules can include an explicit "no entry for this group" (deny), which the room
+  bouncers cannot. In practice the floor rules are usually "let everyone through" and the real control happens at
+  the room doors.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — a NACL that allows inbound HTTPS, including the return rule</div>
+  <pre class="code">NACL for a public subnet — note you must write BOTH directions:
+
+  INBOUND rules
+   Rule#   Type      Protocol  Port range   Source         Allow/Deny
+   100     HTTPS     TCP       443          0.0.0.0/0      ALLOW
+   *       all       all       all          0.0.0.0/0      DENY    (implicit)
+
+  OUTBOUND rules
+   Rule#   Type      Protocol  Port range   Destination    Allow/Deny
+   100     custom    TCP       1024-65535   0.0.0.0/0      ALLOW   ◄── the RETURN
+   *       all       all       all          0.0.0.0/0      DENY       traffic to the
+                                                                      client's ephemeral
+                                                                      port (Part 5)
+
+  forget outbound rule 100 and every HTTPS connection hangs:
+  request arrives on 443, server replies to the client's ephemeral port,
+  reply hits the implicit DENY and is dropped. classic stateless gotcha.
+</pre>
+  </div>
+
+<h3>9.2 SG vs NACL — the comparison every interview wants</h3>
+
+<table>
+  <tr><th></th><th>Security Group (SG)</th><th>Network ACL (NACL)</th></tr>
+  <tr><td><strong>Operates at</strong></td><td>The ENI / instance / ALB / RDS</td><td>The subnet boundary</td></tr>
+  <tr><td><strong>State</strong></td><td>Stateful (return traffic auto-allowed)</td><td>Stateless (must allow both directions)</td></tr>
+  <tr><td><strong>Rule types</strong></td><td>Allow only (implicit deny)</td><td>Allow <em>and</em> Deny</td></tr>
+  <tr><td><strong>Rule evaluation</strong></td><td>All rules OR-ed; no order</td><td>Numbered; first match wins</td></tr>
+  <tr><td><strong>Can reference an SG?</strong></td><td>Yes — by SG ID (identity-based)</td><td>No — CIDR ranges only</td></tr>
+  <tr><td><strong>Ephemeral ports</strong></td><td>Handled automatically (stateful)</td><td>You must allow them in the return rule (Part 5)</td></tr>
+  <tr><td><strong>Default behavior</strong></td><td>Deny all inbound, allow all outbound</td><td>Default NACL allows all both ways</td></tr>
+  <tr><td><strong>Primary use</strong></td><td>Your main, fine-grained control</td><td>Coarse subnet-wide backstop / blocklist</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — a packet must pass BOTH, and SGs are your primary tool</div>
+  <p>To reach an instance from outside the subnet, a packet must be permitted by the <strong>subnet's NACL</strong>
+  (the floor rules) <em>and</em> the <strong>instance's security group</strong> (the room bouncer). Both must say
+  yes; either one can drop it. In practice: <strong>use security groups as your primary, fine-grained
+  control</strong> (stateful, identity-aware, easy), and <strong>leave NACLs permissive</strong> except as a
+  blunt instrument for subnet-wide denies (e.g. blocking a malicious IP range). If you start hand-managing NACL
+  rules for normal app traffic, you will spend your life debugging the stateless ephemeral-port gotcha for little
+  benefit.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A NACL is a firewall around a whole subnet (a floor), instead of one server. It's "forgetful": if you let a
+    request in, you must separately let the reply out, and the reply leaves on a random high port number (Part 5).
+    Unlike security groups, NACLs can explicitly block things. Most people leave NACLs open and rely on security
+    groups.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>NACLs are stateless, ordered (first-match), allow+deny L3/L4 filters at the subnet edge. Statelessness
+    forces explicit return rules covering the client's ephemeral port range (Part 5). They cannot reference SGs
+    (CIDR only). A packet must pass the subnet NACL <em>and</em> the resource SG. Default NACLs allow all; the
+    recommended posture is permissive NACLs + tight SGs, with NACLs reserved for coarse subnet-wide deny.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Because NACLs are stateless and evaluated before SGs on ingress (and after on egress), they are useful for
+    cheap, broad denials that you don't want hitting every instance's SG, and for compliance requirements that
+    mandate subnet-level controls. The ephemeral range differs by OS (Linux 32768–60999, older Windows
+    49152–65535, NLB/Lambda may use others), so return rules typically allow 1024–65535 to be safe. NACLs apply
+    to traffic <em>crossing</em> the subnet boundary, not to intra-subnet traffic — two instances in the same
+    subnet are NACL-unfiltered between each other (only their SGs apply). Over-reliance on NACLs is an
+    anti-pattern; they don't scale to application-identity policy the way SG references do.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="firewalls-together">10. Putting the firewalls together — a packet's gauntlet</h2>
+
+<p>Now combine §8 and §9 and watch a packet from the Internet run the full gauntlet to reach your app, then watch
+the reply come back. This is where the stateful-vs-stateless difference becomes vivid: the security groups need
+no return rules; the NACLs do.</p>
+
+<div class="figure-title">Fig 11.7 — Inbound gauntlet and stateful/stateless return behavior</div>
+<pre class="diagram">
+   INBOUND: a client packet headed for the app (port 443 to ALB, then 8080 to EC2)
+
+   Internet
+      │
+      ▼  enters the VPC through the
+   ┌────────┐
+   │  IGW   │   Internet Gateway (public-IP NAT, §6)
+   └───┬────┘
+       ▼
+   ┌──────────────────── PUBLIC subnet ────────────────────┐
+   │  [1] NACL inbound rule must ALLOW 443  ───────────────┼─►  pass
+   │  [2] sg-alb must ALLOW 443 from 0.0.0.0/0  ───────────┼─►  pass
+   │        ALB accepts, terminates TLS, opens a NEW conn  │
+   │        to the app on 8080 (the ALB is now the client) │
+   └───────────────────────────┬───────────────────────────┘
+                               ▼
+   ┌──────────────────── PRIVATE app subnet ───────────────┐
+   │  [3] NACL inbound rule must ALLOW 8080 (from VPC) ────┼─►  pass
+   │  [4] sg-app must ALLOW 8080 from sg-alb  ─────────────┼─►  pass
+   │        EC2 Spring Boot receives the request           │
+   └───────────────────────────────────────────────────────┘
+
+   RETURN: the reply travels back app ──► ALB ──► client
+
+   ┌─ at the app's SECURITY GROUP (sg-app) ─────────────────┐
+   │  STATEFUL: reply auto-allowed. NO outbound rule needed.│
+   └────────────────────────────────────────────────────────┘
+   ┌─ at the private subnet's NACL ─────────────────────────┐
+   │  STATELESS: you MUST have an outbound ALLOW for the     │
+   │  ephemeral return port (Part 5), or the reply is DROPPED│
+   └────────────────────────────────────────────────────────┘
+   ┌─ at the ALB's SG (sg-alb) ─────────────────────────────┐
+   │  STATEFUL: reply to the client auto-allowed.            │
+   └────────────────────────────────────────────────────────┘
+   ┌─ at the public subnet's NACL ──────────────────────────┐
+   │  STATELESS: needs an outbound ALLOW for the client's    │
+   │  ephemeral port, or the reply never leaves.             │
+   └────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — this is why "it hangs" usually means NACL, and "refused" usually means SG</div>
+  <p>Hold onto this for the debugging section (§14). Because security groups are stateful, the failure mode you
+  hit with a wrong NACL is a <strong>hang/timeout</strong> (the request got in but the stateless return was
+  dropped, so the client waits forever — Part 4's "no RST, just silence"). A wrong security group, by contrast,
+  tends to drop the packet before the connection establishes, which can also present as a timeout. Either way:
+  a connection that <em>times out</em> rather than getting a clean refusal is almost always a firewall (SG or
+  NACL) or routing problem, not your application code — because a closed port would send a TCP RST (Part 4),
+  and a firewall silently swallows the packet instead.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A packet has to get past two checkpoints to reach your server: the floor rules (NACL) and the room bouncer
+    (security group). On the way back, the security group remembers the conversation and lets the reply out
+    automatically — but the NACL is forgetful, so you have to explicitly allow the reply. If a connection just
+    hangs, a forgotten NACL return rule is a prime suspect.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Ingress order: IGW → subnet NACL (stateless) → resource SG (stateful). A packet must be allowed by both.
+    On egress/return, SGs auto-allow established-flow replies; NACLs require explicit ephemeral-range outbound
+    rules. The asymmetry means NACL misconfigurations manifest as one-directional hangs. Diagnose with this
+    layered mental model rather than guessing.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The ALB breaks the flow into two independent TCP connections (client↔ALB and ALB↔target), so the app never
+    sees the client's IP at L4 (it sees the ALB's) — the real client IP arrives in the
+    <code>X-Forwarded-For</code> header (Part 10's reverse-proxy callback). This also means the app-tier SG/NACL
+    rules are written against the ALB/VPC, not the public Internet. VPC Flow Logs (§12) record ACCEPT/REJECT at
+    the ENI level and are the authoritative way to see <em>which</em> control dropped a packet — REJECT entries
+    pinpoint an SG/NACL block, absence of any entry suggests a routing problem.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="elb-in-vpc">11. The ALB, finally placed inside the VPC</h2>
+
+<p>Part 9 taught you what a load balancer <em>is</em> (distributes traffic across healthy backends, does health
+checks, picks an algorithm) and Part 10 framed the ALB as a reverse proxy. Now we place it physically in the
+VPC, where all the pieces above give it a home.</p>
+
+<div class="osi-badge">ALB = OSI Layer 7 (Application) — routes on HTTP host/path. NLB = OSI Layer 4 (Transport) — routes on IP/port.</div>
+
+<h3>11.1 The ALB lives in the public subnets (one per AZ)</h3>
+
+<p>An <strong>ALB</strong> (Application Load Balancer) is the only Internet-facing component in our architecture.
+It requires a subnet in <strong>each Availability Zone</strong> it serves — that's why we built public subnets in
+both AZs (§4). AWS places ALB nodes in those subnets, each AZ's node getting an address there, and Route 53
+returns the set so traffic spreads across AZs. The ALB has its own security group (<code>sg-alb</code>, §8)
+allowing 443 from the world, and it is the bridge between the public and private worlds: it is the only thing
+with a foot in the public subnet, and its target group points <em>inward</em> at your private app instances.</p>
+
+<h3>11.2 Target groups point at private-subnet app instances</h3>
+
+<p>A <strong>target group</strong> is the ALB's list of backends plus the health-check config (Part 9). The
+targets are your Spring Boot instances/tasks in the <em>private</em> app subnets, registered by instance ID or by
+IP, on port 8080. The ALB health-checks them (Part 9) and only routes to healthy ones; when one fails or an
+entire AZ goes dark, the ALB stops sending traffic there and your remaining AZ absorbs it. Because the app's
+security group allows 8080 only from <code>sg-alb</code> (§8), the ALB is literally the only thing that can reach
+the app — exactly the Part 10 principle that only the proxy is exposed.</p>
+
+<h3>11.3 NLB — the L4 sibling</h3>
+
+<p>An <strong>NLB</strong> (Network Load Balancer) does the same placement but operates at Layer 4 (Part 9):
+it forwards TCP/UDP by IP and port without understanding HTTP, handles extreme throughput and very low latency,
+and can have <strong>static IPs / Elastic IPs</strong> per AZ (useful when a client needs to allow-list a fixed
+IP, which an ALB's changing IPs make awkward). Use an ALB when you need HTTP-aware routing (host/path rules,
+header inspection — Part 10); use an NLB for raw TCP/UDP, ultra-low latency, or static IP requirements.</p>
+
+<h3>11.4 Route 53 ALIAS → the ALB</h3>
+
+<p>How does <code>api.shop.example.com</code> resolve to the ALB? This is the Parts 6 and 9 callback. An ALB
+doesn't have a fixed IP you can put in a DNS A record — its IPs change. So Route 53 (AWS's DNS, Part 6) provides
+an <strong>ALIAS record</strong>: a special record that points your domain at the ALB's AWS-managed DNS name and
+resolves, at query time, to the ALB's current IP addresses. ALIAS works at the zone apex (unlike a CNAME), is
+free to query, and tracks the ALB automatically.</p>
+
+<pre class="code">Route 53 hosted zone for shop.example.com:
+
+  Name                       Type     Value
+  -------------------------  -------  ----------------------------------------
+  api.shop.example.com       A/ALIAS  ──► my-alb-1234567890.ap-south-1.elb.amazonaws.com
+                                         (resolves to the ALB's current IPs)
+
+  this is the Part 6 DNS + Part 9 ALB tease, now joined: a name ──► the load balancer.
+</pre>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the ALB is the reception desk in the lobby</div>
+  <p>Everything in the building is private except one thing: the reception desk, placed right inside the lobby
+  door (the public subnet). Visitors (Internet clients) only ever talk to reception. Reception checks who's
+  actually working today (health checks), then phones the right available employee on a private floor (a healthy
+  app instance) and relays the conversation. No visitor ever learns an employee's desk location or walks the
+  private floors. When an employee goes home sick (a failed health check) or a whole floor loses power (an AZ
+  failure), reception just stops routing there. That's the ALB bridging public and private.</p>
+</div>
+
+<div class="figure-title">Fig 11.8 — The ALB straddles public and private; targets stay private</div>
+<pre class="diagram">
+   Route 53:  api.shop.example.com  ──ALIAS──►  the ALB
+
+   ┌──────────── PUBLIC subnets (AZ-a, AZ-b) ──────────────┐
+   │   ALB node (AZ-a)            ALB node (AZ-b)           │
+   │   sg-alb: allow 443 from 0.0.0.0/0                     │
+   │   TLS terminates here (cert from ACM, Part 8)          │
+   └───────────────┬───────────────────────┬───────────────┘
+                   │  opens NEW conn :8080  │
+                   ▼                        ▼
+   ┌──────────── PRIVATE app subnets (AZ-a, AZ-b) ─────────┐
+   │   target group: Spring Boot :8080 (healthy only)      │
+   │   sg-app: allow 8080 FROM sg-alb only                 │
+   │   (no public IP; unreachable from the Internet)       │
+   └───────────────────────────────────────────────────────┘
+
+   the ALB is the ONLY public foot; the app stays entirely private (Part 10).
+</pre>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The load balancer (ALB) sits in the public subnets — it's the only thing the Internet can reach. It checks
+    which of your private app servers are healthy and forwards each request to one of them. Your domain name
+    points at the ALB through Route 53. The app servers themselves stay private and hidden.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>An ALB requires a public subnet per AZ, has its own SG, terminates TLS (ACM cert), and forwards to a target
+    group of private-subnet instances on the app port using L7 host/path rules and health checks (Part 9). It
+    opens a separate backend connection, so the app sees the ALB's IP (real client in
+    <code>X-Forwarded-For</code>, Part 10). Route 53 ALIAS maps the domain apex to the ALB's DNS name. NLB is the
+    L4 alternative with static IPs and ultra-low latency.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"Internet-facing" vs "internal" is a scheme set at creation: internal ALBs live in private subnets and
+    serve VPC-internal clients (Part 13's service-to-service). Cross-zone load balancing distributes across AZ
+    targets evenly (on by default for ALB, off by default and chargeable for NLB). The ALB scales by adding nodes
+    (its IPs change — hence ALIAS, never a hard-coded A record); targets registered by IP let it point at Fargate
+    tasks and pods (Part 12). NLB preserves the client source IP to targets (unlike ALB) and supports TLS
+    passthrough; choosing ALB vs NLB is an L7-features-vs-L4-rawness decision rooted in Part 9.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="other-essentials">12. Other essentials you shouldn't be blindsided by</h2>
+
+<p>The core seven — VPC, subnet, route table, IGW, NAT, SG, NACL — plus the ALB are 90% of what you need. But a
+handful of other constructs appear constantly, so here is each one tightly, so nothing surprises you in a design
+review or Part 12.</p>
+
+<h3>12.1 RDS in private subnets</h3>
+
+<p><strong>RDS</strong> (Relational Database Service) is managed PostgreSQL/MySQL/etc. It belongs in the private
+data subnets, reachable only via <code>sg-db</code> (§8). You give it a <strong>DB subnet group</strong> — a set
+of subnets across at least two AZs — so RDS can place the primary in one AZ and, with <strong>Multi-AZ</strong>
+enabled, a synchronous standby in another. On primary failure, RDS automatically fails over to the standby (DNS
+flips to the standby's address). This is the §2 multi-AZ availability principle applied to your database, and
+it's why a DB subnet group <em>requires</em> two AZs even for a single instance.</p>
+
+<h3>12.2 VPC Endpoints — reach AWS services without a NAT/IGW</h3>
+
+<p>Calling S3 or DynamoDB from a private subnet would normally go out through the NAT gateway and back — paying
+the data-processing charge (§7) and leaving the VPC. A <strong>VPC endpoint</strong> gives you a private path to
+AWS services that never touches the Internet:</p>
+<ul>
+  <li><strong>Gateway endpoints</strong> (for S3 and DynamoDB only): add a route to your route table; free; traffic
+  to S3/DynamoDB stays on the AWS network and skips the NAT gateway. This is the fix for the NAT bill surprise.</li>
+  <li><strong>Interface endpoints</strong> (for most other services — Secrets Manager, ECR, SQS, etc.): an ENI
+  with a private IP placed in your subnet, powered by <strong>PrivateLink</strong>; your app reaches the service
+  at a private address. Hourly + per-GB cost, but keeps traffic private and off the IGW.</li>
+</ul>
+
+<h3>12.3 ENIs and secondary IPs (foreshadowing Part 12)</h3>
+
+<p>An <strong>ENI</strong> (Elastic Network Interface) is the virtual NIC inside the VPC — it holds a private IP
+(or several), security groups, and a MAC address. Everything in a VPC connects through an ENI. The reason to meet
+it now: an ENI can carry <em>multiple</em> secondary private IPs, and <strong>Part 12's EKS gives every
+Kubernetes pod its own VPC IP</strong> by attaching ENIs and handing out their secondary IPs to pods. That's why
+your app subnets must be sized for far more than your instance count — each pod is a first-class VPC citizen with
+a real <code>10.0.x.x</code> address.</p>
+
+<h3>12.4 Elastic IP (EIP)</h3>
+
+<p>An <strong>EIP</strong> (Elastic IP) is a static public IPv4 address you own and can attach to an instance or
+NAT gateway. Unlike an auto-assigned public IP (which changes on stop/start, §6), an EIP stays put — useful for a
+NAT gateway's stable outbound address (so a partner can allow-list it) or any case needing a fixed public IP.</p>
+
+<h3>12.5 VPC Peering and Transit Gateway (VPC-to-VPC — the Part 1 WAN callback)</h3>
+
+<p>Two VPCs are isolated by default. To connect them: <strong>VPC peering</strong> is a direct 1:1 link between
+two VPCs (non-transitive — peering A↔B and B↔C does not connect A↔C, and their CIDRs must not overlap). For many
+VPCs, a <strong>TGW</strong> (Transit Gateway) is a hub-and-spoke router that interconnects dozens of VPCs (and
+on-prem) through one managed component. This is Part 1's WAN idea — connecting separate networks — done inside
+AWS between your own networks.</p>
+
+<h3>12.6 Site-to-Site VPN and Direct Connect (on-prem — the Part 1 WAN promise)</h3>
+
+<p>To connect your office or data center to the VPC (the WAN link Part 1 promised): <strong>Site-to-Site
+VPN</strong> is an encrypted IPsec tunnel over the public Internet (cheap, quick, subject to Internet latency/
+jitter), and <strong>Direct Connect</strong> is a dedicated physical leased line into AWS (consistent latency,
+higher bandwidth, more cost and lead time). These are exactly Part 1's "lease capacity from carriers to connect
+sites" — VPN tunnels vs leased lines — now terminating in your VPC.</p>
+
+<h3>12.7 VPC Flow Logs — the debugging superpower</h3>
+
+<p><strong>VPC Flow Logs</strong> record metadata for every IP flow at an ENI/subnet/VPC, including whether each
+flow was <strong>ACCEPTed or REJECTed</strong>. When a connection mysteriously times out (Part 4: RST vs
+timeout), Flow Logs answer the question "did the packet even arrive, and did an SG or NACL reject it?" A REJECT
+entry points straight at a firewall block; no entry at all points at routing. This is the difference between
+guessing and knowing in §14's debugging checklist.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — a Flow Log line that solves a mystery</div>
+  <pre class="code"># a VPC Flow Log record (fields: srcaddr dstaddr srcport dstport protocol ... action)
+
+  10.0.0.31  10.0.10.42  51544  8080  6  ...  ACCEPT     ◄── ALB reached the app: good
+  203.0.113.50  10.0.10.42  44002  8080  6  ...  REJECT  ◄── someone tried to hit the app
+                                                            DIRECTLY from the Internet and
+                                                            sg-app correctly blocked it
+
+  protocol 6 = TCP. the REJECT is your proof the security group did its job.
+</pre>
+  </div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Beyond the core pieces: your database (RDS) lives private and keeps a backup copy in another AZ; VPC
+    endpoints let you reach AWS services like S3 privately and cheaply; Elastic IPs are fixed public addresses;
+    peering and Transit Gateway connect VPCs together; VPN/Direct Connect connect your office to AWS; and Flow
+    Logs are the camera that shows you what traffic was allowed or blocked.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>RDS uses a multi-AZ DB subnet group for automatic failover. Gateway endpoints (S3/DynamoDB) and interface
+    endpoints (PrivateLink, others) keep AWS-service traffic off the IGW/NAT. ENIs carry secondary IPs that EKS
+    hands to pods (Part 12). EIPs are static public IPv4. Peering (1:1, non-transitive) and TGW (hub) connect
+    VPCs; VPN (IPsec over Internet) and Direct Connect (leased line) connect on-prem. Flow Logs record per-flow
+    ACCEPT/REJECT for forensics.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>PrivateLink lets you expose your <em>own</em> service to other VPCs/accounts via an endpoint service
+    (consumer-provider model, Part 13). Gateway endpoints inject managed-prefix-list routes; interface endpoints
+    rely on private DNS overriding the public service name. ENI density and IP exhaustion drive EKS networking
+    choices (prefix delegation, custom CNI). TGW supports route tables and segmentation for large multi-account
+    landing zones; peering is cheaper but doesn't scale past a handful of VPCs. Flow Logs don't capture packet
+    payloads (use traffic mirroring for that) and omit some traffic (link-local, DHCP); read them with the
+    knowledge that a missing entry means the packet never reached the ENI — usually a routing or NACL issue
+    upstream.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="packet-journey">13. The centerpiece — Browser → Internet → AWS → Load Balancer → EC2 → App</h2>
+
+<p>Everything in this chapter now assembles into one journey: a real HTTPS request from a user's browser to your
+Spring Boot app, annotated at every hop with the OSI layer (Parts 2–8) and the AWS control acting there. This is
+the whole point of the chapter — watch all twelve sections cooperate. (Part 14 will replay this same journey
+end-to-end across the entire course; here we focus on the VPC interior.)</p>
+
+<p>The request: a browser loads <code>https://api.shop.example.com/orders/42</code>. Our architecture is the one
+we built: ALB in public subnets, Spring Boot on EC2/ECS in private app subnets, RDS PostgreSQL in private data
+subnets, NAT gateways per AZ.</p>
+
+<div class="figure-title">Fig 11.9 — The full path of one request into the VPC and back</div>
+<pre class="diagram">
+   USER'S BROWSER                                           THE INTERNET
+  ┌──────────────┐
+  │ GET /orders/42                                          (Part 1: glass
+  │ https://api.shop.example.com                             under oceans)
+  └──────┬───────┘
+         │  (1) DNS: Route 53 ALIAS  api.shop... ──► ALB IPs   [L7 DNS, Part 6]
+         │  (2) TCP handshake + TLS handshake to an ALB IP    [L4 + L5/6, Parts 4/8]
+         ▼
+  ┌──────────────┐
+  │     IGW       │  (3) packet enters the VPC                [L3, §6]
+  └──────┬───────┘
+         ▼
+  ┌──────────── PUBLIC subnet  10.0.0.0/24 ───────────────────┐
+  │  [3a] NACL inbound: ALLOW 443        (stateless, §9)       │
+  │  [3b] sg-alb: ALLOW 443 from 0.0.0.0/0  (stateful, §8)     │
+  │                                                           │
+  │       A L B   (4) terminates TLS (ACM cert, Part 8),      │
+  │               picks a HEALTHY target (Part 9 algorithm    │
+  │               + health checks), opens a NEW TCP conn      │
+  │               to the app on :8080    [L7 routing, Part 9] │
+  └───────────────────────────┬───────────────────────────────┘
+                              │  (5) ALB ──► app, port 8080
+                              ▼
+  ┌──────────── PRIVATE app subnet  10.0.10.0/24 ─────────────┐
+  │  [5a] NACL inbound: ALLOW 8080 from VPC  (stateless, §9)   │
+  │  [5b] sg-app: ALLOW 8080 from sg-alb ONLY (stateful, §8)   │
+  │                                                           │
+  │       SPRING BOOT  (6) handler runs orderRepo.find(42),   │
+  │                    opens a TCP conn to RDS on :5432       │
+  └───────────────┬───────────────────────────┬───────────────┘
+                  │  (6) app ──► RDS :5432       │  (7) app ──► external API?
+                  ▼                            ▼
+  ┌──── PRIVATE data 10.0.20.0/24 ───┐  ┌──── via NAT GW ──► IGW ───────────┐
+  │  sg-db: ALLOW 5432 from sg-app   │  │  (7) outbound to e.g. Stripe:     │
+  │  RDS PostgreSQL answers query    │  │  src rewritten to NAT EIP,        │
+  │  [L4/L7 SQL wire, Parts 4/8]     │  │  no inbound possible (§7)         │
+  └──────────────────────────────────┘  └───────────────────────────────────┘
+
+   (8) RESPONSE RETRACES: RDS rows ──► Spring Boot builds JSON ──►
+       back to ALB (SG stateful return, no rule needed) ──►
+       ALB RE-ENCRYPTS with TLS (Part 8) ──► back through IGW ──► browser.
+</pre>
+
+<p>Now the same journey as a per-hop table — the OSI layer and the AWS control at each step, which is exactly
+what an interviewer means by "walk a request from the browser to EC2 through the VPC":</p>
+
+<table>
+  <tr><th>#</th><th>Hop</th><th>What happens</th><th>OSI layer</th><th>AWS control / construct</th></tr>
+  <tr><td>1</td><td>DNS resolution</td><td>Browser asks for <code>api.shop.example.com</code>; Route 53 ALIAS returns the ALB's current IPs</td><td>L7 (Part 6)</td><td>Route 53 ALIAS record → ALB</td></tr>
+  <tr><td>2</td><td>TCP + TLS to ALB</td><td>Browser opens a TCP connection (3-way handshake) and a TLS handshake to an ALB public IP</td><td>L4 + L5/6 (Parts 4, 8)</td><td>ALB public listener on 443</td></tr>
+  <tr><td>3</td><td>Enter the VPC</td><td>Packet arrives at the IGW and enters the VPC toward the public subnet</td><td>L3 (Part 3)</td><td>Internet Gateway</td></tr>
+  <tr><td>3a</td><td>Public NACL</td><td>Stateless subnet check: inbound 443 allowed?</td><td>L3/L4</td><td>Public subnet NACL</td></tr>
+  <tr><td>3b</td><td>ALB security group</td><td>Stateful check: allow 443 from <code>0.0.0.0/0</code>?</td><td>L3/L4</td><td><code>sg-alb</code></td></tr>
+  <tr><td>4</td><td>ALB decision</td><td>Terminates TLS (ACM cert), runs health-checked load-balancing, opens a NEW connection to a healthy target on 8080</td><td>L7 (Parts 8, 9)</td><td>ALB + target group</td></tr>
+  <tr><td>5</td><td>ALB → app</td><td>New TCP connection from the ALB into the private app subnet on 8080</td><td>L4 (Part 4)</td><td>Routing (local route)</td></tr>
+  <tr><td>5a</td><td>App NACL</td><td>Stateless: inbound 8080 from the VPC allowed?</td><td>L3/L4</td><td>App subnet NACL</td></tr>
+  <tr><td>5b</td><td>App security group</td><td>Stateful: allow 8080 from <code>sg-alb</code> <em>only</em>?</td><td>L3/L4</td><td><code>sg-app</code></td></tr>
+  <tr><td>6</td><td>App → RDS</td><td>Spring Boot opens TCP to PostgreSQL on 5432; <code>sg-db</code> allows 5432 from <code>sg-app</code>; query runs</td><td>L4 + L7 (Parts 4, 8)</td><td><code>sg-db</code>, local route</td></tr>
+  <tr><td>7</td><td>App → external (if needed)</td><td>If the handler calls an external API, it egresses via the NAT gateway → IGW; source becomes the NAT's EIP; no inbound possible</td><td>L3/L4 (Part 3 NAT)</td><td>NAT Gateway → IGW</td></tr>
+  <tr><td>8</td><td>Response retraces</td><td>Rows → JSON → back to ALB (SG stateful return, no rule) → ALB re-encrypts TLS → IGW → browser</td><td>all layers</td><td>Stateful SGs, ALB, IGW</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — the security model in one breath</div>
+  <p>Read the table top to bottom and notice what's <em>exposed</em>: exactly one thing, the ALB, on exactly one
+  port, 443. The app servers and the database have no public IP and no inbound path from the Internet at all
+  (steps 5–6 are reachable only from inside, gated by SG-referencing-SG). The only way out for the private tier
+  is the one-way NAT door (step 7). This is the Part 10 principle — only the proxy/LB is internet-facing — made
+  concrete with VPC plumbing: defense in depth where every layer (route table, NACL, security group) must agree
+  before a packet moves.</p>
+</div>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the same journey in your application logs</div>
+  <pre class="code"># What each tier "sees" during ONE browser request:
+
+  Browser address bar:   https://api.shop.example.com/orders/42
+  ALB access log:        client 198.51.100.7  ──►  target 10.0.10.42:8080  200  12ms
+  Spring Boot log:       GET /orders/42   X-Forwarded-For: 198.51.100.7   (Part 10!)
+                          (the app sees the ALB's IP at L4; the real client is in the header)
+  PostgreSQL (RDS) log:  connection from 10.0.10.42  ──►  SELECT ... WHERE id = 42
+
+  notice: the database only ever sees a 10.0.10.x app address — never the browser,
+  never the Internet. that's the private-subnet design doing its job.
+</pre>
+  </div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Your browser looks up the name (Route 53), connects securely to the load balancer (the only public thing),
+    which forwards the request to a healthy private app server, which asks the private database for the data. The
+    answer travels back the same way and the load balancer re-encrypts it for your browser. The app and database
+    are never reachable from the Internet directly.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>DNS (Route 53 ALIAS) → TCP/TLS to the ALB (public subnet, NACL + <code>sg-alb</code>) → TLS terminates,
+    ALB opens a fresh backend connection to a healthy target on 8080 (private subnet, NACL + <code>sg-app</code>
+    referencing <code>sg-alb</code>) → app → RDS on 5432 (<code>sg-db</code> referencing <code>sg-app</code>) →
+    optional external call egresses via NAT → response retraces with stateful SG returns and TLS re-encryption.
+    Each hop is gated by a specific L3/L4/L7 control.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The two-connection split at the ALB (Part 10) means connection-level attributes (source IP, TLS session)
+    don't carry through — the app authenticates the client via headers/JWT, not L4 identity, and must trust
+    <code>X-Forwarded-For</code> only from the ALB. Latency budget: each hop adds RTT (Part 1) — keep the ALB,
+    app, and RDS in the <em>same AZ</em> for the hot path where possible (cross-AZ adds ~1 ms <em>and</em> data
+    charges, §14). The NAT egress in step 7 is the most expensive and most overlooked path; route AWS-service
+    calls through endpoints (§12) so only genuinely-external calls pay it. This single diagram is the backbone of
+    Part 14's full browser-to-EC2 walkthrough.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cost-debug">14. Cost and debugging wisdom — what actually bites you</h2>
+
+<p>Two practical disciplines separate engineers who merely deploy on AWS from those who run it well: knowing what
+costs money in the network, and knowing how to debug a connection that won't connect. Both lean entirely on Parts
+1–10.</p>
+
+<h3>14.1 Data transfer cost: same-AZ vs cross-AZ vs Internet</h3>
+
+<p>Part 1 said distance has a price; AWS makes that literal in the bill. Roughly: traffic <em>within</em> one AZ
+between private IPs is free; traffic <em>across</em> AZs is charged per GB in both directions; traffic through
+the NAT gateway is charged per GB processed (§7); traffic out to the Internet is charged per GB egress. The
+lesson, which is just Part 1's latency advice with a dollar sign attached: <strong>keep chatty services
+co-located in the same AZ</strong>. Two microservices that exchange thousands of messages per request should be
+in the same AZ — you save both latency (~1 ms per cross-AZ round trip) and cross-AZ data charges. (HA still wants
+you spread across AZs; the art is balancing the two, usually by keeping a full stack in each AZ so the hot path
+stays local.)</p>
+
+<table>
+  <tr><th>Traffic path</th><th>Latency</th><th>Cost</th><th>Design implication</th></tr>
+  <tr><td>Same AZ, private IPs</td><td>~0.2–0.5 ms</td><td>Free</td><td>Keep the hot path here</td></tr>
+  <tr><td>Cross-AZ, same Region</td><td>~1 ms</td><td>Per-GB both ways</td><td>Fine for replication/HA; avoid for chatty calls</td></tr>
+  <tr><td>Through NAT gateway</td><td>+ a hop</td><td>Hourly + per-GB processed</td><td>Use VPC endpoints for S3/AWS services</td></tr>
+  <tr><td>Out to the Internet</td><td>WAN (Part 1)</td><td>Per-GB egress</td><td>Cache/CDN to reduce egress (Part 14)</td></tr>
+</table>
+
+<h3>14.2 The "connection timed out" debugging checklist</h3>
+
+<p>The single most common AWS networking incident is "my app can't connect to RDS / to another service, and it
+just times out." Part 4 gave you the crucial tell: a <strong>timeout</strong> (silence) almost never means the
+target app is down — a down app on a reachable host sends a TCP <strong>RST</strong> ("connection refused"),
+which is instant. Silence means a packet was <em>swallowed</em> somewhere — a firewall or a routing gap. So a
+timeout is almost always a networking misconfiguration, not your code. Walk this checklist in order:</p>
+
+<pre class="code">"Connection to RDS at 10.0.20.x:5432 timed out" — debug in this order:
+
+  [ ] 1. SECURITY GROUP (most common)
+         Does sg-db allow inbound 5432 FROM sg-app (or the app's SG/CIDR)?
+         Does sg-app allow OUTBOUND 5432 to sg-db?  (egress can be restricted)
+
+  [ ] 2. SUBNET / ROUTE
+         Is the app actually in the subnet you think? Same VPC as RDS?
+         Does a route exist between the two subnets? (local route covers
+         intra-VPC; peering/TGW needed across VPCs)
+
+  [ ] 3. NACL
+         Stateless! Does the data subnet's NACL allow inbound 5432
+         AND outbound on the ephemeral range (1024-65535) for the return?
+
+  [ ] 4. RIGHT TARGET
+         Right endpoint/port? RDS on 5432, not the app's 8080?
+         If Multi-AZ failover happened, are you using the RDS DNS name
+         (which follows the failover) and not a hard-coded IP?
+
+  [ ] 5. PUBLIC IP / REACHABILITY (for Internet-facing cases)
+         Trying to reach something on the Internet from a private subnet?
+         Is there a NAT route? For inbound, is there a public IP + IGW route?
+
+  ──► still stuck? read VPC FLOW LOGS (§12): a REJECT names the SG/NACL block;
+     NO entry at all means the packet never arrived — routing/wrong-subnet.
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — timeout vs refused is your first diagnostic fork</div>
+  <p>Memorize this fork from Part 4, because it instantly halves your search space: <strong>"connection
+  refused" (RST)</strong> = you <em>reached</em> the host but nothing is listening on that port (app crashed,
+  wrong port) — a software problem. <strong>"connection timed out" (silence)</strong> = a packet was dropped in
+  flight (security group, NACL, route table, wrong subnet, no public IP) — a networking problem. In AWS the
+  timeout case is overwhelmingly an SG that doesn't allow the traffic. Check the security group first, every
+  time.</p>
+</div>
+
+<h3>14.3 The placement principle: only expose the load balancer</h3>
+
+<p>The final piece of operational wisdom is a security principle that ties the whole chapter together and echoes
+Part 10: <strong>nothing should be public except the load balancer.</strong> App servers go in private subnets
+with no public IP; databases go in even more locked-down private subnets; the ALB in the public subnets is the
+single, narrow, HTTPS-only front door. The blast radius of a compromised app server is bounded because it can't
+be reached from the Internet and its egress is limited; the database is unreachable except from the app tier.
+Every "is this design secure?" review starts by checking that exactly one thing is internet-facing — and that one
+thing speaks only TLS.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>Keep services that talk to each other a lot in the same data center (AZ) — it's faster and cheaper. When a
+    connection "times out," it's almost always a firewall (security group) blocking it, not your code — a crashed
+    app would say "connection refused" instantly. And only the load balancer should be reachable from the
+    Internet; everything else stays private.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Cross-AZ and NAT/Internet data transfer cost money (Part 1's latency, priced); co-locate chatty paths,
+    spread for HA. Diagnose connectivity with the timeout-vs-RST distinction (Part 4): timeout ⇒ SG/NACL/route/
+    subnet; refused ⇒ app/port. Run the SG → subnet/route → NACL → target → public-IP checklist, then confirm
+    with Flow Logs. Architecturally, expose only the ALB; keep app and data private with SG-referencing-SG
+    least privilege.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Cost-aware topology: same-AZ affinity (zone-aware clients, topology-aware routing in Part 13's mesh),
+    gateway endpoints to dodge NAT charges, and CloudFront to cut egress. For debugging, Flow Logs + Reachability
+    Analyzer (which statically traces whether a path is open and names the blocking component) turn guesswork into
+    proof. The security posture generalizes to "assume breach": private subnets, least-privilege egress (so a
+    compromised host can't exfiltrate freely), SG references over CIDRs (so policy survives scaling), and the ALB
+    as the sole, WAF-frontable, TLS-only ingress — the cloud expression of Part 10's reverse-proxy isolation.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">15. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>What actually makes a subnet "public" in a VPC?</summary>
+    <p>Its <em>route table</em> — specifically, a route sending <code>0.0.0.0/0</code> to an Internet Gateway.
+    There is no "public" flag on a subnet; "public" and "private" are descriptions of where the default route
+    points (IGW = public, NAT gateway or nothing = private). Full reachability also requires the instance to have
+    a public IP or Elastic IP, since the IGW does 1:1 NAT between the private and public address. Strong answers
+    state both conditions: the IGW route <em>and</em> a public IP, and note that the data tier often has no
+    <code>0.0.0.0/0</code> route at all (fully isolated).</p>
+  </details>
+
+  <details><summary>Security Group vs NACL — compare them precisely.</summary>
+    <p>SGs operate at the ENI/instance level; NACLs at the subnet boundary. SGs are <strong>stateful</strong>
+    (return traffic auto-allowed); NACLs are <strong>stateless</strong> (you must allow the return direction,
+    including the client's ephemeral ports, Part 5). SGs are <strong>allow-only</strong> (implicit deny); NACLs
+    support <strong>allow and deny</strong>. SG rules have no order (OR-ed); NACL rules are numbered and
+    first-match. SGs can reference other SGs as source (identity-based); NACLs only take CIDRs. A packet must pass
+    the NACL <em>and</em> the SG. Best practice: SGs as the primary fine-grained control, NACLs as a coarse
+    backstop.</p>
+  </details>
+
+  <details><summary>Why can a private instance reach the Internet but the Internet can't reach it?</summary>
+    <p>Because of the <strong>NAT Gateway</strong>, which is the home-router NAT model (Part 3). The private
+    instance's outbound packets go through the NAT gateway (sitting in a public subnet), which rewrites the source
+    to its own Elastic IP and forwards via the IGW; return traffic for that <em>established</em> flow is allowed
+    back. But there is no inbound mapping until the inside initiates, and the instance has no public IP, so nobody
+    on the Internet can open a connection to it. Outbound-yes / inbound-no is the asymmetry of NAT — exactly how
+    your home router protects your laptop.</p>
+  </details>
+
+  <details><summary>How do you allow only the load balancer to reach your application servers?</summary>
+    <p>Put a security group on the app (<code>sg-app</code>) whose inbound rule is "allow TCP 8080 from
+    <code>sg-alb</code>" — the ALB's security group ID, not an IP range. This is SG-referencing-SG: only resources
+    carrying the ALB's security group can reach 8080, and it keeps working as the ALB scales and changes IPs. The
+    app servers have no public IP and live in a private subnet, so the ALB is literally the only thing that can
+    connect to them. This three-tier SG chain (public→ALB, ALB→app, app→db) is the standard pattern.</p>
+  </details>
+
+  <details><summary>Walk a request from the browser all the way to EC2 through the VPC.</summary>
+    <p>(1) DNS: Route 53 ALIAS resolves <code>api.shop.example.com</code> to the ALB's IPs (Part 6). (2) Browser
+    does TCP + TLS to an ALB public IP (Parts 4, 8). (3) The packet enters via the IGW into the public subnet,
+    passing the subnet NACL and <code>sg-alb</code> (allow 443). (4) The ALB terminates TLS (ACM cert), picks a
+    healthy target (Part 9), and opens a <em>new</em> connection to the app on 8080. (5) That enters the private
+    app subnet, passing the NACL and <code>sg-app</code> (allow 8080 from <code>sg-alb</code> only). (6) Spring
+    Boot queries RDS on 5432, allowed by <code>sg-db</code> (from <code>sg-app</code>). (7) Any external call
+    egresses via the NAT gateway → IGW. (8) The response retraces, security groups auto-allow the returns
+    (stateful), and the ALB re-encrypts to the browser. Naming the OSI layer and AWS control at each hop is what
+    impresses.</p>
+  </details>
+
+  <details><summary>Why deploy across multiple Availability Zones?</summary>
+    <p>Because an AZ is a failure domain — it has independent power, cooling, and networking, and AWS designs for
+    the possibility that a whole AZ fails. If all your capacity is in one AZ, that AZ's outage is your outage.
+    Spreading app servers across 2–3 AZs (behind an ALB that health-checks and routes around failures) and using
+    RDS Multi-AZ (synchronous standby in another AZ with automatic failover) means losing one AZ leaves a healthy
+    copy serving traffic. It's the baseline shape of a correct deployment, not an add-on. The cost is some
+    cross-AZ data transfer and latency, which you manage by keeping the hot path same-AZ where possible.</p>
+  </details>
+
+  <details><summary>My app's connection to RDS is timing out. How do you debug it?</summary>
+    <p>First, the tell: a <em>timeout</em> (not "connection refused") means a packet is being dropped, not that
+    the DB is down — a down DB would RST instantly (Part 4). So it's a networking issue. Check in order: (1)
+    Security group — does <code>sg-db</code> allow inbound 5432 from <code>sg-app</code>, and does
+    <code>sg-app</code> allow that egress? (most common cause) (2) Subnet/route — same VPC, is there a route?
+    (3) NACL — stateless, so does the data subnet allow inbound 5432 and outbound ephemeral ports for the return?
+    (4) Right target/port and, after a Multi-AZ failover, are you using the RDS DNS name not a stale IP? (5)
+    Reachability/public-IP for Internet cases. Then read VPC Flow Logs: a REJECT names the blocking SG/NACL; no
+    entry means routing/wrong subnet.</p>
+  </details>
+
+  <details><summary>What's the difference between an Internet Gateway and a NAT Gateway?</summary>
+    <p>An IGW connects a VPC to the Internet and enables <em>two-way</em> reachability for instances that have
+    public IPs (it does 1:1 NAT between private and public addresses); it's a redundant, managed, no-bandwidth-cap
+    component, one per VPC. A NAT gateway gives <em>private</em>-subnet instances <em>outbound-only</em> Internet
+    access (source NAT to its Elastic IP) and is itself unreachable for inbound from the Internet; it lives in a
+    public subnet, is deployed one-per-AZ for HA, and costs an hourly + per-GB data-processing fee. In short: IGW
+    = the door public servers use both ways; NAT GW = the one-way exit private servers use to reach out.</p>
+  </details>
+
+  <details><summary>Are security groups stateful or stateless? Why does it matter?</summary>
+    <p>Stateful. If you allow an inbound connection, the reply is automatically allowed out (and vice versa)
+    because the SG tracks each connection's state (Part 4). This means you never write return rules — allow
+    inbound 443 and the response just flows. It matters because NACLs are the opposite (stateless): with a NACL
+    you must explicitly allow the return traffic on the client's ephemeral port range (Part 5), and forgetting
+    that is the classic cause of connections that hang. The statefulness is also why SG misconfigurations and
+    NACL misconfigurations present differently when debugging.</p>
+  </details>
+
+  <details><summary>Can two security groups reference each other, and why would you?</summary>
+    <p>Yes. A rule's source/destination can be another SG's ID, and groups can reference each other (e.g. app↔
+    cache). You do it for <strong>identity-based microsegmentation</strong>: instead of allow-listing IPs (which
+    change as instances scale), you say "allow from anything carrying <code>sg-app</code>." The rule survives
+    autoscaling, instance replacement, and IP churn because AWS resolves the group to its current members in the
+    data plane. It's the cleanest way to express "these tiers may talk" without maintaining IP lists, and it's the
+    backbone of the three-tier SG chain.</p>
+  </details>
+
+  <details><summary>Where does a VPC live — one AZ, or the whole Region? And a subnet?</summary>
+    <p>A VPC is <strong>Region-wide</strong>: a single VPC spans all the AZs in its Region. A <strong>subnet</strong>,
+    by contrast, lives in exactly <em>one</em> AZ and never spans two. That's why high-availability designs create
+    one subnet per tier per AZ (mirrored pairs): the VPC is the Region-wide container, and you place per-AZ subnets
+    inside it. A common misconception is that a VPC is tied to one AZ — it isn't; the per-AZ unit is the subnet.</p>
+  </details>
+
+  <details><summary>Does AWS use special networking, or real TCP/IP? And where does the ALB sit (L4 or L7)?</summary>
+    <p>Real, ordinary TCP/IP. AWS virtualized the routers, switches, and firewalls into software (SDN), but the
+    packets are standard IP packets carrying standard TCP segments — everything from Parts 1–8 applies unchanged.
+    As for the ALB: it's a <strong>Layer 7</strong> load balancer (it understands HTTP host/path and can route on
+    them, terminate TLS, inject headers — Parts 9, 10). The <strong>NLB</strong> is the <strong>Layer 4</strong>
+    sibling, forwarding TCP/UDP by IP/port with ultra-low latency and static IPs. Security groups and NACLs filter
+    at L3/L4 (IP and port); route tables forward at L3. Mapping each AWS construct to its OSI layer is the mental
+    model that makes the whole system legible.</p>
+  </details>
+
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">16. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "A subnet is public because of a setting on the subnet."</strong><br>
+  ✅ There is no "public" flag. A subnet is public <em>only</em> because its route table sends
+  <code>0.0.0.0/0</code> to an Internet Gateway (and the instance has a public IP for the IGW to NAT). Change that
+  route to a NAT gateway and the same subnet becomes private. "Public" describes the route table, full stop.</p>
+
+  <p><strong>❌ "Security groups can block or deny traffic."</strong><br>
+  ✅ Security groups are <em>allow-only</em>; there is no deny rule. To block something with an SG, you simply
+  don't allow it (implicit deny). Explicit <em>deny</em> lives in NACLs, which is what you use to blocklist a
+  known-bad IP range across a subnet. If you're trying to "deny" in an SG, you're looking at the wrong tool.</p>
+
+  <p><strong>❌ "A NAT gateway makes my instances reachable from the Internet."</strong><br>
+  ✅ The opposite. A NAT gateway provides <em>outbound-only</em> access for private instances and is itself
+  unreachable for inbound from the Internet — exactly like your home router. To accept inbound, you need an
+  Internet Gateway route plus a public IP (and in practice you front everything with the ALB instead). NAT = a
+  one-way exit.</p>
+
+  <p><strong>❌ "AWS uses some special networking, not real TCP/IP."</strong><br>
+  ✅ It's ordinary TCP/IP. AWS virtualized routers, switches, and firewalls into software-defined networking, but
+  the packets are standard IP packets carrying standard TCP segments. Everything you learned in Parts 1–8 applies
+  unchanged inside a VPC — the CIDR math, the handshake, the ports, the TLS. The "cloud" part is the
+  configuration model, not the protocols.</p>
+
+  <p><strong>❌ "A VPC lives in one Availability Zone."</strong><br>
+  ✅ A VPC spans <em>all</em> AZs in its Region. The per-AZ unit is the <em>subnet</em> — each subnet is pinned to
+  exactly one AZ. That's precisely why HA designs put one subnet per tier in each AZ inside the single,
+  Region-wide VPC. Confusing the VPC's scope with the subnet's scope is a very common error.</p>
+
+  <p><strong>❌ "I need a public IP on my application servers."</strong><br>
+  ✅ You almost never do. App servers belong in <em>private</em> subnets with no public IP, behind the ALB. The
+  ALB is the only internet-facing component; it forwards to your private instances on the app port. Giving app
+  servers public IPs widens the attack surface for no benefit — the load balancer is your front door, and the
+  NAT gateway handles any outbound they need.</p>
+
+  <p><strong>❌ "Security groups are stateless like NACLs, so I must allow return traffic."</strong><br>
+  ✅ Security groups are <em>stateful</em> — return traffic for an allowed connection is permitted automatically,
+  so you never write return rules. It's <em>NACLs</em> that are stateless and require explicit return rules on the
+  ephemeral port range (Part 5). Swapping these two in your head is the root of both "why won't this connect?" and
+  "why did I open ports I didn't need to?"</p>
+
+  <p><strong>❌ "All my outbound traffic is basically free / the NAT gateway is cheap."</strong><br>
+  ✅ The NAT gateway charges an hourly fee <em>plus</em> a per-GB data-processing fee on everything through it, and
+  cross-AZ traffic is billed per GB too — a notorious source of surprise bills. Route S3/DynamoDB through free
+  gateway VPC endpoints, keep chatty traffic same-AZ, and use CloudFront to cut Internet egress. Network cost is
+  Part 1's "distance has a price," made literal.</p>
+
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>You took every idea from Parts 1–10 — CIDR and subnets (Part 3), routing tables and the default gateway
+  (Part 3), NAT (Part 3), the L4 firewall and connection state (Parts 4–5), ephemeral ports (Part 5), DNS and
+  Route 53 (Part 6), TLS and ACM (Part 8), the ALB and reverse-proxy isolation (Parts 9–10) — and watched AWS
+  rent them all to you as API calls inside a <strong>VPC</strong>. You can now place a three-tier app across AZs,
+  define exactly what's public with a route table, lock every tier down with SG-referencing-SG, and trace a
+  request from a browser through the IGW, the ALB, and into a private EC2 instance and RDS. The natural next
+  question: those private app subnets are where your containers actually run — how does a <em>pod</em> get a VPC
+  IP, talk to other pods, and get exposed through that ALB? That's
+  <a href="part12.html"><strong>Part 12 — Docker &amp; Kubernetes</strong></a>, which runs workloads inside the
+  very subnets you just built. (And Part 14 will replay the full browser-to-EC2 journey end to end across the
+  whole course.)</p>
+</div>
+
+<div class="page-nav">
+  <a href="part10.html"><span class="dir">← Previous</span><span class="t">Part 10: Reverse Proxies</span></a>
+  <a href="part12.html"><span class="dir">Next →</span><span class="t">Part 12: Docker &amp; Kubernetes</span></a>
+</div>
+
+</main>
+</body>
+</html>

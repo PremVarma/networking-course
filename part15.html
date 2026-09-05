@@ -1,0 +1,1295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 15: Backend Engineer Mastery — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html" class="active"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 15 of 15</p>
+<h1>Backend Engineer Mastery — One Mental Model</h1>
+<p class="lede">Fourteen chapters ago you stood in front of two computers and a single copper wire. You can now
+trace a React click through fiber and routers, across NAT and load balancers, through a TLS handshake, into a
+Kubernetes Service and a sidecar proxy, down to a Spring Boot controller — and back. This final chapter does
+not teach a new protocol. It does something more valuable: it <strong>collapses all fourteen into one idea</strong>,
+so the pile of acronyms becomes a single machine you can reason about, design with, and debug under pressure.</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#one-idea">One idea: ten problems, one machine</a></li>
+    <li><a href="#master-osi">The master OSI mapping table</a></li>
+    <li><a href="#one-request-spine">The "one request" spine (encapsulation)</a></li>
+    <li><a href="#how-connect">How the pieces connect</a></li>
+    <li><a href="#themes">Recurring themes across all layers</a></li>
+    <li><a href="#playbook">The networking debugging playbook</a></li>
+    <li><a href="#performance">The performance mental model</a></li>
+    <li><a href="#security">The security mental model</a></li>
+    <li><a href="#design-lens">The system-design interview lens</a></li>
+    <li><a href="#maturity">The networking maturity ladder</a></li>
+    <li><a href="#interview">The big interview gauntlet</a></li>
+    <li><a href="#misconceptions">Capstone misconceptions</a></li>
+    <li><a href="#next">Where to go next</a></li>
+    <li><a href="#closing">Closing</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="one-idea">1. One idea: ten problems, one machine</h2>
+
+<p>Here is the whole course in one sentence. <strong>Every technology you learned is an answer to one of the ten
+problems from Part 1</strong> — the problems you would have re-invented yourself if you had tried to build
+computer-to-computer communication from scratch. You did not learn fifteen unrelated topics. You spent fourteen
+chapters building <em>one machine</em>, problem by problem, and this chapter is where you finally step back and
+see the whole thing assembled.</p>
+
+<p>Back in Part 1 the rightmost column of the problem table said "where you learn it," and most of it pointed
+forward into chapters you had not read. Now every solution is known. Here is that same table, tightened and
+reprinted — but this time it is not a promise of what is coming, it is a <em>map of what you already hold</em>:</p>
+
+<table>
+  <tr><th>#</th><th>The problem (Part 1)</th><th>The question</th><th>The answer you now know</th><th>Taught in</th></tr>
+  <tr><td>1</td><td>Physics</td><td>How do bits physically travel?</td><td>Copper/fiber/radio, signal encoding, NICs — bits as voltage, light, waves</td><td>Parts 1, 2</td></tr>
+  <tr><td>2</td><td>Neighborhood</td><td>Who talks on this wire, to which neighbor?</td><td>Ethernet frames, MAC addresses, switches, ARP</td><td>Parts 2, 3</td></tr>
+  <tr><td>3</td><td>Global addressing</td><td>Which machine on Earth?</td><td>IPv4/IPv6, CIDR, public vs private, NAT</td><td>Part 3</td></tr>
+  <tr><td>4</td><td>Pathfinding</td><td>Which route through the maze?</td><td>Routers, routing tables, default gateways, BGP between networks</td><td>Part 3</td></tr>
+  <tr><td>5</td><td>Reliability</td><td>Did it all arrive, in order, intact?</td><td>TCP (handshake, ACKs, retransmit, flow + congestion control) — or UDP when you opt out</td><td>Part 4</td></tr>
+  <tr><td>6</td><td>Which app?</td><td>Which program on the machine?</td><td>Ports and sockets, the 5-tuple, demultiplexing</td><td>Part 5</td></tr>
+  <tr><td>7</td><td>Naming</td><td>How does a name become an address?</td><td>DNS hierarchy, records, recursive resolvers, caching, TTL</td><td>Part 6</td></tr>
+  <tr><td>8</td><td>Meaning</td><td>What do these bytes say?</td><td>HTTP methods/status/headers/cookies; gRPC; wire protocols</td><td>Parts 7, 13</td></tr>
+  <tr><td>9</td><td>Trust</td><td>Can strangers read or fake this?</td><td>TLS handshake, symmetric/asymmetric keys, certificates, CAs, mTLS</td><td>Parts 8, 13</td></tr>
+  <tr><td>10</td><td>Scale</td><td>What if one server isn't enough?</td><td>Load balancers, reverse proxies, VPC, Docker/K8s, microservices, service mesh</td><td>Parts 9–13</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The list of ten problems never grew. Everything after Part 1 — TCP windows, DNS TTLs, TLS certificates,
+  ALB target groups, Kubernetes Services, Envoy sidecars — is a <em>better or more specialized answer to one of
+  these same ten questions</em>. When you meet a brand-new technology after this course (QUIC, eBPF, a new
+  service mesh), your reflex should be the one Part 1 planted: <em>which of the ten problems does this solve, and
+  what was inadequate about the previous answer?</em> That single question is the entire mental model in
+  portable form.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — you have been assembling an engine, not collecting parts</div>
+  <p>Imagine learning a car engine. You could memorize "pistons, crankshaft, spark plugs, radiator, alternator"
+  as a flat vocabulary list and understand nothing. Or you could see that each part answers a need — combustion
+  needs fuel + spark + compression, combustion makes heat so you need cooling, the engine needs to start so you
+  need a battery and starter — and suddenly the parts <em>imply</em> each other. Networking is identical. The OSI
+  layers, the protocols, the cloud primitives are not a glossary; they are a working engine where each component
+  exists because the one next to it created a need. This chapter is you closing the hood and seeing the whole
+  engine run.</p>
+</div>
+
+<p>The rest of this chapter assembles the engine four ways, because a senior engineer can switch between these
+views fluidly: as a <strong>layered map</strong> (the OSI table, §2), as a <strong>vertical journey</strong> (one
+request descending and ascending, §3), as a <strong>dependency chain</strong> (each piece assuming the one
+below, §4), and as a set of <strong>cross-cutting themes</strong> (§5) that show up at every layer at once. Then
+we turn the model into three practical superpowers: debugging (§6), performance reasoning (§7), and security
+reasoning (§8) — and finally into interview and system-design fluency (§9–§11).</p>
+
+<!-- ============================================================ -->
+<h2 id="master-osi">2. The master OSI mapping table</h2>
+
+<p>This is the single most valuable reference page in the entire course. Part 2 gave you the seven layers; every
+chapter since then added concepts that live somewhere on this map. Here is <em>everything</em>, placed in its
+layer. If you internalize one table for your career, make it this one — it is the coordinate system you will use
+to locate any networking fact, protocol, device, or bug for the rest of your working life.</p>
+
+<div class="figure-title">Fig 15.1 — The master OSI mapping: every concept in the course, in its layer</div>
+<table>
+  <tr>
+    <th>Layer</th><th>Data unit</th><th>Addresses / identifiers</th><th>Key protocols</th><th>Devices / components</th><th>Where in YOUR stack</th><th>Taught in</th>
+  </tr>
+  <tr>
+    <td><span class="osi-badge">L7 · Application</span></td>
+    <td>Message / request</td>
+    <td>URL, hostname, path, HTTP header, cookie, JWT</td>
+    <td>HTTP/1.1, HTTP/2, HTTP/3, gRPC, DNS, TLS-as-used, WebSocket, AMQP/Kafka</td>
+    <td>API gateway, reverse proxy (L7), L7 load balancer, service mesh sidecar, CDN</td>
+    <td>Your Spring Boot <code>@RestController</code>, FastAPI route, Express handler, React <code>fetch()</code></td>
+    <td>Parts 6, 7, 9, 10, 13</td>
+  </tr>
+  <tr>
+    <td><span class="osi-badge">TLS · between L4 and L7</span></td>
+    <td>TLS record</td>
+    <td>Certificate, public/private key, SNI hostname, cipher suite</td>
+    <td>TLS 1.2 / TLS 1.3, mTLS, SSL (legacy)</td>
+    <td>TLS-terminating LB/proxy, CDN edge, mesh sidecar (mTLS), ACM</td>
+    <td>The <code>https://</code> in your URL; <code>server.ssl</code> in Spring; cert on the ALB</td>
+    <td>Parts 8, 13</td>
+  </tr>
+  <tr>
+    <td><span class="osi-badge">L4 · Transport</span></td>
+    <td>Segment (TCP) / datagram (UDP)</td>
+    <td>Port number; the 5-tuple (src IP, src port, dst IP, dst port, protocol)</td>
+    <td>TCP, UDP, QUIC (UDP-based)</td>
+    <td>L4 load balancer (AWS NLB), firewall, NAT, connection pool</td>
+    <td><code>:8080</code>, <code>:5432</code>, <code>:6379</code>, <code>:9092</code>; HikariCP pool; socket timeouts</td>
+    <td>Parts 4, 5, 9</td>
+  </tr>
+  <tr>
+    <td><span class="osi-badge">L3 · Network</span></td>
+    <td>Packet</td>
+    <td>IP address (IPv4 / IPv6), CIDR block</td>
+    <td>IP, ICMP, routing protocols (BGP, OSPF)</td>
+    <td>Router, L3 switch, default gateway, NAT gateway, VPC route table</td>
+    <td>Pod IP, EC2 private IP, <code>10.0.0.0/16</code> VPC, security-group rules (IP-ish)</td>
+    <td>Parts 3, 11, 12</td>
+  </tr>
+  <tr>
+    <td><span class="osi-badge">L2 · Data Link</span></td>
+    <td>Frame</td>
+    <td>MAC address</td>
+    <td>Ethernet, ARP, Wi-Fi (802.11), VXLAN (overlay)</td>
+    <td>Switch, bridge, NIC, virtual bridge (<code>docker0</code>), overlay network</td>
+    <td>Docker bridge network, the <code>veth</code> pair into your container</td>
+    <td>Parts 2, 12</td>
+  </tr>
+  <tr>
+    <td><span class="osi-badge">L1 · Physical</span></td>
+    <td>Bit / symbol</td>
+    <td>(none — raw signal)</td>
+    <td>Signal encoding (Manchester, 4B/5B), 802.3 PHY</td>
+    <td>Cable (copper/fiber), radio, hub, transceiver, the NIC's PHY</td>
+    <td>Your Ethernet/Wi-Fi link; the fiber under the ocean to AWS</td>
+    <td>Parts 1, 2</td>
+  </tr>
+</table>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Don't over-trust the layer boundaries</div>
+  <p><strong>❌ "Every protocol lives in exactly one OSI layer."</strong><br>
+  ✅ OSI is a <em>teaching map</em>, not the architecture anyone implemented — the real Internet runs the simpler
+  four-layer TCP/IP model (Part 2). Several things you learned span layers: TLS behaves like the old "session +
+  presentation" layers (5/6) but is really an application-level library wrapping L4; a service mesh sidecar reads
+  L7 (HTTP paths) <em>and</em> manages L4 (mTLS, retries) <em>and</em> rides an L3 overlay. The layer model is for
+  <em>locating</em> a concept and reasoning about which contract broke — not a law the bytes obey. Use it as a
+  coordinate system, not a cage.</p>
+</div>
+
+<p>Notice what the rightmost two columns do: they tie the abstract layer to <em>devices you provision</em> and
+<em>code you write</em>. A senior engineer reads any layer of this table in both directions — "a 502 is an L7
+symptom, so look at the reverse proxy and the app, not the cable" — and "HikariCP exhaustion is an L4 problem
+(no free sockets), so it shows up as connection timeouts, not 500s." Keep this table open while you read the
+debugging playbook in §6; the two are designed to be used together.</p>
+
+<!-- ============================================================ -->
+<h2 id="one-request-spine">3. The "one request" spine — encapsulation, top to bottom and back</h2>
+
+<p>Part 2 taught <strong>encapsulation</strong>: as your data descends the stack on the sender, each layer wraps
+it in its own header (like nested envelopes), and on the receiver each layer unwraps its own header
+(<strong>decapsulation</strong>) before handing the contents up. This is the picture that ties Parts 2 through 8
+into one image. Here is a single browser request — your React app calling <code>POST /api/orders</code> — going
+<em>down</em> the client's stack, across the wire, and <em>up</em> the server's stack:</p>
+
+<div class="figure-title">Fig 15.2 — One request descends the client and ascends the server</div>
+<pre class="diagram">
+        CLIENT (your laptop)                              SERVER (Spring Boot pod)
+  ────────────────────────────────                ────────────────────────────────
+
+   L7  your JSON body + method + path                L7  controller sees the request
+       "POST /api/orders { … }"                          method, path, headers, body
+       HTTP + (TLS wraps it)        ── Part 7,8 ──►      decrypt TLS, parse HTTP     ▲
+                  │                                                                  │
+                  ▼  add HTTP/TLS framing                          strip HTTP/TLS    │
+   L4  break into TCP segments                          L4  reassemble byte stream,
+       add src port + dst port :443    ── Part 4,5 ──►      check ports, ACK, order  │
+                  │                                                                  │
+                  ▼  add TCP header                                  strip TCP hdr   │
+   L3  wrap each segment in an IP packet              L3  is this packet for me?
+       add src IP + dst IP             ── Part 3 ──►       yes → hand segment up      │
+                  │                                                                  │
+                  ▼  add IP header                                    strip IP hdr   │
+   L2  wrap packet in an Ethernet frame              L2  is this frame's MAC mine?
+       add src MAC + dst MAC (next hop) ── Part 2 ──►      yes → hand packet up       │
+                  │                                                                  │
+                  ▼  add frame header/trailer                       strip frame      │
+   L1  encode frame as signals                       L1  sample the signal,
+       voltage / light / radio         ── Part 1,2 ─►      reconstruct the bits  ────┘
+                  │                                              ▲
+                  └──────────── the physical wire ──────────────┘
+                  (home Wi-Fi ► ISP ► backbone ► AWS edge ► VPC, Parts 1,3,11)
+
+   GOING DOWN = wrapping (encapsulation).  GOING UP = unwrapping (decapsulation).
+   Each layer only reads its own header; the layers below are an opaque "how it got here."
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>This one diagram <em>is</em> Parts 2–8. Reading top-down on the left is a sender; reading bottom-up on the
+  right is a receiver; and crucially, <strong>each intermediate device only climbs as high as its job requires</strong>.
+  A plain router (Part 3) climbs to L3, rewrites nothing above it, and forwards. An L4 load balancer (Part 9)
+  climbs to L4 to read ports. An L7 reverse proxy or API gateway (Parts 10, 13) climbs all the way to L7 to read
+  the path and headers — which is exactly why it can route on <code>/api/orders</code> but costs more than an L4
+  hop. "How high up the stack does this box look?" is the question that distinguishes every networking device you
+  learned.</p>
+</div>
+
+<p>One subtle thing this diagram makes obvious: the <em>same bytes of your JSON body</em> exist simultaneously in
+many forms — a Java object in the JVM heap, a UTF-8 byte array, the payload of several TCP segments, the payload
+of several IP packets, the payload of many Ethernet frames, and finally a stream of voltage transitions. None of
+these is "the real one." Each layer's view is real to that layer. That is the deepest lesson of encapsulation,
+and it is why "where is my data right now?" during a debugging session has a layered answer, not a single one.</p>
+
+<!-- ============================================================ -->
+<h2 id="how-connect">4. How the pieces connect — the dependency chain</h2>
+
+<p>The OSI table shows the pieces side by side, but it hides the most important fact: <strong>nothing in
+networking is independent — each layer assumes the one below already works.</strong> You asked, at the start of
+this course, to see how all of this <em>relates</em>. Here is the answer as a single dependency chain, each link
+citing the part that built it. Read it as "X gives you Y, which lets Z exist":</p>
+
+<div class="figure-title">Fig 15.3 — The dependency chain: each piece assumes the one before it</div>
+<pre class="diagram">
+   OSI gives the map ───────────────────────────────────────────► (Part 2)
+        │  "which problem lives where"
+        ▼
+   IP + routing locate the host on Earth ──────────────────────► (Part 3)
+        │  L3: a packet can now reach the right machine
+        ▼
+   TCP/UDP + ports build app-to-app channels ─────────────────► (Parts 4, 5)
+        │  L4: a reliable, ordered byte stream to the right program
+        ▼
+   DNS turns names into those IP addresses ───────────────────► (Part 6)
+        │  humans use names; the layers below still need the number
+        ▼
+   HTTP gives the bytes meaning ──────────────────────────────► (Part 7)
+        │  method, path, status, headers — a request is now intelligible
+        ▼
+   TLS wraps it all in trust ─────────────────────────────────► (Part 8)
+        │  encryption + identity over the hostile WAN
+        ▼
+   Load balancers + reverse proxies multiply & front servers ─► (Parts 9, 10)
+        │  many backends behind one address; TLS terminated; routing by path
+        ▼
+   AWS provides the virtual network to run it in ─────────────► (Part 11)
+        │  VPC, subnets, gateways, security groups — a software-defined LAN/WAN
+        ▼
+   Docker / K8s package and schedule the workloads ──────────► (Part 12)
+        │  reuse EVERY layer above inside an overlay; Pods, Services, Ingress
+        ▼
+   Microservices patterns govern how the copies talk ────────► (Part 13)
+           REST/gRPC/MQ, discovery, gateway, mesh, resilience (L7 + failure handling)
+</pre>
+
+<p>Walk that chain as prose, because the prose is what you will say in an interview when someone asks "how does
+all of this fit together?":</p>
+
+<p>The <strong>OSI model (Part 2)</strong> gives you the map — it tells you which problem lives at which layer so
+nothing is ambiguous. On that map, <strong>IP addresses and routing (Part 3)</strong> answer "which machine on
+Earth, reached by which path" — that is Layer 3, and until it works, no higher layer can do anything, because
+there is nowhere to send the bits. Once a packet can reach the right machine, <strong>TCP/UDP and ports
+(Parts 4–5)</strong> turn "reach the machine" into "reach the right <em>program</em> on the machine, reliably and
+in order" — Layer 4 builds the actual app-to-app channel. But humans cannot type IP addresses, so
+<strong>DNS (Part 6)</strong> sits on top and turns <code>api.shop.com</code> into the <code>203.0.113.7</code>
+that Layer 3 needs — DNS is an application-layer service whose entire job is to feed the layer far below it.</p>
+
+<p>Now bytes can flow between the right programs, but bytes are meaningless until <strong>HTTP (Part 7)</strong>
+gives them structure — a method, a path, headers, a status code — so the receiver knows where a request starts,
+ends, and what it asks for. Because those bytes cross dozens of networks owned by strangers,
+<strong>TLS (Part 8)</strong> wraps the whole conversation in encryption and identity, sitting between Layer 4
+and Layer 7. With one trustworthy, intelligible request-response working, the scale problem appears:
+<strong>load balancers and reverse proxies (Parts 9–10)</strong> multiply the servers and hide them behind one
+address, terminating TLS and routing by path. Those servers have to <em>live</em> somewhere, so
+<strong>AWS (Part 11)</strong> provides a software-defined network — VPC, subnets, gateways, security groups —
+that re-implements Layers 2 through 7 in software. Inside that, <strong>Docker and Kubernetes (Part 12)</strong>
+package each workload and schedule it, building an <em>overlay network</em> that reuses every layer above it.
+And finally, because you now have many copies of many services, <strong>microservices patterns (Part 13)</strong>
+govern how they talk: REST vs gRPC vs message queues, service discovery, the API gateway, the service mesh, and
+the resilience patterns that assume the network <em>will</em> fail.</p>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 The point of the chain</div>
+  <p>Each arrow points <em>up</em>, and each upper layer would be impossible without the one beneath it. TLS is
+  meaningless without a reliable byte stream (TCP); a reliable byte stream is meaningless without packets that
+  reach the host (IP); packets are meaningless without frames on a wire (Ethernet). When something breaks, this
+  chain is also your search order: a failure high up may really be a failure far below pretending to be an
+  application bug. That is the bridge from "understanding" to "debugging" — and it is exactly the playbook in §6.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="themes">5. Recurring themes that cross all layers</h2>
+
+<p>Here is what actually separates a senior engineer's mental model from a list of facts: a handful of
+<strong>ideas that reappear at every layer</strong>. A junior engineer learns DNS, then learns Kubernetes
+Services, then learns service discovery as three separate things. A senior engineer sees that all three are
+<em>the same idea</em> — indirection — applied at three layers. Once you see the themes, the course stops being
+fifteen chapters and becomes eight ideas wearing fifteen costumes. Each theme below cites every part where it
+appeared, so you can watch it recur.</p>
+
+<h3>5.1 Indirection &amp; naming — "another layer of indirection"</h3>
+
+<p>The oldest joke in computer science is that every problem can be solved by adding a layer of indirection
+(except the problem of too many layers of indirection). Networking is the joke made real. Over and over, the fix
+is: <em>stop hard-coding the thing; point at a name that resolves to the thing</em>, so the thing can move,
+multiply, or fail without breaking its callers.</p>
+
+<ul>
+  <li><strong>DNS (Part 6)</strong> — don't hard-code <code>203.0.113.7</code>; say <code>api.shop.com</code> and let it resolve. Now the server can move IPs, sit behind a load balancer, or fail over to another region — and clients never change.</li>
+  <li><strong>Load balancer VIP (Part 9)</strong> — clients hit one virtual address; behind it, backends come and go. The indirection hides the fleet.</li>
+  <li><strong>Kubernetes Service (Part 12)</strong> — Pods are mortal and get new IPs constantly; a Service is a <em>stable name and virtual IP</em> in front of an ever-changing set of Pods. It is DNS + load balancing as a built-in primitive.</li>
+  <li><strong>Service discovery (Part 13)</strong> — in a fleet of microservices, instances register themselves and clients look them up by name, not address. Same idea, one more layer up.</li>
+  <li><strong>API gateway (Part 13)</strong> — one public name fronts many internal services; the path, not the address, selects the backend.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>Whenever you see "names over addresses," you are looking at indirection buying you <em>change without
+  breakage</em>: the named thing can move, scale, or be replaced and nobody who uses the name has to know.
+  DNS, the LB VIP, the Service ClusterIP, and the discovery registry are the <em>same pattern at four
+  layers</em>. When an interviewer asks "how do services find each other in Kubernetes?", the senior answer
+  starts "it's indirection — the same idea as DNS, applied to Pods."</p>
+</div>
+
+<h3>5.2 The handshake / round-trip tax</h3>
+
+<p>Parts 1, 4, and 8 hammered one number: the round trip (RTT). Establishing a connection <em>costs</em> round
+trips before any useful data moves — a TCP handshake is one RTT (Part 4); a TLS 1.2 handshake adds two more,
+TLS 1.3 just one (Part 8); and a DNS lookup may be one more (Part 6). On a cross-continent path where one RTT is
+200 ms, "just connecting" can cost most of a second before your controller runs. Almost every performance feature
+you learned exists to <em>avoid paying this tax repeatedly</em>:</p>
+
+<ul>
+  <li><strong>Connection pooling (Part 4)</strong> — HikariCP keeps TCP connections to PostgreSQL open and reuses them, so you pay the handshake once, not per query.</li>
+  <li><strong>HTTP keep-alive (Part 7)</strong> — reuse one TCP connection for many HTTP requests instead of reconnecting each time.</li>
+  <li><strong>TLS session resumption &amp; 0-RTT (Part 8)</strong> — skip most of the handshake on reconnection.</li>
+  <li><strong>HTTP/2 multiplexing &amp; HTTP/3 (Parts 7, 14)</strong> — many concurrent requests over one connection; HTTP/3 over QUIC folds transport + crypto setup into fewer round trips.</li>
+  <li><strong>Caching &amp; CDN edge (Parts 1, 6, 7, 14)</strong> — the cheapest round trip is the one you never make; serve from a cache or an edge node physically closer to the user.</li>
+</ul>
+
+<h3>5.3 Statefulness vs statelessness</h3>
+
+<p>Part 7 taught that HTTP is <strong>stateless</strong>: each request is self-contained, carrying its own
+identity (a cookie or token), so the server keeps no per-client memory between requests. This one property is
+the foundation of horizontal scale, because if no server remembers you, <em>any</em> server can handle your next
+request — which is exactly what a load balancer assumes.</p>
+
+<ul>
+  <li><strong>Stateless app tier (Part 7)</strong> → any instance can serve any request → trivial horizontal scaling and simple load balancing (Part 9).</li>
+  <li><strong>Sticky sessions are an anti-pattern (Parts 9, 12)</strong> — pinning a user to one backend (because that backend holds their session in memory) re-introduces state, breaks even load distribution, and turns one instance's death into logged-out users. The fix is to push state <em>out</em> — into Redis, a JWT, or the database — so the tier stays stateless.</li>
+  <li><strong>State lives in the data tier, not the app tier</strong> — this is why "scale the web tier horizontally, scale the database carefully" is the default shape of every system-design answer (§9).</li>
+</ul>
+
+<h3>5.4 Encapsulation / layering as the universal tool</h3>
+
+<p>Part 2's encapsulation — wrap the payload in a header, hand it down, let the lower layer treat the whole thing
+as opaque cargo — turns out to be the most reused trick in all of networking. Every time you "put something
+inside something else and ship it," you are doing encapsulation again:</p>
+
+<ul>
+  <li><strong>The base case (Part 2)</strong> — HTTP inside TCP inside IP inside Ethernet. The original nesting dolls.</li>
+  <li><strong>Tunnels &amp; VPNs (Part 11)</strong> — a whole encrypted IP packet wrapped inside another IP packet, so your office traffic rides safely across the public Internet into the VPC.</li>
+  <li><strong>Overlay networks (Part 12)</strong> — Kubernetes pod-to-pod traffic is frames wrapped in VXLAN/UDP and shipped across the real network, so Pods believe they share a flat network they do not physically have.</li>
+  <li><strong>Sidecars &amp; the mesh (Part 13)</strong> — the application's plain HTTP is transparently wrapped in mTLS by an Envoy sidecar; the app does not know its traffic was re-encapsulated for the trip.</li>
+</ul>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — shipping containers all the way down</div>
+  <p>Encapsulation is the shipping container of computing. A container doesn't care whether it holds bananas or
+  car parts; the crane, ship, and truck handle the <em>container</em>, not the contents. A tunnel puts a sealed
+  container inside another container; an overlay network paints a fake address on the outside so it can ride a
+  network it doesn't physically belong to. The genius — in shipping and in networking — is that each layer of
+  handling is blissfully ignorant of every other. That ignorance is what lets the Internet, VPNs, and Kubernetes
+  overlays all be built from the same trick.</p>
+</div>
+
+<h3>5.5 Trust boundaries — LAN-trusted vs WAN-hostile</h3>
+
+<p>Part 1 drew the first trust boundary: a LAN is private and trusted; a WAN (the Internet) is hostile territory
+owned by strangers. Every security mechanism you learned is a wall at some boundary, and the modern lesson is
+that the boundaries keep multiplying inward:</p>
+
+<ul>
+  <li><strong>The LAN/WAN line (Part 1)</strong> — the original "inside = safe, outside = encrypt everything."</li>
+  <li><strong>TLS (Part 8)</strong> — the boundary you cross with every external request; it makes the hostile WAN safe to send secrets across.</li>
+  <li><strong>Security groups &amp; NACLs (Part 11)</strong> — software firewalls that draw boundaries <em>inside</em> your cloud: only the load balancer may talk to the app tier; only the app tier may talk to the database.</li>
+  <li><strong>mTLS &amp; zero-trust east-west (Part 13)</strong> — the modern stance: stop trusting "inside the network" at all. Every service proves its identity to every other service with mutual TLS, because a breach of one pod should not mean free rein over all of them.</li>
+</ul>
+
+<h3>5.6 Failure is the default</h3>
+
+<p>The fallacies of distributed computing (Part 13) all reduce to one delusion: that the network is reliable. It
+is not. Links drop, packets vanish, servers die mid-request. Parts 4 and 13 taught that <strong>robust systems
+assume failure and design for it</strong> rather than hoping it won't happen:</p>
+
+<ul>
+  <li><strong>TCP retransmission (Part 4)</strong> — the lowest-level admission that packets get lost; TCP just resends them.</li>
+  <li><strong>Timeouts (Parts 4, 13)</strong> — never wait forever; a hung dependency must become a fast, handled error.</li>
+  <li><strong>Retries with jitter (Part 13)</strong> — retry transient failures, but add randomness so a thousand clients don't retry in lockstep and stampede the recovering server.</li>
+  <li><strong>Idempotency (Part 13)</strong> — make operations safe to repeat, because "did my request succeed or just the response get lost?" is unanswerable; retries demand idempotency.</li>
+  <li><strong>Circuit breakers (Part 13)</strong> — stop calling a failing dependency for a while, so one sick service doesn't drag the whole system down.</li>
+  <li><strong>Health checks &amp; multi-AZ (Parts 9, 11)</strong> — the load balancer continuously asks "are you alive?" and routes around the dead; spreading across Availability Zones means one data center's failure isn't yours.</li>
+</ul>
+
+<h3>5.7 Caching &amp; locality — latency is distance</h3>
+
+<p>Because latency is bounded by the speed of light (Part 1), the only way to make distant data fast is to
+<em>move it closer</em>. This theme runs from the CPU all the way to the planet:</p>
+
+<ul>
+  <li><strong>DNS caching &amp; TTL (Part 6)</strong> — don't re-resolve every time; remember the answer for its TTL.</li>
+  <li><strong>HTTP caching (Part 7)</strong> — <code>Cache-Control</code>, <code>ETag</code>, conditional requests; don't refetch what hasn't changed.</li>
+  <li><strong>Application caches (Parts 1, 14)</strong> — Redis next to your app turns a cross-network database read into a sub-millisecond local-ish read.</li>
+  <li><strong>CDN edge (Part 14)</strong> — push content to hundreds of points of presence so the user's bytes travel meters, not oceans.</li>
+  <li><strong>Co-location (Part 1)</strong> — keep chatty services in the same Availability Zone so each call is 0.5 ms, not 70 ms.</li>
+</ul>
+
+<h3>5.8 Demultiplexing — "who gets this?" asked at every layer</h3>
+
+<p>This is the most beautiful recurrence in the whole course, and most engineers never notice it. At <em>every
+single layer</em>, an arriving piece of data faces the same question: <strong>of the many possible recipients
+here, who exactly gets this?</strong> The mechanism changes; the question never does.</p>
+
+<div class="figure-title">Fig 15.4 — The same question, re-asked at every layer</div>
+<pre class="diagram">
+   arriving data ──► "who gets this?"  ──► answered by:
+
+   at the NIC / L2      which interface?          ──► MAC address      (Part 2)
+   at the host / L3     which machine?            ──► IP address       (Part 3)
+   at the OS / L4       which program/socket?     ──► port number      (Part 5)
+   at the cluster       which set of pods?        ──► Service / VIP    (Part 12)
+   at the gateway / L7  which microservice/route? ──► URL path / Host  (Parts 7,10,13)
+
+         MAC ──► IP ──► port ──► Service ──► path
+         the funnel that narrows "the network" down to "this exact handler"
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>A packet's whole life is a series of "who gets this?" decisions, each narrower than the last: the frame's
+  MAC says which interface, the packet's IP says which host, the segment's port says which process, the cluster's
+  Service says which Pod set, and the gateway's path says which handler. <strong>Routing to the right recipient is
+  not a DNS thing or a Kubernetes thing — it is THE thing networking does, re-asked at every layer.</strong> When
+  you can see one request being demultiplexed five times on its way to your <code>@PostMapping("/orders")</code>,
+  you are seeing the network the way a senior engineer sees it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="playbook">6. The networking debugging playbook</h2>
+
+<p>Parts 2 and 14 promised a methodology: when something is broken, <strong>walk up the stack</strong>. Here it
+is in full. The reason it works is the dependency chain from §4 — a failure at a high layer is often a failure at
+a low layer wearing a disguise, so you verify the foundation before blaming the penthouse. The single question
+behind all debugging, planted in Parts 1 and 2, is: <strong>which layer's contract was violated?</strong></p>
+
+<h3>6.1 The master symptom → layer → cause → tool table</h3>
+
+<p>This table is meant to be lived with. Each row is a symptom you <em>will</em> meet in production; the columns
+take you from "what you see" to "which layer," to "the usual cause," to "the command that proves it." Notice how
+the symptom's <em>shape</em> already tells you the layer — that is the whole skill.</p>
+
+<div class="figure-title">Fig 15.5 — The production networking symptom map</div>
+<table>
+  <tr><th>Symptom</th><th>Layer</th><th>Likely cause</th><th>Tool / command</th><th>Part</th></tr>
+  <tr>
+    <td>NXDOMAIN / "host not found"</td>
+    <td>L7 (DNS)</td>
+    <td>Name doesn't resolve: typo, missing record, wrong resolver, propagation delay</td>
+    <td><code>dig api.shop.com</code>, <code>nslookup</code></td>
+    <td>6</td>
+  </tr>
+  <tr>
+    <td>Connection refused <em>instantly</em></td>
+    <td>L4</td>
+    <td>Name resolved, host reachable, but <strong>nothing is listening</strong> on that port (process down, wrong port)</td>
+    <td><code>nc -vz host 8080</code>, <code>telnet</code>, <code>ss -tlnp</code></td>
+    <td>4, 5</td>
+  </tr>
+  <tr>
+    <td>Connection <em>times out</em> (hangs, then fails)</td>
+    <td>L3 / L4</td>
+    <td>Packets disappear silently: security group, NACL, missing route, firewall, wrong subnet</td>
+    <td>VPC Flow Logs, <code>traceroute</code>, check SG/NACL rules</td>
+    <td>11</td>
+  </tr>
+  <tr>
+    <td>Intermittent timeouts under load</td>
+    <td>L4 / L7</td>
+    <td>LB idle timeout closing connections, or connection-pool exhaustion (no free sockets)</td>
+    <td>HikariCP metrics, LB idle-timeout config, <code>ss -s</code></td>
+    <td>4, 9</td>
+  </tr>
+  <tr>
+    <td>TLS handshake failure / cert error</td>
+    <td>TLS (5/6)</td>
+    <td>Expired cert, hostname mismatch (SNI), untrusted CA, protocol/cipher mismatch</td>
+    <td><code>openssl s_client -connect host:443</code></td>
+    <td>8</td>
+  </tr>
+  <tr>
+    <td>400 / 401 / 403 / 404</td>
+    <td>L7 (HTTP)</td>
+    <td>App-level: malformed request / not authenticated / not authorized / route doesn't exist</td>
+    <td><code>curl -v</code>, read the response body &amp; headers</td>
+    <td>7</td>
+  </tr>
+  <tr>
+    <td>502 Bad Gateway</td>
+    <td>L7 (proxy)</td>
+    <td>The proxy/LB reached the backend but got a broken/invalid response — <strong>backend crashed or returned garbage</strong></td>
+    <td>Backend logs, <code>curl</code> the backend directly, health-check status</td>
+    <td>9, 10</td>
+  </tr>
+  <tr>
+    <td>503 Service Unavailable</td>
+    <td>L7 (proxy)</td>
+    <td><strong>No healthy targets</strong> — all backends failed health checks, or nothing registered</td>
+    <td>LB target-group health, readiness probes</td>
+    <td>9, 12</td>
+  </tr>
+  <tr>
+    <td>504 Gateway Timeout</td>
+    <td>L7 (proxy)</td>
+    <td>Backend reached but <strong>too slow</strong> — exceeded the proxy's upstream timeout</td>
+    <td>App latency metrics, slow-query logs, proxy timeout config</td>
+    <td>9, 10</td>
+  </tr>
+  <tr>
+    <td>CORS error in the browser console</td>
+    <td>L7 (HTTP)</td>
+    <td>Server didn't return <code>Access-Control-Allow-Origin</code>; it's a <em>browser</em> policy, not a network failure</td>
+    <td>DevTools Network tab, check response headers</td>
+    <td>7</td>
+  </tr>
+  <tr>
+    <td>Redirect loop to <code>http://</code></td>
+    <td>L7 (proxy)</td>
+    <td>TLS terminated at the LB; app sees plain HTTP and redirects to HTTPS forever. Missing <code>X-Forwarded-Proto</code> handling</td>
+    <td>Check <code>X-Forwarded-Proto</code>; configure <code>server.forward-headers-strategy</code></td>
+    <td>9, 10</td>
+  </tr>
+  <tr>
+    <td>Slow first request, then fast</td>
+    <td>L4 / TLS / app</td>
+    <td>Cold connection (TCP+TLS handshake), cold cache, or JIT warm-up — the handshake tax (§5.2) paid once</td>
+    <td>Time successive <code>curl</code>s; compare cold vs warm</td>
+    <td>4, 8</td>
+  </tr>
+  <tr>
+    <td>Stale IP after a failover</td>
+    <td>L7 (DNS)</td>
+    <td>DNS still cached the old IP; TTL not yet expired — and the JVM caches DNS effectively forever by default</td>
+    <td>Check TTL, JVM <code>networkaddress.cache.ttl</code>, OS resolver cache</td>
+    <td>6</td>
+  </tr>
+</table>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — the two-second triage that uses the whole table</div>
+  <p>A teammate says "the orders API is down." Instead of guessing, you walk up the stack in four commands and
+  the failure <em>tells you its layer</em>:</p>
+  <pre class="code">$ dig api.shop.com           # L7-DNS: does the name resolve? (NXDOMAIN =&gt; DNS, stop here)
+$ nc -vz 203.0.113.7 443     # L4: is anything listening? (refused =&gt; down; timeout =&gt; SG/NACL)
+$ openssl s_client -connect api.shop.com:443   # TLS: handshake OK? cert valid?
+$ curl -v https://api.shop.com/api/orders      # L7-HTTP: what status &amp; body comes back?</pre>
+  <p>Each command corresponds to a layer of Fig 15.2, in order. The first one that fails names the culprit, and
+  you never wasted time reading application code for what was a security-group rule.</p>
+</div>
+
+<h3>6.2 The general algorithm: bottom-up vs top-down</h3>
+
+<p>There are two directions to walk the stack, and seniors choose based on the symptom:</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Bottom-up — when nothing works at all</div>
+    <p>Start at L3 and climb: <em>Can I reach the host? (ping/traceroute, Part 3) → Is the port open? (nc, Parts
+    4–5) → Does TLS complete? (openssl, Part 8) → Does HTTP respond correctly? (curl, Part 7).</em> Use this when
+    the connection itself fails — "connection refused," "timeout," total outage. You are checking the
+    <em>foundation</em> before the penthouse, because a low-layer break makes everything above it impossible.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Top-down — when it mostly works but is wrong</div>
+    <p>Start at L7 and descend: read the HTTP status and body first (Part 7); a 404/401/502/504 already tells you
+    where to look (§6.1). Use this when you <em>get a response</em> but it's wrong or slow — the connection
+    clearly works, so the bug is high up. A 504 sends you to backend latency; a 401 to auth; a CORS error to
+    response headers.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 The master question — "whose contract broke?"</div>
+    <p>Every layer offers a <em>contract</em> to the one above (Parts 1, 2): L3 promises "I'll get a packet to the
+    host," L4 promises "a reliable ordered byte stream to the right port," TLS promises "encrypted to a verified
+    identity," L7 promises "a well-formed response." Debugging is binary search over <em>which contract was
+    violated</em>. The symptom narrows it (refused points to a broken L4 contract; a cert error to a broken TLS
+    contract; a 502 means the backend broke L7's contract to the proxy), and the matching tool confirms it. This
+    is the same "which of the ten
+    problems / which layer?" reflex from Part 1 — now used in reverse, for diagnosis instead of design.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="performance">7. The performance mental model — count the round trips</h2>
+
+<p>Part 1 gave you the RTT table and the truth that <em>latency is distance</em>. The senior performance skill
+built on it is <strong>latency-budget thinking</strong>: before optimizing anything, count the round trips in a
+request and ask which ones you can delete. A request's wall-clock time is dominated not by CPU but by the
+<em>number of sequential network round trips</em> it makes.</p>
+
+<h3>7.1 Counting the round trips in one cold request</h3>
+
+<p>Trace a single first-time HTTPS API call from a browser to your service, and count what each step costs in
+round trips (RTT). This is the calculation a senior engineer does in their head:</p>
+
+<div class="figure-title">Fig 15.6 — The round-trip budget of one cold request</div>
+<pre class="diagram">
+   step                                   round trips     can be removed by
+   ─────────────────────────────────────  ───────────     ─────────────────────────────
+   DNS lookup (Part 6)                     ~1 RTT          DNS cache / TTL
+   TCP handshake (Part 4)                  1 RTT           connection pool, keep-alive
+   TLS 1.3 handshake (Part 8)              1 RTT           session resumption / 0-RTT
+   TLS 1.2 handshake (Part 8)              2 RTT           upgrade to TLS 1.3
+   the HTTP request itself (Part 7)        1 RTT           (this is the useful one)
+   each sequential DB query (Part 4)       1 RTT each      batch, JOIN, cache, co-locate
+   each downstream microservice (Part 13)  1 RTT each      parallelize, gRPC, merge calls
+   ─────────────────────────────────────  ───────────
+   cold call, TLS 1.3, 3 serial DB queries:  1+1+1+1+3 = 7 RTT
+   warm call (pooled, resumed, cached DNS):  0+0+0+1+0 = 1 RTT
+</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>The same logical request can cost <strong>7 round trips cold and 1 round trip warm</strong> — and on a
+  cross-region path at 200 ms/RTT, that is the difference between 1.4 seconds and 0.2 seconds for identical work.
+  Performance engineering is mostly <em>moving requests from the cold column to the warm column</em>: pool
+  connections, resume TLS, cache DNS, and — above all — stop making round trips serial. Every theme in §5.2
+  (handshake tax) and §5.7 (locality) is an attack on this budget.</p>
+</div>
+
+<h3>7.2 The two anti-patterns that blow the budget</h3>
+
+<ul>
+  <li><strong>N+1 queries (Parts 1, 13)</strong> — fetch a list (1 query), then loop and fetch each item's detail
+  (N more queries). On a 1 ms-RTT same-AZ database that's tolerable; the moment the database is one network hop
+  further away, those N serial round trips dominate the entire request. The fix is a JOIN, a batch fetch, or a
+  cache — all of which <em>collapse N round trips into one</em>.</li>
+  <li><strong>Chatty microservices (Parts 1, 13)</strong> — one user request fans out into a chain of synchronous
+  service-to-service calls, each adding its own RTT (plus its own handshake if not pooled). Five services in a
+  serial chain is five RTTs minimum. The fixes: parallelize independent calls, merge fine-grained services,
+  prefer gRPC's multiplexed connections, and co-locate chatty services in one AZ (§5.7).</li>
+</ul>
+
+<h3>7.3 Bandwidth vs latency, one more time — and the numbers to memorize</h3>
+
+<p>Part 1's deepest performance lesson bears repeating because it is the most common mistake in the field:
+<strong>bandwidth and latency are independent, and round-trip-bound work cares only about latency.</strong>
+Upgrading the pipe from 1 Gbps to 10 Gbps makes a large <em>download</em> faster and a chatty API endpoint
+<em>exactly as slow</em>, because each call is tiny — its time is travel, not transfer. Here are the back-of-the-
+envelope numbers every backend engineer should carry:</p>
+
+<table>
+  <tr><th>Quantity</th><th>Rough number</th><th>Why it matters</th></tr>
+  <tr><td>Same-AZ / same-data-center RTT</td><td>~0.5 ms</td><td>Keep chatty services here; cheap round trips</td></tr>
+  <tr><td>Cross-AZ RTT (same region)</td><td>~1–2 ms</td><td>Multi-AZ HA is nearly free latency-wise</td></tr>
+  <tr><td>Same-city RTT</td><td>~1–5 ms</td><td>Why CDN edge nodes exist</td></tr>
+  <tr><td>Cross-region RTT</td><td>~70–250 ms</td><td>Why cross-region replication is async</td></tr>
+  <tr><td>TCP handshake</td><td>1 RTT</td><td>Pool connections to avoid it</td></tr>
+  <tr><td>TLS 1.3 handshake</td><td>1 RTT (1.2 = 2)</td><td>Upgrade to 1.3; resume sessions</td></tr>
+  <tr><td>Memory read</td><td>~100 ns</td><td>~10,000× faster than a same-AZ network hop</td></tr>
+  <tr><td>SSD read</td><td>~100 µs</td><td>Still faster than most network calls</td></tr>
+  <tr><td>Redis GET (same AZ)</td><td>~0.5–1 ms</td><td>Why caching turns DB reads into near-local reads</td></tr>
+</table>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ The performance myth that won't die</div>
+  <p><strong>❌ "If it's slow, we need more bandwidth / a bigger instance."</strong><br>
+  ✅ Most slow backends are <em>latency-bound</em>, not bandwidth- or CPU-bound: too many serial round trips
+  (N+1, chatty services, cold connections). The fix is to remove round trips (cache, pool, batch, parallelize,
+  co-locate), not to widen a pipe that is already 99% empty. Measure round trips before you buy hardware.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="security">8. The security mental model — defense in depth across the layers</h2>
+
+<p>Security is not one feature at one layer; it is <strong>walls at every layer at once</strong>, so that
+breaching one does not breach the system. Part 8 showed encryption; Part 11 showed network isolation; Parts 7
+and 13 showed identity. Assembled, they form <em>defense in depth</em> — and the unifying principle, from Parts
+10 and 11, is brutally simple: <strong>only the edge is public; everything else is private and proves who it
+is.</strong></p>
+
+<div class="figure-title">Fig 15.7 — Defense in depth: a wall at every layer</div>
+<pre class="diagram">
+   the Internet (hostile, Part 1)
+        │
+        ▼   ── only THIS is public ──
+   ┌───────────────────────────────────────────────┐
+   │  EDGE: LB / WAF / CDN          public subnet   │  TLS terminates here (Part 8)
+   └───────────────────┬───────────────────────────┘
+        │ security group: only LB ──► app           │  L3/L4 isolation (Part 11)
+        ▼                                            │
+   ┌───────────────────────────────────────────────┐
+   │  APP TIER                      private subnet  │  authn/authz on every request (Part 7)
+   │  Spring Boot pods                              │  mTLS between services (Part 13)
+   └───────────────────┬───────────────────────────┘
+        │ security group: only app ──► database      │
+        ▼                                            │
+   ┌───────────────────────────────────────────────┐
+   │  DATA TIER                     private subnet  │  no public IP, encrypted at rest
+   │  PostgreSQL · Redis                            │  reachable ONLY from the app tier
+   └───────────────────────────────────────────────┘
+
+   each boundary assumes the one outside it may be breached (zero-trust, Part 13)
+</pre>
+
+<p>Read the walls outside-in, and note which layer each lives at — this is the security view of the master OSI
+table:</p>
+
+<table>
+  <tr><th>Wall</th><th>Layer</th><th>What it stops</th><th>Part</th></tr>
+  <tr><td>VPC / subnet placement (private = no public IP)</td><td>L3</td><td>Direct reachability from the Internet at all</td><td>11</td></tr>
+  <tr><td>Security groups (stateful, instance-level)</td><td>L3/L4</td><td>Any source/port not explicitly allowed; tier-to-tier overreach</td><td>11</td></tr>
+  <tr><td>NACLs (stateless, subnet-level)</td><td>L3/L4</td><td>Broad subnet-wide IP/port ranges; a coarse second fence</td><td>11</td></tr>
+  <tr><td>TLS / HTTPS (encryption in transit)</td><td>TLS (5/6)</td><td>Eavesdropping &amp; tampering on the wire; server impersonation</td><td>8</td></tr>
+  <tr><td>mTLS (mutual TLS, east-west)</td><td>TLS (5/6)</td><td>One breached service impersonating or sniffing another</td><td>13</td></tr>
+  <tr><td>Authn / authz (who are you / may you?)</td><td>L7</td><td>Unauthenticated or unauthorized requests reaching logic</td><td>7</td></tr>
+  <tr><td>WAF (web application firewall)</td><td>L7</td><td>Injection, known exploit patterns at the edge</td><td>9, 10</td></tr>
+</table>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — what an attacker sees vs can't, layer by layer</div>
+  <p>This is the Part 8 callback that makes encryption click. On the public Internet an attacker who taps the
+  wire sees: the <em>destination IP</em> (L3 — can't hide; routers need it), the <em>port</em> (L4 — 443, so
+  "this is HTTPS"), and the <em>SNI hostname</em> in the TLS handshake (which site you're visiting). What they
+  <strong>cannot</strong> see, because TLS encrypts it: the URL path, the headers, the cookies, the JWT, the
+  request body, and the response. So "they know you talked to <code>api.shop.com</code> but not what you said."
+  Defense in depth then adds: even if they breach the edge, the security groups stop them reaching the database;
+  even if they reach a pod, mTLS and zero-trust (Part 13) stop it impersonating others. No single wall is
+  trusted to hold — that is the whole idea.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="design-lens">9. The system-design interview lens</h2>
+
+<p>Everything in this course converges here, on the question that decides senior interviews: <em>"design a
+scalable web application / design X."</em> You now have a <strong>checklist you can run on any such prompt</strong>,
+because every box on it is a networking decision you learned. The canonical topology — the one you should be able
+to draw in 30 seconds — is a funnel from the public edge down to private state:</p>
+
+<div class="figure-title">Fig 15.8 — The reference architecture every "design X" answer reaches for</div>
+<pre class="diagram">
+   client ──► DNS / CDN ──► load balancer / API gateway ──► stateless app tier ──► cache ──► data tier
+   (browser) (Part 6,14)   (Parts 9,10,13)                 (Parts 7,12)          (Part 14) (async repl, Part 1)
+      │           │              │                              │                   │           │
+   React      resolve +       TLS terminates,             horizontal scale,    Redis in     PostgreSQL,
+   fetch      edge cache      routes by path,             any instance any     front of     multi-AZ;
+              (closer)        health checks               request (stateless)  the DB       cross-region async
+</pre>
+
+<h3>9.1 The networking-decision checklist</h3>
+
+<p>Run these eight questions on any system-design prompt. Each maps to a part of this course, and naming the
+trade-off out loud is what signals seniority:</p>
+
+<table>
+  <tr><th>Decision</th><th>The question to answer aloud</th><th>Part</th></tr>
+  <tr><td>TLS termination point</td><td>Where does HTTPS end — at the CDN, the LB, or the pod? (Usually the edge; re-encrypt or mTLS inside if zero-trust)</td><td>8, 13</td></tr>
+  <tr><td>Public vs private placement</td><td>Only the LB is in a public subnet; app and data tiers are private with no public IP</td><td>11</td></tr>
+  <tr><td>L4 vs L7 load balancing</td><td>Need path/host routing or TLS termination? L7 (ALB). Just raw throughput / non-HTTP? L4 (NLB)</td><td>9</td></tr>
+  <tr><td>Stateless tier + where state lives</td><td>App tier holds no session; push state to Redis/JWT/DB so any instance serves any request</td><td>7, 9</td></tr>
+  <tr><td>Sync vs async communication</td><td>Request-response (REST/gRPC) where the caller needs an answer now; message queue (Kafka) to decouple and absorb spikes</td><td>13</td></tr>
+  <tr><td>Service discovery</td><td>How do services find each other? DNS / Kubernetes Service / a registry — indirection, not hard-coded IPs</td><td>12, 13</td></tr>
+  <tr><td>Idempotency &amp; failure handling</td><td>Retries with jitter, timeouts, circuit breakers, idempotency keys — because the network will fail</td><td>13</td></tr>
+  <tr><td>Multi-AZ / multi-region</td><td>Spread across AZs for HA (cheap, ~1 ms); go multi-region for global latency or DR (expensive, async)</td><td>11</td></tr>
+</table>
+
+<h3>9.2 Worked mini-example — design a URL shortener, narrated purely through networking</h3>
+
+<p>Watch the checklist run on a classic prompt. We say <em>nothing</em> about databases or hashing algorithms —
+only the networking decisions, each citing its part — to prove the course gave you a complete design lens:</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 "Design a global URL shortener (tinyurl)" — the networking narration</div>
+  <ol>
+    <li><strong>The client hits a name, not an IP (Part 6).</strong> <code>short.ly/abc</code> resolves via DNS;
+    we use a short TTL so we can fail over fast, and geo-DNS or anycast to send users to the nearest region.</li>
+    <li><strong>A CDN sits at the edge (Part 14).</strong> Redirects are the hottest, most cacheable operation on
+    Earth — the same short code always maps to the same long URL. Cache the 301 at hundreds of PoPs so most
+    lookups never reach our servers and travel meters, not oceans (§5.7).</li>
+    <li><strong>TLS terminates at the edge / LB (Part 8).</strong> Everything is HTTPS; the cert lives on the CDN
+    and the ALB, not the app.</li>
+    <li><strong>An L7 load balancer fronts the app tier (Part 9).</strong> It routes <code>POST /create</code> and
+    <code>GET /{code}</code>, runs health checks, and spreads load. Only it is in a public subnet (Part 11).</li>
+    <li><strong>The app tier is stateless and horizontally scaled (Parts 7, 12).</strong> Creating or resolving a
+    code needs no per-user memory, so any pod serves any request and we scale out under load. Sticky sessions
+    would be an anti-pattern here (§5.3).</li>
+    <li><strong>A cache fronts the data tier (Part 14).</strong> Redis holds hot code→URL mappings so the read
+    path is a sub-millisecond lookup, not a cross-network database round trip (§7.1).</li>
+    <li><strong>The data tier is private, multi-AZ, async cross-region (Parts 1, 11).</strong> No public IP,
+    reachable only from the app tier's security group; replicated across AZs for HA and asynchronously across
+    regions because 200 ms is not a LAN (§5.5).</li>
+    <li><strong>The whole thing is failure-tolerant (Part 13).</strong> Timeouts and retries on the cache and DB
+    calls; the redirect path degrades gracefully to a DB read if Redis is down.</li>
+  </ol>
+  <p>That is a complete, defensible architecture argued entirely in the vocabulary of this course. Swap "URL
+  shortener" for "design a global API," "design Twitter's timeline," or "design a payment gateway," and the same
+  eight decisions structure the answer — only the data model and the sync/async split change.</p>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Why this wins interviews</div>
+  <p>Junior candidates answer "design X" by naming technologies ("I'd use Redis and Postgres and an LB").
+  Senior candidates answer by <em>narrating the request path and naming the trade-off at each hop</em> — where
+  TLS ends, what's public vs private, sync vs async, how it scales, how it fails. This course gave you exactly
+  that path. Run the checklist in §9.1 out loud, draw Fig 15.8, and you are giving a senior answer.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="maturity">10. The networking maturity ladder</h2>
+
+<p>Use this to locate yourself honestly and see the road ahead. The difference between the rungs is not <em>how
+many facts</em> you know — it is <em>how you think</em>: the junior knows the top layer, the mid debugs across
+layers, the senior reasons about budgets, failures, and boundaries and designs the whole topology.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Junior — knows the top of the stack</div>
+    <p>Knows HTTP verbs and status codes; can call an API with <code>fetch</code> or <code>RestTemplate</code>;
+    reads JSON; sets a header; uses <code>localhost:8080</code>. Treats everything below L7 as magic. When an API
+    fails, checks the request body and the docs. <em>This is a perfectly good place to start — it is where Part 1
+    found you, knowing the URL but not what it sets in motion.</em></p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Mid — understands and debugs across layers</div>
+    <p>Understands DNS, TCP, TLS, and load balancers as distinct things (Parts 4, 6, 8, 9); knows why a 502
+    differs from a 504; can read <code>curl -v</code>, <code>dig</code>, and <code>openssl s_client</code> output;
+    knows TLS terminates at the LB and that the app then sees plain HTTP; can walk up the stack (§6) to find a
+    broken layer instead of guessing. Configures security groups and Kubernetes Services correctly.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Senior — reasons about budgets, failures, and boundaries; designs the topology</div>
+    <p>Counts round trips and thinks in latency budgets (§7); designs for failure as the default — timeouts,
+    retries with jitter, idempotency, circuit breakers (§5.6); reasons about trust boundaries and defense in
+    depth (§8); chooses sync vs async, L4 vs L7, multi-AZ vs multi-region with the trade-offs explicit; sees the
+    recurring themes (§5) and recognizes a new technology as "indirection again" or "encapsulation again." Can
+    draw the whole topology and defend every hop. <em>This is where this course was built to take you.</em></p>
+  </div>
+</div>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>You climb this ladder by <em>changing the question you ask</em>. Junior asks "what's the API call?" Mid asks
+  "which layer is broken?" Senior asks "what's the round-trip budget, what happens when this fails, and where are
+  the trust boundaries?" The facts in this course are the price of admission; the <em>questions</em> are the
+  mastery. If §5–§9 felt like a new way of seeing rather than new facts, you have already started the climb.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interview">11. The big interview gauntlet</h2>
+
+<p>This is the capstone of every "Interview questions" section in the course — the rapid-fire gauntlet,
+organized by theme. The highest-signal question from each part, answered crisply, plus the two perennials in
+full. Try every one out loud before clicking; if you can answer two-thirds of these cleanly, you can hold your
+own in any backend or systems interview.</p>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 1 — Fundamentals &amp; OSI</div>
+
+  <details><summary>What is the OSI model and why does it matter if nobody implements it?</summary>
+    <p>OSI is a seven-layer reference model (Physical, Data Link, Network, Transport, Session, Presentation,
+    Application) that assigns every networking concern a home. Nobody implements it literally — the real Internet
+    runs the simpler four-layer TCP/IP model — but it matters as a <em>coordinate system</em>: it lets you locate
+    any protocol, device, or bug ("a 502 is L7; a cert error is the TLS/session layer; a routing failure is L3")
+    and it makes the universal debugging question precise: <em>which layer's contract was violated?</em></p>
+  </details>
+
+  <details><summary>What is encapsulation, and what are the data units at each layer?</summary>
+    <p>Encapsulation is each layer wrapping the layer above's data in its own header as the data descends the
+    sender's stack, and stripping it on the way up the receiver's. Units: L7 a <em>message</em>, L4 a
+    <em>segment</em> (TCP) or <em>datagram</em> (UDP), L3 a <em>packet</em>, L2 a <em>frame</em>, L1 a
+    <em>bit</em>. Your JSON body simultaneously exists as a Java object, a byte array, TCP segments, IP packets,
+    Ethernet frames, and voltage — each layer reads only its own header and treats the rest as opaque cargo.</p>
+  </details>
+
+  <details><summary>Latency vs bandwidth — can a link have high bandwidth and high latency?</summary>
+    <p>Latency is travel time (distance-bound, ms); bandwidth is volume per second (capacity, Gbps). They are
+    independent: a transcontinental fiber or satellite has huge bandwidth and high latency (the truck-of-hard-
+    drives example). Request-response work is latency-bound — small payloads, dominated by round trips — so a
+    bandwidth upgrade does nothing for a chatty API. That single fact drives CDNs, caching, connection pooling,
+    and region placement.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 2 — Addressing &amp; Routing</div>
+
+  <details><summary>Walk me from a private IP to a public server and back — what does NAT do?</summary>
+    <p>Your laptop has a private IP (e.g. <code>192.168.1.50</code>) that isn't routable on the Internet. The
+    home/cloud router performs NAT (Network Address Translation): it rewrites the packet's source to its own
+    public IP and a chosen port, records the mapping in a table, and on the reply rewrites the destination back
+    to your private IP. That's why many devices share one public IP, why outbound connections "just work" while
+    inbound needs port-forwarding, and why webhooks and P2P are hard behind NAT.</p>
+  </details>
+
+  <details><summary>What is CIDR, and what does <code>10.0.0.0/16</code> mean?</summary>
+    <p>CIDR (Classless Inter-Domain Routing) notation writes an address plus a prefix length: <code>/16</code>
+    means the first 16 bits are the network, leaving 16 bits (~65,536 addresses) for hosts. So
+    <code>10.0.0.0/16</code> spans <code>10.0.0.0</code>–<code>10.0.255.255</code>. You use it constantly in
+    AWS: a VPC is a CIDR block, and you carve subnets out of it with longer prefixes (e.g. <code>/24</code> = 256
+    addresses per subnet).</p>
+  </details>
+
+  <details><summary>What does ARP do, and which layer is it?</summary>
+    <p>ARP (Address Resolution Protocol) maps an IP address to a MAC address on the local network — it's the glue
+    between L3 and L2. To send a packet to a neighbor (or the default gateway), the host needs that neighbor's
+    MAC for the Ethernet frame, so it broadcasts "who has <code>192.168.1.1</code>?" and caches the reply. It
+    only works within a single LAN segment; beyond that, routing (L3) takes over.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 3 — Transport &amp; Ports</div>
+
+  <details><summary>Explain the TCP three-way handshake and why it exists.</summary>
+    <p>SYN → SYN-ACK → ACK. The client sends SYN with its initial sequence number; the server replies SYN-ACK
+    (acknowledging the client's and sending its own sequence number); the client ACKs. After this one round trip
+    both sides have agreed sequence numbers and confirmed two-way reachability, enabling reliable, ordered
+    delivery. It exists because TCP must establish shared state (sequence numbers, window sizes) before it can
+    detect loss and reordering — UDP skips all of this, which is why it's faster but unreliable.</p>
+  </details>
+
+  <details><summary>When would you choose UDP over TCP?</summary>
+    <p>When you value low latency over guaranteed delivery and can tolerate (or handle yourself) loss and
+    reordering: real-time video/voice, gaming, DNS queries, and QUIC/HTTP3 (which rebuilds reliability on top of
+    UDP to avoid TCP's head-of-line blocking). TCP gives ordering, retransmission, and flow/congestion control;
+    UDP gives a bare "best-effort datagram" with almost no overhead and no handshake.</p>
+  </details>
+
+  <details><summary>What is a socket and what is the 5-tuple?</summary>
+    <p>A socket is the OS endpoint of a connection — the handle your program reads and writes. A TCP connection
+    is uniquely identified by the 5-tuple: <em>(source IP, source port, destination IP, destination port,
+    protocol)</em>. That's how one server on port 443 handles thousands of simultaneous clients — each connection
+    differs in the client's IP/port even though the server side is identical. It's also how the OS
+    <em>demultiplexes</em> arriving packets to the right socket.</p>
+  </details>
+
+  <details><summary>What is connection pooling and why does it matter?</summary>
+    <p>A pool keeps a set of TCP connections (e.g. HikariCP to PostgreSQL) open and hands them out for reuse
+    instead of opening a new one per query. It matters because each new connection pays the TCP handshake (and
+    TLS handshake if encrypted) — a round-trip tax — plus server-side setup cost. Pooling amortizes that to near
+    zero, and pool <em>exhaustion</em> (all connections busy) is a classic cause of intermittent timeouts under
+    load.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 4 — DNS</div>
+
+  <details><summary>Walk through resolving <code>api.shop.com</code> from cache miss to answer.</summary>
+    <p>The stub resolver asks the recursive resolver (your ISP's or <code>8.8.8.8</code>). On a full miss it
+    walks the hierarchy: a <em>root</em> server points to the <code>.com</code> <em>TLD</em> server; the TLD
+    points to the <em>authoritative</em> server for <code>shop.com</code>; the authoritative returns the A record
+    (the IP). The resolver caches each answer for its TTL and returns it. Subsequent lookups hit the cache and
+    skip the walk — which is why DNS is fast despite the multi-step hierarchy.</p>
+  </details>
+
+  <details><summary>Why might a service still hit the old IP after a failover, and how does the JVM make it worse?</summary>
+    <p>Because DNS answers are cached for their TTL — until it expires, clients keep the stale IP. A low TTL
+    enables fast failover; a high one delays it. The JVM compounds this: by default it caches successful DNS
+    lookups effectively forever (<code>networkaddress.cache.ttl = -1</code> in some configs), so a long-running
+    Java service can pin a dead IP long after DNS updated. The fix is to lower the JVM DNS TTL and use sensible
+    record TTLs.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 5 — HTTP &amp; TLS</div>
+
+  <details><summary>What does it mean that HTTP is stateless, and how do we have logged-in sessions then?</summary>
+    <p>Stateless means the server keeps no memory of past requests — each request must carry everything needed to
+    process it. Logged-in sessions are simulated by the client sending identity on <em>every</em> request: a
+    session cookie (server looks up session state in Redis/DB) or a self-contained token (JWT the server
+    verifies). Statelessness is what makes horizontal scaling trivial — any server can handle any request because
+    none of them "remembers" you.</p>
+  </details>
+
+  <details><summary>Walk through the TLS handshake and what each side proves.</summary>
+    <p>Client sends ClientHello (supported ciphers, SNI hostname); server replies with its certificate (its
+    public key, signed by a CA) and key-exchange parameters. The client verifies the cert chains to a trusted CA
+    and matches the hostname, then both derive a shared symmetric session key via the key exchange. From then on
+    everything is symmetric-encrypted (fast). TLS 1.3 does this in one round trip. The server proves identity via
+    the CA-signed cert; asymmetric crypto bootstraps a fast symmetric channel.</p>
+  </details>
+
+  <details><summary>Is data in a JWT encrypted? Is HTTPS "safe"?</summary>
+    <p>A standard JWT is <em>signed, not encrypted</em> — anyone can Base64-decode and read its claims; the
+    signature only prevents tampering. Never put secrets in a JWT. And HTTPS guarantees the channel is encrypted
+    and the server's identity is CA-verified — it does <em>not</em> mean the site is trustworthy or the app is
+    secure. The padlock means "encrypted to whoever owns this domain," nothing about their intentions or code
+    quality.</p>
+  </details>
+
+  <details><summary>What is a CORS error, and is it a network failure?</summary>
+    <p>No — it's a <em>browser</em> security policy. When JavaScript on origin A calls origin B, the browser
+    requires B to return <code>Access-Control-Allow-Origin</code> permitting A; without it, the browser blocks
+    the response (the request often still reached the server). It's purely client-side enforcement — server-to-
+    server calls and <code>curl</code> ignore CORS entirely. The fix is server-side CORS headers, not a network
+    change.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 6 — Load Balancing &amp; Proxies</div>
+
+  <details><summary>L4 vs L7 load balancing — when do you pick each?</summary>
+    <p>An L4 LB (AWS NLB) routes on IP/port only — fast, protocol-agnostic, great for raw TCP throughput or
+    non-HTTP traffic, but it can't see URLs. An L7 LB (AWS ALB) parses HTTP, so it can route by path or host
+    (<code>/api</code> → service A, <code>/img</code> → service B), terminate TLS, and do content-based rules —
+    at slightly higher cost because it climbs to L7. Choose L7 when you need path/host routing or TLS
+    termination; L4 when you need bare speed or non-HTTP protocols.</p>
+  </details>
+
+  <details><summary>502 vs 503 vs 504 — what does each tell you?</summary>
+    <p>All three come from the proxy/LB about the <em>backend</em>. 502 Bad Gateway: it reached a backend but got
+    an invalid/broken response — the backend crashed or misbehaved. 503 Service Unavailable: no healthy backends
+    at all — everything failed health checks or nothing is registered. 504 Gateway Timeout: it reached a backend
+    but the backend was too slow and exceeded the upstream timeout. So: 502 = broken, 503 = none available, 504 =
+    too slow.</p>
+  </details>
+
+  <details><summary>Why might an app redirect-loop to http after you put it behind a load balancer?</summary>
+    <p>Because TLS terminated at the LB, so the app receives plain HTTP and "helpfully" redirects to HTTPS — over
+    and over. The LB tells the app the original scheme via the <code>X-Forwarded-Proto</code> header; the app
+    must trust it (e.g. Spring's <code>server.forward-headers-strategy=framework</code>) so it knows the client
+    is already on HTTPS. Forgetting to handle forwarded headers is one of the most common "works locally, loops
+    in prod" bugs.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 7 — Cloud &amp; Containers</div>
+
+  <details><summary>Security groups vs NACLs — what's the difference?</summary>
+    <p>Security groups are <em>stateful</em>, attached to instances/ENIs, allow-only (no deny rules), and return
+    traffic is automatically permitted — they're your primary, fine-grained firewall ("only the LB may reach the
+    app on 8080"). NACLs are <em>stateless</em>, attached to subnets, support allow <em>and</em> deny, and
+    evaluate inbound and outbound independently (you must allow ephemeral ports for replies) — a coarse,
+    subnet-wide second layer. Defense in depth uses both.</p>
+  </details>
+
+  <details><summary>What is a Kubernetes Service and why do Pods need one?</summary>
+    <p>Pods are ephemeral — they die and respawn with new IPs constantly — so you can't hard-code a Pod IP. A
+    Service is a stable virtual IP and DNS name fronting a dynamic set of Pods (selected by label), load-
+    balancing across them. It's the indirection pattern again: DNS + load balancer built into the cluster.
+    Types: ClusterIP (internal only), NodePort (a port on every node), LoadBalancer (provisions a cloud LB),
+    fronted by Ingress for L7 routing.</p>
+  </details>
+
+  <details><summary>How does pod-to-pod traffic cross machines if Pods think they're on a flat network?</summary>
+    <p>Via an <em>overlay network</em>: the CNI plugin encapsulates pod traffic (e.g. frames in VXLAN/UDP) and
+    ships it across the real node-to-node network, decapsulating at the destination. Pods get the illusion of one
+    flat L2/L3 network spanning all nodes, while physically the packets ride the underlay. It's encapsulation
+    (§5.4) used to fake a network topology that doesn't physically exist.</p>
+  </details>
+</div>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Theme 8 — Microservices &amp; Design</div>
+
+  <details><summary>REST vs gRPC vs message queue — how do you choose?</summary>
+    <p>REST (HTTP/JSON): ubiquitous, human-readable, great for public APIs and browser clients. gRPC (HTTP/2 +
+    protobuf): binary, multiplexed, strongly typed, low-latency — ideal for internal service-to-service calls.
+    Message queue (Kafka/RabbitMQ): asynchronous and decoupled — the producer doesn't wait; use it to absorb
+    spikes, fan out events, and survive consumer downtime. Rule of thumb: sync request-response when the caller
+    needs an answer now; async messaging to decouple and buffer.</p>
+  </details>
+
+  <details><summary>The network will fail — what patterns make a system resilient?</summary>
+    <p>Timeouts (never wait forever), retries <em>with jitter</em> (avoid synchronized stampedes), idempotency
+    (so retries are safe when you can't tell if the first attempt succeeded), circuit breakers (stop hammering a
+    failing dependency), health checks and readiness probes (route around the dead), and multi-AZ deployment (one
+    data center failing isn't your outage). These encode the assumption that failure is the default (§5.6), not
+    an exception.</p>
+  </details>
+
+  <details><summary>What does a service mesh do that the application doesn't?</summary>
+    <p>A mesh (Istio/Envoy) puts a sidecar proxy next to every service and moves cross-cutting networking out of
+    the app: mutual TLS between services (zero-trust east-west), retries/timeouts/circuit breaking,
+    load-balancing, and rich traffic metrics/tracing — all without changing application code. The app sends plain
+    HTTP to localhost; the sidecar transparently encrypts, routes, and observes it. It's the resilience and
+    security themes (§5.5, §5.6) implemented as infrastructure.</p>
+  </details>
+
+  <details><summary>⭐ THE BIG ONE: what happens when you type a URL and press Enter? (senior, all 15 parts)</summary>
+    <p>The senior answer spans the whole course. (1) The browser parses the URL and checks its caches.
+    (2) <strong>DNS (Part 6):</strong> resolve the hostname to an IP, walking root → TLD → authoritative on a
+    cache miss, honoring TTLs. (3) <strong>Routing (Parts 2–3):</strong> the OS wraps the request in TCP, IP, and
+    Ethernet (encapsulation); ARP finds the gateway's MAC; the packet hops through the home router (NAT), the
+    ISP, backbone routers, and into AWS — each hop an L3 forwarding decision. (4) <strong>TCP (Part 4):</strong>
+    a three-way handshake to port 443. (5) <strong>TLS (Part 8):</strong> a handshake verifies the server's
+    CA-signed certificate and derives a symmetric session key. (6) <strong>Edge/LB (Parts 9–11):</strong> the
+    request reaches a load balancer in a public subnet, which terminates TLS and routes by path; security groups
+    gate the private tiers. (7) <strong>Cluster (Part 12):</strong> a Kubernetes Service/Ingress demultiplexes to
+    a Pod; an overlay network carries it; a sidecar may add mTLS (Part 13). (8) <strong>App (Part 7):</strong>
+    Spring Boot parses the HTTP request, the controller runs, querying PostgreSQL over a pooled connection and
+    maybe Redis and other services — each a round trip (Part 13). (9) The JSON response ascends the same stack,
+    re-encapsulated and decapsulated layer by layer, and the browser renders it. Every layer demultiplexed the
+    request to the next-narrower recipient (§5.8); every round trip cost an RTT (§7); every hop respected a trust
+    boundary (§8). <em>That</em> is the request you can now narrate from memory.</p>
+  </details>
+
+  <details><summary>⭐ THE OTHER BIG ONE: design the networking for a scalable web app.</summary>
+    <p>Draw the funnel (Fig 15.8) and narrate each hop with its trade-off (§9.1): client → <strong>DNS/CDN</strong>
+    (Part 6, 14: cache and serve close to users, short TTL for failover) → <strong>L7 load balancer / API
+    gateway</strong> (Part 9, 13: terminate TLS, route by path, health-check; only this is in a public subnet) →
+    <strong>stateless app tier</strong> (Parts 7, 12: any instance serves any request, scaled horizontally,
+    state pushed to Redis/JWT/DB, no sticky sessions) → <strong>cache</strong> (Part 14: Redis turns DB reads
+    into near-local reads) → <strong>data tier</strong> (Parts 1, 11: private subnet, no public IP, multi-AZ for
+    HA, async cross-region for global/DR). Wrap it in <strong>resilience</strong> (Part 13: timeouts, retries
+    with jitter, idempotency, circuit breakers) and <strong>defense in depth</strong> (Part 8, 11, 13: TLS at the
+    edge, security groups between tiers, mTLS east-west). Naming where TLS terminates, what's public vs private,
+    sync vs async, and how it fails is what makes it a senior answer.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">12. Capstone misconceptions</h2>
+
+<p>The most dangerous myths from the entire course, collected in one place. Each is a belief that quietly causes
+production incidents and bad designs. If you have absorbed this course, every ✅ below should feel obvious — and
+catching a colleague stating one of the ❌s is a sign you've reached the mid-to-senior rung (§10).</p>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ The ten myths that cause real incidents</div>
+
+  <p><strong>❌ "The OSI model is what the Internet actually implements."</strong><br>
+  ✅ OSI is a teaching map; the Internet runs the simpler four-layer TCP/IP model (Part 2). Layers 5/6 don't
+  exist as separate implementations — TLS plays that role. Use OSI to <em>locate</em> concepts and reason about
+  broken contracts, not as a description of real code.</p>
+
+  <p><strong>❌ "A JWT is encrypted, so it's safe to put secrets in it."</strong><br>
+  ✅ A standard JWT is <em>signed, not encrypted</em> (Part 7) — anyone can Base64-decode and read every claim.
+  The signature prevents tampering, not reading. Never put anything secret in a JWT.</p>
+
+  <p><strong>❌ "Message queues / distributed systems can guarantee exactly-once delivery."</strong><br>
+  ✅ True end-to-end exactly-once is effectively impossible over an unreliable network (Part 13). What you get is
+  at-least-once delivery plus <em>idempotent</em> processing, which together <em>look</em> like exactly-once.
+  Design idempotent consumers; never assume a message arrives precisely once.</p>
+
+  <p><strong>❌ "Sticky sessions are a fine way to scale."</strong><br>
+  ✅ Sticky sessions (Parts 9, 12) pin a user to one backend because it holds their state, which breaks even load
+  distribution and turns one instance's death into logged-out users. Keep the app tier <em>stateless</em> and
+  push state to Redis/JWT/DB (§5.3) so any instance serves anyone.</p>
+
+  <p><strong>❌ "More bandwidth (or a bigger instance) will fix our slow API."</strong><br>
+  ✅ Most slow backends are latency-bound — too many serial round trips (N+1, chatty services, cold
+  connections), not a saturated pipe or CPU (Parts 1, 7, 13). Remove round trips (cache, pool, batch,
+  parallelize, co-locate); widening an empty pipe changes nothing.</p>
+
+  <p><strong>❌ "Making a subnet 'public' is just a checkbox / a setting on the subnet."</strong><br>
+  ✅ A subnet is "public" only because its route table sends <code>0.0.0.0/0</code> to an Internet Gateway and
+  resources have public IPs (Part 11). There's no magic flag — it's routing plus addressing. Forget the route and
+  your "public" subnet is unreachable; misconfigure it and your "private" tier is exposed.</p>
+
+  <p><strong>❌ "My backend always sees the real client's IP address."</strong><br>
+  ✅ Once a load balancer or reverse proxy is in the path (Parts 9, 10), your app sees the <em>proxy's</em> IP as
+  the source. The real client IP lives in the <code>X-Forwarded-For</code> header — which you must trust and
+  parse. Rate-limiting or geolocating on the connection IP behind an LB rate-limits the LB.</p>
+
+  <p><strong>❌ "A Kubernetes Service is a process / a running thing."</strong><br>
+  ✅ A Service is <em>not</em> a process (Part 12). It's a stable virtual IP + DNS name + load-balancing rule
+  (implemented by iptables/IPVS) in front of a dynamic set of Pods. Nothing "runs" as the Service; it's an
+  abstraction that routes to the Pods that do.</p>
+
+  <p><strong>❌ "More microservices = a faster, better system."</strong><br>
+  ✅ Splitting into more services adds <em>network</em> between components — every former in-process call becomes
+  a round trip with latency and a failure probability (Parts 1, 13). Too-fine services create chatty, fragile,
+  slow systems. Service boundaries are a trade-off, not a goodness metric.</p>
+
+  <p><strong>❌ "The padlock (HTTPS) means the website is safe / trustworthy."</strong><br>
+  ✅ The padlock means the connection is encrypted and the server's identity is CA-verified for that domain
+  (Part 8) — nothing about whether the site is honest, the app is secure, or your data is handled well. Phishing
+  sites use valid HTTPS too. Encryption ≠ trustworthiness.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="next">13. Where to go next</h2>
+
+<p>Here is the quiet superpower of finishing this course: you now have the <em>foundation</em> that makes the
+next layer of topics learnable in days, not months. Each one below is "just" a better answer to one of the ten
+problems (§1) — and you already know which problem and what was inadequate before. One line each:</p>
+
+<ul>
+  <li><strong>QUIC / HTTP/3 deep-dive</strong> — reliability + crypto rebuilt on UDP to kill TCP's head-of-line blocking and cut handshake round trips (problem 5, refined; Parts 4, 8).</li>
+  <li><strong>BGP</strong> — the routing protocol <em>between</em> networks that actually runs the Internet, governed as much by business contracts as engineering (problem 4 at planetary scale; Part 3).</li>
+  <li><strong>eBPF networking</strong> — running sandboxed programs in the Linux kernel to filter, route, and observe packets at wire speed (Cilium, modern service meshes); the new substrate under Parts 11–13.</li>
+  <li><strong>WebRTC</strong> — peer-to-peer media between browsers, including the NAT-traversal dance (STUN/TURN/ICE) that makes P2P work despite Part 3's NAT.</li>
+  <li><strong>gRPC streaming</strong> — bidirectional, long-lived streams over HTTP/2 for real-time service-to-service data (Part 13, beyond request-response).</li>
+  <li><strong>Observability / OpenTelemetry</strong> — distributed tracing that follows one request across every service hop, turning the §6 playbook into automated, always-on insight.</li>
+  <li><strong>Chaos engineering</strong> — deliberately injecting failures (killed pods, added latency, partitioned networks) to <em>prove</em> your resilience patterns (§5.6) actually work before reality tests them.</li>
+</ul>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 You have the foundation for all of these</div>
+  <p>None of these is a fresh start. QUIC is TCP+TLS reimagined; eBPF is the kernel doing Parts 2–4 programmably;
+  WebRTC is P2P plus NAT traversal; OpenTelemetry is your debugging playbook automated. You will read each of them
+  asking the Part 1 question — <em>which problem, and why was the old answer inadequate?</em> — and the answers
+  will land in hours, because the scaffold is already in your head.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="closing">14. Closing — from two computers and a wire</h2>
+
+<p>You began, fifteen chapters ago, with the smallest possible network: two computers and a single copper cable,
+and the realization that the cable alone is useless without an agreed protocol. From there you built upward,
+problem by problem. You learned how bits become voltage and light (Parts 1–2), how frames find neighbors and
+packets find machines across the planet (Parts 2–3), how TCP manufactures a reliable stream from unreliable
+packets and ports deliver it to the right program (Parts 4–5), how DNS turns names into addresses (Part 6), how
+HTTP gives bytes meaning and TLS wraps them in trust (Parts 7–8), how load balancers and reverse proxies
+multiply and front your servers (Parts 9–10), how AWS gives you a software-defined network to run in and Docker
+and Kubernetes package and schedule it (Parts 11–12), and how microservices patterns govern the conversation
+between the many copies (Part 13) — then you walked all of it end-to-end, five times (Part 14).</p>
+
+<p>Today you can trace a single React click from the browser, down through encapsulation into TCP and IP and
+Ethernet, out across home Wi-Fi and an ISP and the fiber under the ocean, through NAT and backbone routers into
+an AWS VPC, past a load balancer that terminates TLS, through a Kubernetes Service and an Envoy sidecar enforcing
+mTLS, into a Spring Boot controller that queries PostgreSQL over a pooled connection — and back again, layer by
+layer, re-assembled into pixels. And when any of it breaks, you can walk up the stack and name the layer whose
+contract was violated, with the right command in hand. That is not trivia. That is the difference between an
+engineer who hopes the network works and one who <em>understands</em> it.</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 The one thing to remember</div>
+  <p>Networking is not a pile of acronyms. It is <strong>ten problems, answered in layers, where each layer
+  assumes the one below and re-asks the same questions — who gets this, can it be trusted, did it arrive, how do
+  we scale it — at its own altitude.</strong> Hold that, and every new technology you ever meet has a place to
+  land.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 Where to go from here — congratulations</div>
+  <p>You have finished <strong>all fifteen parts</strong>. The course is complete, and so is your mental model.
+  Now make it permanent: go back to <a href="part14.html"><strong>Part 14 — Complete Request Journeys</strong></a>
+  and re-run each of the five journeys <em>from memory</em>, narrating every hop, layer, protocol, and device out
+  loud before you read it — and try to redraw Fig 0.1 from the <a href="index.html"><strong>course home</strong></a>
+  with all its labels. If you can do that, you don't just know networking; you <em>own</em> it. From two computers
+  and a wire to a service mesh across continents — you built the whole machine, and you can debug it when it
+  breaks. Well done. Now go ship something that talks to the world. 🌐</p>
+</div>
+
+<div class="page-nav">
+  <a href="part14.html"><span class="dir">← Previous</span><span class="t">Part 14: Complete Request Journeys</span></a>
+  <a href="index.html"><span class="dir">Finish →</span><span class="t">Back to Course Home</span></a>
+</div>
+
+</main>
+</body>
+</html>

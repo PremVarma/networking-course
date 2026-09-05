@@ -1,0 +1,1660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part 7: HTTP — Networking for Backend Engineers</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header"><a class="course-title" href="index.html">🌐 Networking for<br>Backend Engineers</a></div>
+  <ol class="nav-list">
+    <li><a href="part01.html"><span class="n">01</span>Why Networking Exists</a></li>
+    <li><a href="part02.html"><span class="n">02</span>The OSI Model</a></li>
+    <li><a href="part03.html"><span class="n">03</span>IP Addresses</a></li>
+    <li><a href="part04.html"><span class="n">04</span>TCP &amp; UDP</a></li>
+    <li><a href="part05.html"><span class="n">05</span>Ports &amp; Sockets</a></li>
+    <li><a href="part06.html"><span class="n">06</span>DNS</a></li>
+    <li><a href="part07.html" class="active"><span class="n">07</span>HTTP</a></li>
+    <li><a href="part08.html"><span class="n">08</span>HTTPS &amp; TLS</a></li>
+    <li><a href="part09.html"><span class="n">09</span>Load Balancers</a></li>
+    <li><a href="part10.html"><span class="n">10</span>Reverse Proxies</a></li>
+    <li><a href="part11.html"><span class="n">11</span>Cloud Networking (AWS)</a></li>
+    <li><a href="part12.html"><span class="n">12</span>Docker &amp; Kubernetes</a></li>
+    <li><a href="part13.html"><span class="n">13</span>Microservices Networking</a></li>
+    <li><a href="part14.html"><span class="n">14</span>Complete Request Journeys</a></li>
+    <li><a href="part15.html"><span class="n">15</span>Backend Mastery</a></li>
+  </ol>
+</nav>
+
+<main class="content">
+
+<p class="part-label">Part 7 of 15</p>
+<h1>HTTP — The Language of the Web</h1>
+<p class="lede">Six parts of plumbing brought us here. DNS (Part 6) turned <code>api.shop.example.com</code> into an
+IP address; TCP (Part 4) opened a reliable byte pipe to port 443 (Part 5). But a pipe full of bytes means nothing
+until both sides agree what the bytes <em>say</em>. That agreement — the one you live inside every working day, the
+one behind every <code>@GetMapping</code>, every <code>fetch()</code>, every <code>axios.post()</code> — is HTTP.
+This is the chapter where the course arrives at your day job.</p>
+
+<span class="osi-badge">📍 OSI Layer 7 — Application</span>
+<p>HTTP (HyperText Transfer Protocol) lives at Layer 7 because it defines the <em>meaning</em> of the messages —
+methods, paths, headers, bodies — riding on top of the raw, meaning-free byte stream that Layer 4's TCP delivers
+(Parts 2 and 4: problem #8, "what do these bytes say?").</p>
+
+<div class="callout toc">
+  <div class="callout-title">📑 In this part</div>
+  <ul>
+    <li><a href="#why-http">Why HTTP was invented</a></li>
+    <li><a href="#url">URL anatomy</a></li>
+    <li><a href="#request-response">The request–response model</a></li>
+    <li><a href="#raw">Raw HTTP messages &amp; framing</a></li>
+    <li><a href="#stateless">Statelessness</a></li>
+    <li><a href="#methods">Methods, safety, idempotency</a></li>
+    <li><a href="#status">Status codes</a></li>
+    <li><a href="#headers">Headers — a grouped tour</a></li>
+    <li><a href="#cors">CORS</a></li>
+    <li><a href="#cookies">Cookies</a></li>
+    <li><a href="#sessions">Sessions</a></li>
+    <li><a href="#jwt">Token auth &amp; JWT</a></li>
+    <li><a href="#authn-authz">AuthN vs AuthZ</a></li>
+    <li><a href="#versions">HTTP/0.9 → 1.1 → 2 → 3</a></li>
+    <li><a href="#reuse">Connection reuse in practice</a></li>
+    <li><a href="#interview">Interview questions</a></li>
+    <li><a href="#misconceptions">Common misconceptions</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="why-http">1. Why HTTP was invented</h2>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why a universal document/API protocol must exist</div>
+  <p>Imagine 2026 without one. Every company invents its own request format: to fetch data from Amazon you install
+  the Amazon client speaking the Amazon protocol; for your bank, the bank's client and the bank's protocol; your
+  React app cannot call your FastAPI service without a bespoke adapter for each pairing. Integration cost grows
+  with every <em>pair</em> of vendors — the same n×(n−1)/2 explosion that full-mesh cabling had in Part 1, but at the
+  application layer. HTTP collapses that to n: <strong>one client (any browser, any HTTP library) can talk to every
+  server ever written</strong>, and one server can serve every client ever written. That single property — universal
+  interoperability of request and response — is why HTTP outgrew documents and became the default carrier for APIs,
+  webhooks, video, package managers, and most of Part 13's microservice traffic.</p>
+</div>
+
+<div class="callout history">
+  <div class="callout-title">📜 What came before — CERN, 1989</div>
+  <p>HTTP has a precise birthplace. <strong>CERN</strong>, the European particle-physics laboratory near Geneva,
+  late 1980s: thousands of visiting physicists, every experiment documenting itself on different computers, in
+  different formats, on different institutional networks. Finding "the calibration notes that reference the detector
+  spec" meant emails, phone calls, and FTP hunts across incompatible systems. In March 1989 a British software
+  engineer there, <strong>Tim Berners-Lee</strong>, wrote a memo — "Information Management: A Proposal" — sketching
+  documents that <em>link directly to each other</em> across machines. His boss scribbled the most consequential
+  performance review in computing history on it: <em>"vague, but exciting."</em> By the end of 1990 Berners-Lee had
+  built the first web server, the first browser, and the protocol between them; in 1991 it left CERN, and in April
+  1993 CERN put the technology in the public domain — free for anyone, forever.</p>
+  <p>Why invent something new? Each existing tool failed the "linked documents across institutions" test:</p>
+  <ul>
+    <li><strong>FTP</strong> (File Transfer Protocol, 1971) moved <em>whole files</em> over a stateful, login-based
+    session: connect, authenticate, navigate directories, transfer, quit. Heavyweight for "show me that one page,"
+    and a file fetched by FTP had no way to point at another file on another server — <strong>no linking</strong>.</li>
+    <li><strong>Gopher</strong> (University of Minnesota, 1991) organized documents into rigid menu trees — closer,
+    and briefly more popular than the web. But menus are not links-in-text, and in 1993 the university announced it
+    might charge licensing fees for server implementations. The mere <em>scare</em> stampeded everyone toward the
+    explicitly free web. Gopher never recovered.</li>
+    <li><strong>Email</strong> is store-and-forward: a message wanders mailbox to mailbox and arrives whenever it
+    arrives. Fine for letters, useless for "click, see the document <em>now</em>" — <strong>not interactive</strong>.</li>
+  </ul>
+  <p>Berners-Lee's genius was shipping <strong>three inventions as one system</strong>, each useless alone:
+  the <strong>URL</strong> (Uniform Resource Locator) — a universal <em>address</em> for any document on any server;
+  <strong>HTML</strong> (HyperText Markup Language) — a document format whose superpower is embedding those addresses
+  as clickable links; and <strong>HTTP</strong> — a deliberately dead-simple protocol to fetch the document at an
+  address. The first version, later named HTTP/0.9, was one line of ASCII (American Standard Code for Information
+  Interchange) text: the word <code>GET</code>, a space, a path. The server replied with the document and closed the
+  connection. No headers, no status codes, no versions. Everything in the rest of this chapter is patches on that
+  one-line idea — and the one-line idea still shows through.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — HTTP is the standardized order form</div>
+  <p>Before standardized shipping paperwork, every trading company had its own order forms, in its own language,
+  with its own filing rules — trading with ten partners meant mastering ten bureaucracies. Then everyone adopted one
+  form layout: <em>what you want</em> on the first line, <em>details</em> in labeled fields below, <em>goods</em>
+  attached behind. Suddenly any clerk on Earth could process any order from any company. HTTP is that form for
+  software: first line says what you want (<code>GET /v1/orders/1042</code>), labeled fields follow (headers), goods
+  attached behind (body). The form does not care whether the "goods" are HTML, JSON (JavaScript Object Notation),
+  a JPEG, or a video chunk — which is exactly why the web's document protocol became the API protocol too.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="url">2. URL anatomy — every character has a job</h2>
+
+<p>Before sending a request you must say <em>where</em> — and the URL packs five different protocols' worth of
+addressing into one string. Take a realistic one from your e-commerce backend and dissect it completely:</p>
+
+<div class="figure-title">Fig 7.1 — Anatomy of a URL</div>
+<pre class="diagram">
+  https://api.shop.example.com:8443/v1/orders?status=OPEN&amp;page=2#section
+  ─────   ──────────────────── ──── ───────── ────────────────── ───────
+    │               │            │       │             │            │
+    ▼               ▼            ▼       ▼             ▼            ▼
+  SCHEME          HOST         PORT    PATH      QUERY STRING   FRAGMENT
+  which          which        which   which      extra named    position
+  protocol       machine      door    resource   parameters     INSIDE the
+  to speak       (DNS turns   (Part   on that    key=value      document —
+  (implies a     this into    5)      server     pairs joined   NEVER SENT
+  default        an IP —                         by &amp;           TO THE
+  port: http     Part 6)                                        SERVER
+  → 80, https
+  → 443)
+</pre>
+
+<p>Walking left to right:</p>
+
+<ul>
+  <li><strong>Scheme</strong> — which protocol the client should speak: <code>http</code>, <code>https</code>,
+  but also <code>ws</code> (WebSocket), <code>ftp</code>, <code>postgres</code>, <code>redis</code>. The scheme
+  implies a <strong>default port</strong> (Part 5's well-known ports): <code>http</code> → 80, <code>https</code> → 443.
+  That is why you never type <code>:443</code> — the browser fills it in.</li>
+  <li><strong>Host</strong> — <code>api.shop.example.com</code>. The browser hands this to DNS (Part 6) and gets back
+  an IP address such as <code>203.0.113.40</code>. The hostname also travels <em>inside</em> the request as the
+  <code>Host</code> header — a crucial detail we hit in section 8.</li>
+  <li><strong>Port</strong> — <code>:8443</code> overrides the scheme's default. You do this daily:
+  <code>localhost:8080</code> is "scheme default be damned, talk to port 8080."</li>
+  <li><strong>Path</strong> — <code>/v1/orders</code>: which resource on that server. This is the part your
+  <code>@GetMapping("/v1/orders")</code> or <code>@app.get("/v1/orders")</code> matches against.</li>
+  <li><strong>Query string</strong> — everything after <code>?</code>: named parameters as <code>key=value</code>
+  pairs joined by <code>&amp;</code>. Your framework parses them into <code>@RequestParam String status</code> or
+  FastAPI function arguments. Convention: the path identifies the resource, the query <em>filters or paginates</em> it.</li>
+  <li><strong>Fragment</strong> — <code>#section</code>. Here is the trap: <strong>the fragment is never sent to the
+  server.</strong> It is a purely client-side instruction ("after loading, scroll to the element with this id" — or,
+  in React Router's hash mode, the entire client-side route). If your backend logs show the fragment missing, that is
+  not a bug; the browser strips it before the request leaves. Security teams exploit this deliberately: OAuth's
+  implicit flow once put tokens in fragments precisely so they would not hit server logs.</li>
+</ul>
+
+<p><strong>URI vs URL, settled in one paragraph:</strong> a URI (Uniform Resource Identifier) is the umbrella term
+for any string that identifies a resource; a URL is the kind of URI that also tells you <em>where to fetch it and
+how</em> (scheme + host). Every URL is a URI; some URIs merely name without locating (<code>urn:isbn:0451450523</code>
+identifies a book but gives no server to fetch it from). In backend life you may use the terms interchangeably and
+no one will be hurt — Java's class is even called <code>URI</code> while holding URLs — but in an interview, give
+the sentence above.</p>
+
+<p><strong>Percent-encoding in one line:</strong> characters that have jobs in URL syntax (<code>?</code>,
+<code>&amp;</code>, <code>=</code>, <code>/</code>, space) must be escaped as <code>%</code> + their hex byte value
+when they appear in <em>data</em> — a space becomes <code>%20</code>, an <code>&amp;</code> inside a value becomes
+<code>%26</code> — which is why <code>URLEncoder.encode()</code> in Java and <code>encodeURIComponent()</code> in
+JavaScript exist, and why a customer named "Smith &amp; Sons" breaks naive URL string concatenation.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a URL is a complete postal address plus instructions</div>
+  <p>Part 1's postal system again: the scheme is the <em>service class</em> (regular vs registered mail), the host
+  is the building, the port is the apartment door (Part 5's exact analogy), the path is "the blue folder in the
+  third drawer," the query string is a sticky note with extra instructions ("only pages about OPEN orders, second
+  bundle"), and the fragment is a note to <em>yourself</em> — "read the section on refunds" — which the postal
+  service never sees, because it is about what you do after the package arrives.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="request-response">3. The request–response model</h2>
+
+<p>HTTP's conversational shape is the one you met in Part 1's Fig 1.7, now with its formal rules. There are
+exactly three:</p>
+
+<ol>
+  <li><strong>The client always initiates.</strong> (Part 1's defining rule for the client role.)</li>
+  <li><strong>Exactly one response per request.</strong> The client asks once, the server answers once, that
+  exchange is complete and self-contained.</li>
+  <li><strong>The server cannot speak first.</strong> It sits listening on its port (Part 5) and is mute until asked.</li>
+</ol>
+
+<div class="figure-title">Fig 7.2 — The atom of the web: one request, one response</div>
+<pre class="diagram">
+   CLIENT (browser / axios / RestTemplate)        SERVER (Spring Boot :8443)
+        │                                               │
+        │   request:  GET /v1/orders/1042               │  …listening,
+        │ ─────────────────────────────────────────►    │   silent
+        │                                               │
+        │                                               │  controller runs,
+        │                                               │  DB query, JSON built
+        │   response: 200 OK + body                     │
+        │ ◄─────────────────────────────────────────    │
+        │                                               │
+        │   exchange over. the server now has NO WAY    │
+        │   to send this client anything further        │
+        │   until the client asks again.                │
+</pre>
+
+<p>Rule 3 has a consequence that shapes entire product architectures: <strong>servers cannot push.</strong> When the
+order status changes in your database, your server has no HTTP verb meaning "hey browser, update yourself." Every
+real-time feature you have ever used is one of four workarounds, all of which obey the rules by having the client
+initiate something the server can later exploit:</p>
+
+<ul>
+  <li><strong>Polling</strong> — the client asks "anything new?" every few seconds. Trivially simple, works through
+  every proxy and firewall, and brutally wasteful: 99% of polls return "no." Use it for dashboards refreshing every
+  30–60 s where staleness is fine and simplicity is king.</li>
+  <li><strong>Long-polling</strong> — the client asks, and the server <em>holds the request open</em> (doesn't
+  respond) until it actually has news or a timeout passes; the client immediately re-asks. Each message still costs
+  a full request cycle, but latency drops to near-zero and empty responses vanish. Use it when you need near-real-time
+  but infrastructure (old proxies, strict gateways) blocks fancier options — it is the workhorse fallback inside
+  libraries like SignalR and Socket.IO.</li>
+  <li><strong>SSE</strong> (Server-Sent Events) — the client makes one request, and the server responds with a
+  never-ending body of <code>text/event-stream</code>, dribbling out one event at a time over the open connection.
+  One direction only (server → client), auto-reconnecting, plain HTTP. Use it for feeds, notifications, progress
+  bars, LLM token streaming — anywhere the client only listens. In Spring it is <code>SseEmitter</code>; in FastAPI,
+  <code>StreamingResponse</code>; in the browser, <code>EventSource</code>.</li>
+  <li><strong>WebSockets</strong> — the client sends a special HTTP request asking to <em>stop speaking HTTP</em>:
+  an Upgrade handshake. If the server agrees, the TCP connection (Part 4) stays open and both sides exchange
+  free-form messages in either direction at any time — full duplex, no request–response shape at all. Use it for
+  chat, multiplayer games, collaborative editors, trading terminals — anywhere both sides genuinely initiate.
+  Your React dev server's hot reload (Part 1's example) is a WebSocket.</li>
+</ul>
+
+<p>The WebSocket handshake is worth seeing raw, because it is pure HTTP right up until it isn't:</p>
+
+<div class="figure-title">Fig 7.3 — The WebSocket Upgrade handshake: HTTP negotiating its own exit</div>
+<pre class="code">──► GET /ws/orders HTTP/1.1
+──► Host: api.shop.example.com
+──► Upgrade: websocket
+──► Connection: Upgrade
+──► Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+──► Sec-WebSocket-Version: 13
+──►
+◄── HTTP/1.1 101 Switching Protocols
+◄── Upgrade: websocket
+◄── Connection: Upgrade
+◄── Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+◄──
+    …from this byte onward, the connection speaks the WebSocket
+    framing protocol in both directions. HTTP has left the building.</pre>
+
+<p>Status code <code>101 Switching Protocols</code> exists solely for this manoeuvre. Keep the four workarounds in
+your pocket; Part 9 will add a wrinkle (load balancers must be told about long-lived connections), and Part 13 shows
+when a message broker beats all four.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — a restaurant where the kitchen can't shout</div>
+  <p>HTTP is a restaurant where waiters (clients) may approach the kitchen (server) anytime, but the kitchen is
+  forbidden from calling out to the dining room. Polling: the waiter walks back every two minutes — "ready yet?"
+  Long-polling: the waiter stands at the counter and waits until a dish appears, delivers it, walks straight back.
+  SSE: the kitchen installs a one-way conveyor belt to the waiter's station. WebSocket: waiter and chef agree to
+  just open a phone line and talk freely — they are no longer doing "restaurant protocol" at all.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="raw">4. Raw HTTP messages — read the actual bytes</h2>
+
+<p>This is the soul of the chapter. Frameworks hide these bytes behind annotations and promises, but every
+production debugging session that involves a proxy, a CORS error, a mangled header, or a hanging request ends with
+someone reading raw HTTP. An HTTP/1.1 message is plain ASCII text with a rigid shape — four parts:</p>
+
+<div class="figure-title">Fig 7.4 — The shape of every HTTP/1.1 message</div>
+<pre class="diagram">
+  ┌──────────────────────────────────────────────────────────────┐
+  │ START LINE      one line: what this message is               │
+  │                 request:  METHOD SP path SP version CRLF     │
+  │                 response: version SP status SP reason CRLF   │
+  ├──────────────────────────────────────────────────────────────┤
+  │ HEADERS         zero or more lines of  Name: value CRLF      │
+  ├──────────────────────────────────────────────────────────────┤
+  │ BLANK LINE      a lone CRLF — the sacred boundary            │
+  ├──────────────────────────────────────────────────────────────┤
+  │ BODY (optional) raw bytes: JSON, HTML, JPEG, anything        │
+  └──────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>Two pieces of vocabulary before the real messages. <strong>SP</strong> is a single space. <strong>CRLF</strong>
+(Carriage Return + Line Feed) is the two-byte line ending <code>\r\n</code> — bytes 13 and 10 — inherited from
+teletype machines, where the print head physically <em>returned</em> to column one (CR) and the paper <em>fed</em> up
+one line (LF). HTTP mandates CRLF, not the bare <code>\n</code> Unix uses, and hand-rolled HTTP that sends
+<code>\n</code> is a classic source of "works against my test server, fails against nginx." And the <strong>blank
+line is sacred</strong>: a lone CRLF is the only signal separating headers from body. Everything before it is
+metadata; everything after it is payload.</p>
+
+<h3>4.1 A complete GET exchange against a Spring Boot endpoint</h3>
+
+<p>Server side, the code you have written a hundred times:</p>
+
+<pre class="code">@RestController
+@RequestMapping("/v1/orders")
+public class OrderController {
+
+    @GetMapping("/{id}")
+    public ResponseEntity&lt;OrderDto&gt; getOrder(@PathVariable long id) {
+        return ResponseEntity.ok(orderService.find(id));   // 200 + JSON
+    }
+}</pre>
+
+<p>Now the bytes that actually cross the wire when a client calls it. First the request — every line annotated:</p>
+
+<div class="figure-title">Fig 7.5 — A raw GET request, byte for byte</div>
+<pre class="code">GET /v1/orders/1042 HTTP/1.1          ← request line: METHOD SP path SP version CRLF
+Host: api.shop.example.com            ← which site on this IP (mandatory since 1.1, §8)
+Accept: application/json              ← "I can digest JSON" (content negotiation, §8)
+Accept-Encoding: gzip, br             ← "compress if you like" (§15)
+Authorization: Bearer eyJhbGciOi...   ← who I am (§12)
+User-Agent: axios/1.7.2               ← what software I am
+                                      ← THE BLANK LINE (a lone CRLF): headers end here
+                                      ← no body — a GET asks, it does not send</pre>
+
+<p>Note what is <em>absent</em>: no IP address (that was Layer 3's job, Part 3), no port (Layer 4, Part 5), no
+mention of TCP. By the time these bytes exist, all of that is solved plumbing. HTTP only says what is <em>wanted</em>.
+The response coming back:</p>
+
+<div class="figure-title">Fig 7.6 — The raw response</div>
+<pre class="code">HTTP/1.1 200 OK                       ← status line: version SP code SP reason-phrase
+Content-Type: application/json        ← how to interpret the body bytes
+Content-Length: 86                    ← body is EXACTLY 86 bytes — the framing contract (§4.3)
+Date: Fri, 12 Jun 2026 09:30:00 GMT   ← server clock, always GMT
+Connection: keep-alive                ← let's reuse this TCP connection (§15)
+                                      ← the sacred blank line again
+{"id":1042,"status":"OPEN","total":2499.00,"currency":"INR","customerId":77001}</pre>
+
+<p>That JSON line is the 86 bytes <code>Content-Length</code> promised. Spring serialized your <code>OrderDto</code>
+with Jackson, counted the bytes, and wrote the header for you. Your <code>ResponseEntity.ok(...)</code> <em>is</em>
+the status line; your return value <em>is</em> the body; <code>@RestController</code> <em>is</em> the
+<code>Content-Type: application/json</code> header. The annotations are a thin skin over this text.</p>
+
+<h3>4.2 A POST with a JSON body</h3>
+
+<p>A request that carries a payload must declare what it is and how big it is — the same two headers the response
+used:</p>
+
+<div class="figure-title">Fig 7.7 — Raw POST: Content-Type and Content-Length frame the body</div>
+<pre class="code">POST /v1/orders HTTP/1.1
+Host: api.shop.example.com
+Content-Type: application/json; charset=utf-8   ← body is JSON, in UTF-8
+Content-Length: 75                              ← body is exactly 75 bytes
+Authorization: Bearer eyJhbGciOi...
+
+{"customerId":77001,"items":[{"sku":"KB-9","qty":1}],"couponCode":"JUNE10"}</pre>
+
+<pre class="code">HTTP/1.1 201 Created
+Location: /v1/orders/1043             ← where the new resource now lives (§7)
+Content-Type: application/json
+Content-Length: 31
+
+{"id":1043,"status":"OPEN"}</pre>
+
+<p>Forget <code>Content-Type</code> and Spring answers <code>415 Unsupported Media Type</code> before your controller
+ever runs; forget <code>Content-Length</code> (or its alternative, below) and the server cannot know where your JSON
+ends. Which brings us to the deepest idea in this section.</p>
+
+<h3 id="framing">4.3 The framing insight: why Content-Length must exist</h3>
+
+<p>Recall Part 4's most important lesson: <strong>TCP is a byte stream with no message boundaries.</strong> TCP
+guarantees the bytes arrive complete and in order, but it deliberately knows nothing about where one application
+message ends and the next begins. If the client sends two requests back-to-back on one connection, the server's
+socket just fills with one long run of bytes. So HTTP must solve the framing problem itself, and it has exactly
+three tools:</p>
+
+<ol>
+  <li><strong><code>Content-Length: N</code></strong> — "the body is exactly N bytes; after byte N, the next thing
+  you read is the start of a new message." Requires knowing the size up front.</li>
+  <li><strong><code>Transfer-Encoding: chunked</code></strong> — for bodies whose size is unknown while sending
+  (streaming a large query result, generating a report on the fly). The body becomes a series of chunks, each
+  prefixed by its size <em>in hexadecimal</em>, terminated by a zero-length chunk:</li>
+</ol>
+
+<div class="figure-title">Fig 7.8 — A chunked response: sizes in hex, terminated by a zero chunk</div>
+<pre class="code">HTTP/1.1 200 OK
+Content-Type: application/json
+Transfer-Encoding: chunked            ← no Content-Length — size unknown up front
+
+1f                                    ← next chunk is 0x1f = 31 bytes
+{"id":1042,"status":"OPEN","to
+12                                    ← next chunk is 0x12 = 18 bytes
+tal":2499.00}
+0                                     ← zero-length chunk = "body is finished"
+                                      ← final CRLF closes the message</pre>
+
+<ol start="3">
+  <li><strong>Connection close</strong> — the HTTP/1.0 fossil: "the body ends when I hang up." It works, but it
+  destroys connection reuse (§15) and cannot distinguish "message complete" from "server crashed mid-body."</li>
+</ol>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p>When an interviewer asks <em>"how does the server know where the request body ends?"</em> they are testing
+  whether you know HTTP rides a boundary-less byte stream (Part 4). The answer: the headers end at the first blank
+  line (lone CRLF); the body's end is declared by <code>Content-Length</code>, or by chunked transfer encoding's
+  zero-chunk, or — legacy — by closing the connection. Get this wrong in code and you get the two classic
+  pathologies: a hanging request (server waits forever for promised bytes that never come) or <strong>request
+  smuggling</strong> (a front proxy and a back server disagree about where one message ends and the attacker hides a
+  second request in the gap — the marquee modern HTTP vulnerability).</p>
+</div>
+
+<h3>4.4 Watch it live: curl -v and Invoke-WebRequest</h3>
+
+<p><code>curl -v</code> (verbose) prints every header it sends and receives — the single most useful HTTP debugging
+habit you can build. Here is a full session, sent lines marked <strong>──►</strong> and received lines
+<strong>◄──</strong>:</p>
+
+<div class="figure-title">Fig 7.9 — curl -v https://api.shop.example.com/v1/orders/1042</div>
+<pre class="code">*   Trying 203.0.113.40:443...            ← DNS already resolved (Part 6), TCP connecting (Part 4)
+*   Connected to api.shop.example.com (203.0.113.40) port 443
+*   TLS handshake… certificate verified   ← Part 8's entire subject, summarized in one line
+──► GET /v1/orders/1042 HTTP/1.1
+──► Host: api.shop.example.com
+──► User-Agent: curl/8.7.1
+──► Accept: */*
+──►                                       ← curl sends the sacred blank line
+◄── HTTP/1.1 200 OK
+◄── Content-Type: application/json
+◄── Content-Length: 86
+◄── Date: Fri, 12 Jun 2026 09:30:00 GMT
+◄──
+{"id":1042,"status":"OPEN","total":2499.00,"currency":"INR","customerId":77001}
+*   Connection #0 to host left intact     ← kept alive for reuse (§15)</pre>
+
+<p>Read that top-to-bottom and you have replayed Parts 4, 6, 8, and 7 of this course in order: resolve, connect,
+secure, <em>then</em> speak HTTP. On Windows, PowerShell's built-in equivalent one-liner:</p>
+
+<pre class="code">Invoke-WebRequest -Uri "https://api.shop.example.com/v1/orders/1042" -Method GET |
+    Select-Object StatusCode, Headers, Content</pre>
+
+<p>(<code>Invoke-RestMethod</code> is its sibling that auto-parses the JSON body into objects — handy, but for
+<em>learning</em>, prefer <code>Invoke-WebRequest</code> because it shows you status and headers instead of
+swallowing them.)</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>An HTTP message is a text letter with a strict layout: one line saying what you want (or what the answer is),
+    then labeled header lines, then an empty line, then the attachment (body). The empty line is the separator, and
+    a header like <code>Content-Length: 86</code> tells the receiver exactly how many bytes of attachment to read.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Request = request-line (METHOD SP path SP version CRLF) + headers + CRLF + optional body; response = status
+    line + headers + CRLF + body. Because TCP provides no message boundaries, HTTP self-frames: headers end at the
+    first empty line, bodies end per Content-Length, chunked encoding (hex-sized chunks, zero-chunk terminator), or
+    connection close. Frameworks (Spring's <code>ResponseEntity</code>, FastAPI's response model) are code-level
+    veneers over exactly these lines.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Framing ambiguity is an attack surface: if a proxy honors <code>Content-Length</code> while the origin honors
+    <code>Transfer-Encoding</code> (or they parse duplicated/obfuscated headers differently), an attacker can smuggle
+    a hidden second request inside the first (CL.TE/TE.CL request smuggling) — poisoning caches and hijacking other
+    users' requests. This is why HTTP/2 (§14) abandoned text framing for binary length-prefixed frames, why proxies
+    normalize messages, and why you should never write a "quick" HTTP parser with string splits in production.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="stateless">5. Statelessness — the design decision that built the modern web</h2>
+
+<p>Here is the protocol's deepest design decision, stated bluntly: <strong>HTTP remembers nothing.</strong> Each
+request–response pair stands completely alone. The server is not told "this is request #5 from that same person" —
+by default it cannot know. Once the response is sent, the protocol's memory of the exchange is gone.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the clerk with perfect amnesia</div>
+  <p>HTTP's server is a counter clerk who forgets you the instant you step away — even if you step right back. Every
+  visit, you must re-introduce yourself and re-state all context: "I am customer 77001, here is my ID, I want to see
+  order 1042." Infuriating? Look at the upside: <em>any clerk at any of fifty counters can serve you</em>, because no
+  clerk holds anything in their head that another lacks. If your previous clerk goes to lunch — or drops dead —
+  you walk to the next counter and lose nothing. Now rename the clerks "servers" and the counters "instances behind
+  a load balancer," and you have understood horizontal scaling.</p>
+</div>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why design it forgetful — two reasons, 35 years apart</div>
+  <p><strong>The 1991 reason: simplicity.</strong> Berners-Lee needed a server an undergraduate could implement in a
+  weekend: accept connection, read one request, send one document, forget everything. No session tables, no cleanup
+  of abandoned conversations, no "what if the client vanishes mid-dialogue" — the protocol cannot leak per-client
+  state because it holds none.</p>
+  <p><strong>The 2026 reason: horizontal scaling.</strong> If no request depends on server-side memory of a previous
+  one, then <strong>any server can answer any request</strong>. Put twenty identical Spring Boot instances behind a
+  load balancer and spray requests across them randomly — it just works. Instance dies? Requests flow to the
+  others; no user notices, because nothing they needed lived in it. Traffic doubles? Start ten more instances —
+  no migration, no warm-up of per-user state. This single protocol property is why "stateless service" is the first
+  commandment of cloud architecture, and it is the load balancer's best friend — <strong>Part 9 is built on this
+  paragraph.</strong></p>
+</div>
+
+<p>Statelessness has a price, and you pay it on every request: <strong>no conversation.</strong> The server cannot
+remember that you logged in two seconds ago — so authentication must somehow accompany <em>every single request</em>.
+It cannot remember your cart, your language, your dark-mode preference. The web patched this hole three ways, and
+they are the next three sections after the protocol fundamentals:</p>
+
+<ul>
+  <li><strong>Cookies</strong> (§10) — the server hands the client a note; the client's browser automatically
+  attaches it to every later request. State lives <em>on the client</em>, replayed each time.</li>
+  <li><strong>Sessions</strong> (§11) — the cookie carries only a random ID; the real state lives <em>on the
+  server</em> (or in a shared store), looked up per request.</li>
+  <li><strong>Tokens</strong> (§12) — the client carries a signed, self-describing credential (a JWT) and presents
+  it per request; the server verifies the signature instead of remembering anything.</li>
+</ul>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>Stateless protocol, stateful applications.</strong> Your application obviously has state — carts,
+  logins, preferences. Statelessness just means HTTP refuses to carry it for you, so the state has to live
+  <em>somewhere you choose deliberately</em>: on the client (cookies, tokens), in one server's memory (sessions —
+  beware, this quietly breaks horizontal scaling, §11), or in a shared store everyone can reach (Redis, the
+  database). Every architecture debate about sessions vs JWTs is really the question "where should the state
+  live?"</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>HTTP servers forget each request the moment it is answered. That sounds bad, but it means any copy of your
+    server can handle any request — which is how websites scale to millions of users. Features that need memory
+    (staying logged in, carts) are added back with cookies, sessions, or tokens.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>No protocol-level state spans requests: each must carry everything needed to process it (auth credentials,
+    context). Benefits: trivially replaceable servers, random load distribution, crash-tolerance. Costs: per-request
+    re-authentication and re-sent context (cookie/token bytes on every call). The state relocates: client-side
+    (cookie payloads, JWTs), server memory (HttpSession), or shared stores (Spring Session + Redis).</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>"Stateless" is a spectrum in production: TCP connections, TLS sessions, and connection pools are all state
+    that load balancers must manage even for "stateless" apps (Part 9's sticky-session and connection-draining
+    sections). True statelessness is also what makes serverless (Lambda) viable, what lets Kubernetes kill and
+    reschedule pods freely (Part 12), and what makes retries <em>safe to attempt</em> — though only idempotency
+    (§6) makes them safe to <em>complete</em>. Experts design state placement first and APIs second.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="methods">6. Methods — verbs with contracts</h2>
+
+<p>The first word of every request is its <strong>method</strong>: what kind of action this is. The genius of
+standard methods is not the names — it is the <em>contracts</em> attached to them, which every cache, proxy, load
+balancer, and retry library on Earth relies on. Master table first, contracts after:</p>
+
+<table>
+  <tr><th>Method</th><th>Semantics</th><th>Request body?</th><th>Safe?</th><th>Idempotent?</th><th>Cacheable?</th></tr>
+  <tr><td><strong>GET</strong></td><td>Read a resource; never change anything</td><td>No (allowed but meaningless — servers ignore it)</td><td>✅</td><td>✅</td><td>✅ (the cacheable workhorse)</td></tr>
+  <tr><td><strong>HEAD</strong></td><td>GET's headers only, no body — "how big? changed? exists?"</td><td>No</td><td>✅</td><td>✅</td><td>✅</td></tr>
+  <tr><td><strong>OPTIONS</strong></td><td>"What is allowed here?" — today, almost always a CORS preflight (§9)</td><td>No</td><td>✅</td><td>✅</td><td>❌</td></tr>
+  <tr><td><strong>POST</strong></td><td>Create a subordinate resource / trigger processing</td><td>Yes</td><td>❌</td><td>❌ — the dangerous one</td><td>❌ (in practice)</td></tr>
+  <tr><td><strong>PUT</strong></td><td>Fully REPLACE the resource at this URL with this body</td><td>Yes</td><td>❌</td><td>✅</td><td>❌</td></tr>
+  <tr><td><strong>PATCH</strong></td><td>Apply a PARTIAL change (a delta)</td><td>Yes</td><td>❌</td><td>❌ not guaranteed</td><td>❌</td></tr>
+  <tr><td><strong>DELETE</strong></td><td>Remove the resource</td><td>Rarely</td><td>❌</td><td>✅</td><td>❌</td></tr>
+</table>
+
+<p>The two contract words, defined precisely — and the lens that makes them practical is <strong>retries</strong>:</p>
+
+<ul>
+  <li><strong>Safe</strong> = the request does not change server state at all. A safe request may be repeated,
+  prefetched, cached, or crawled by a bot with zero consequences. GET, HEAD, OPTIONS are safe. (A GET endpoint that
+  deletes rows is not "pragmatic," it is a landmine: one day a prefetcher or link-preview bot will fire it.)</li>
+  <li><strong>Idempotent</strong> = doing it <em>N times</em> leaves the server in the same state as doing it
+  <em>once</em>. The response may differ (second DELETE returns 404), but the <em>state</em> does not. All safe
+  methods are idempotent; PUT and DELETE are idempotent without being safe.</li>
+</ul>
+
+<p>Why the retry lens: networks fail ambiguously (Part 4 — a timeout cannot tell you whether the request died on the
+way <em>in</em> or the response died on the way <em>out</em>). When a client, proxy, or load balancer hits that
+ambiguity, may it just send the request again? <strong>For idempotent methods, yes — retrying is harmless by
+contract. For POST, no.</strong></p>
+
+<ul>
+  <li><strong>PUT is idempotent because it is a full replacement.</strong> <code>PUT /v1/orders/1042/address</code>
+  with body <code>{"city":"Pune"}</code> sets the address to Pune. Send it five times: the address is Pune. Same
+  final state — replay-proof, like setting a thermostat to 21° repeatedly.</li>
+  <li><strong>PATCH may not be, because it is a delta.</strong> <code>{"op":"replace","path":"/city","value":"Pune"}</code>
+  happens to be idempotent; <code>{"op":"increment","path":"/loyaltyPoints","by":50}</code> is not — five replays,
+  +250 points. The method makes no promise; your payload decides. Retry logic must therefore treat PATCH as unsafe
+  to replay unless <em>you</em> know otherwise.</li>
+  <li><strong>POST double-submit is the canonical disaster:</strong> "place order" times out on the response leg, the
+  user (or the retry interceptor) fires again → two orders, two charges. Every "I was billed twice" story you have
+  read is this paragraph.</li>
+</ul>
+
+<p>The industrial fix is the <strong>idempotency key</strong> (Stripe made it famous): the client generates a unique
+key per <em>logical operation</em> — <code>Idempotency-Key: ord-77001-a8f3c2</code> — and sends it as a header on the
+POST. The server stores each processed key with its result; a replay with a seen key returns the <em>stored</em>
+response instead of re-executing. POST becomes effectively idempotent at the application layer. Plant this concept
+deep: it returns in <strong>Part 9</strong> (when load balancers and gateways retry on your behalf, sometimes without
+asking) and in <strong>Part 13</strong> (message brokers deliver at-least-once, so consumers face exactly the same
+replay problem with a different costume).</p>
+
+<p>In your frameworks, methods are routing annotations — one mapping per verb:</p>
+
+<pre class="code">// Spring Boot — the method IS the annotation
+@GetMapping("/v1/orders/{id}")            // GET    → read
+public OrderDto get(@PathVariable long id) { ... }
+
+@PostMapping("/v1/orders")                // POST   → create (201 + Location, §7)
+public ResponseEntity&lt;OrderDto&gt; create(@RequestBody @Valid NewOrder req) { ... }
+
+@PutMapping("/v1/orders/{id}")            // PUT    → full replace
+@PatchMapping("/v1/orders/{id}")          // PATCH  → partial update
+@DeleteMapping("/v1/orders/{id}")         // DELETE → remove (204, §7)</pre>
+
+<pre class="code"># FastAPI — same idea, decorator per verb
+@app.get("/v1/orders/{order_id}")
+async def get_order(order_id: int) -&gt; OrderDto: ...
+
+@app.post("/v1/orders", status_code=201)
+async def create_order(req: NewOrder): ...
+
+@app.put("/v1/orders/{order_id}")
+async def replace_order(order_id: int, req: OrderDto): ...
+
+@app.delete("/v1/orders/{order_id}", status_code=204)
+async def delete_order(order_id: int): ...</pre>
+
+<p><strong>REST in two sentences:</strong> REST (Representational State Transfer) — as practiced — is the style of
+modeling your API as <em>nouns</em> (resources at URLs: <code>/v1/orders/1042</code>) acted on by HTTP's standard
+<em>verbs</em>, instead of inventing verb-paths like <code>/getOrder?id=1042</code> or RPC (Remote Procedure Call)
+method names. Note carefully: REST does not require JSON — it predates JSON's dominance, and a REST API can serve
+XML (Extensible Markup Language), CSV, or images; JSON is merely today's favorite representation.</p>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>The method is the verb: GET reads, POST creates, PUT replaces, PATCH edits a part, DELETE removes. GET must
+    never change anything. PUT and DELETE are safe to accidentally repeat; POST is not — repeating "place order"
+    places two orders.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>Safe = no state change (GET/HEAD/OPTIONS); idempotent = N executions ≡ 1 execution (safe methods + PUT +
+    DELETE). These contracts are machine-honored: caches cache safe methods, retry layers auto-retry idempotent
+    ones. PUT's idempotency comes from absolute replacement; PATCH's deltas and POST's creations make replays
+    dangerous, hence idempotency keys for POST. Frameworks bind verbs via <code>@GetMapping</code>…
+    <code>@DeleteMapping</code> / <code>@app.get</code>…<code>@app.delete</code>.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>The contracts are who-may-retry rules for the whole infrastructure chain: browsers replay idempotent requests
+    on dropped keep-alive connections, nginx's <code>proxy_next_upstream</code> and most service-mesh retry policies
+    default to idempotent-only, and AWS SDKs retry GETs freely. An idempotency-key store needs the same properties
+    as a dedup store in Part 13: atomic insert-if-absent (Redis <code>SET NX</code> or a unique index), a TTL window,
+    and storage of the original <em>response</em>, not just the key — otherwise replays during processing race you
+    into the very duplicate you were preventing.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="status">7. Status codes — the server's one-word verdict</h2>
+
+<p>Every response begins with a three-digit verdict. The first digit is the class — and the classes carry a "whose
+fault is it" mnemonic that makes half of production debugging instant:</p>
+
+<table>
+  <tr><th>Class</th><th>Meaning</th><th>Whose fault / situation</th><th>Examples</th></tr>
+  <tr><td><strong>1xx</strong></td><td>Informational — "keep going"</td><td>Nobody's; protocol bookkeeping</td><td>100 Continue, 101 Switching Protocols (Fig 7.3)</td></tr>
+  <tr><td><strong>2xx</strong></td><td>Success</td><td>Nobody's; it worked</td><td>200, 201, 204</td></tr>
+  <tr><td><strong>3xx</strong></td><td>Redirection — "not here, go there"</td><td>Nobody's; resource moved or cached copy is fine</td><td>301, 302, 304, 307, 308</td></tr>
+  <tr><td><strong>4xx</strong></td><td>Client error</td><td><strong>The caller's fault</strong> — fix the request</td><td>400, 401, 403, 404, 409, 422, 429</td></tr>
+  <tr><td><strong>5xx</strong></td><td>Server error</td><td><strong>Your fault</strong> (or your infrastructure's) — fix the server</td><td>500, 502, 503, 504</td></tr>
+</table>
+
+<p>The 4xx/5xx line is a blame boundary your monitoring should respect: a spike of 4xx means a broken client or an
+attack; a spike of 5xx means <em>page someone</em>. Now the codes a backend engineer must know cold — each with its
+precise meaning and when <strong>your</strong> code should emit it:</p>
+
+<table>
+  <tr><th>Code</th><th>Means</th><th>When YOUR code emits it</th></tr>
+  <tr><td><strong>200 OK</strong></td><td>Success, body enclosed</td><td>Default for successful GET/PUT/PATCH with a response body.</td></tr>
+  <tr><td><strong>201 Created</strong></td><td>New resource exists; <code>Location</code> header says where</td><td>Successful POST that created something. Set <code>Location: /v1/orders/1043</code> — clients and tests rely on it.</td></tr>
+  <tr><td><strong>204 No Content</strong></td><td>Success, deliberately no body</td><td>DELETE, and PUT/PATCH when echoing the resource back is pointless. Returning 200 with an empty body where 204 belongs is sloppy, not wrong.</td></tr>
+  <tr><td><strong>301 Moved Permanently</strong></td><td>Resource has a new permanent URL</td><td>Old URL schemes, domain moves. Caches aggressively; browsers may flip the method to GET on the redirect.</td></tr>
+  <tr><td><strong>302 Found</strong></td><td>Temporarily elsewhere</td><td>Post-login redirects, A/B routing. Historically also method-mangled to GET.</td></tr>
+  <tr><td><strong>307 / 308</strong></td><td>Temporary / permanent redirect, <strong>method preserved</strong></td><td>The modern, precise pair: a 307 replay of a POST stays a POST. Use 308 instead of 301 (and 307 instead of 302) when the method must survive the redirect — e.g. redirecting API POSTs to a new host.</td></tr>
+  <tr><td><strong>304 Not Modified</strong></td><td>"Your cached copy is still valid" — no body</td><td>Emitted (usually by the framework) for conditional GETs; full flow below.</td></tr>
+  <tr><td><strong>400 Bad Request</strong></td><td>Malformed — could not even parse it</td><td>Broken JSON, missing required field, type mismatch. Spring's default for failed <code>@Valid</code> binding.</td></tr>
+  <tr><td><strong>422 Unprocessable Entity</strong></td><td>Parsed fine, <strong>semantically</strong> invalid</td><td>Well-formed JSON that violates business rules: quantity −3, end date before start date. FastAPI's default for Pydantic validation failures. The 400/422 split: <em>could not read it</em> vs <em>read it, it's nonsense</em>.</td></tr>
+  <tr><td><strong>401 Unauthorized</strong></td><td>Misnamed: <strong>unauthenticated</strong> — "I don't know who you are"</td><td>Missing/expired/invalid credentials. Pair with <code>WWW-Authenticate</code> (§13). Correct response to an expired JWT.</td></tr>
+  <tr><td><strong>403 Forbidden</strong></td><td>Authenticated but <strong>not allowed</strong> — "I know exactly who you are; no"</td><td>Valid login, insufficient rights: a customer calling an admin endpoint. Drill the pair: 401 = who are you? 403 = you may not. (§13)</td></tr>
+  <tr><td><strong>404 Not Found</strong></td><td>No such resource</td><td>Unknown ID or path. Also the polite lie for "exists but you may not know it exists" (GitHub returns 404, not 403, for private repos — avoids leaking existence).</td></tr>
+  <tr><td><strong>405 Method Not Allowed</strong></td><td>Path exists, verb doesn't</td><td>POST to a GET-only mapping. Frameworks emit it for you, with an <code>Allow: GET, HEAD</code> header listing what works.</td></tr>
+  <tr><td><strong>409 Conflict</strong></td><td>Request collides with current resource state</td><td>Duplicate unique key ("email already registered"), or optimistic-concurrency failure: two users edited the same row, the second save's version check fails — JPA's <code>@Version</code> / <code>OptimisticLockException</code> maps here.</td></tr>
+  <tr><td><strong>429 Too Many Requests</strong></td><td>Rate limit exceeded</td><td>Your rate limiter's verdict. Include <code>Retry-After: 30</code> (seconds) so well-behaved clients back off instead of hammering. Expect to <em>receive</em> it from every third-party API you call.</td></tr>
+  <tr><td><strong>500 Internal Server Error</strong></td><td>Unhandled explosion in your code</td><td>You never emit it on purpose — it is the framework catching your NullPointerException. Every 500 in logs is a bug to fix or a case to convert into a deliberate 4xx.</td></tr>
+  <tr><td><strong>501 Not Implemented</strong></td><td>Server doesn't support this method at all</td><td>Rare; mostly proxies and half-built servers.</td></tr>
+  <tr><td><strong>502 Bad Gateway</strong></td><td>An intermediary got a <em>garbage or refused</em> response from the thing behind it</td><td rowspan="3">The <strong>load-balancer trio</strong>. You rarely <em>write</em> these; you <em>debug</em> them, because they are emitted by the proxy/LB in front of your app: <strong>502</strong> = your app crashed/refused/answered gibberish; <strong>503</strong> = nothing healthy to send traffic to (deploy in progress, health checks failing) or deliberate overload shedding; <strong>504</strong> = your app accepted the request but exceeded the proxy's timeout. Definitions planted now — Part 9 builds its debugging table on them.</td></tr>
+  <tr><td><strong>503 Service Unavailable</strong></td><td>Temporarily cannot serve (overload, restart, no healthy backends)</td></tr>
+  <tr><td><strong>504 Gateway Timeout</strong></td><td>Intermediary's patience ran out waiting for the backend</td></tr>
+</table>
+
+<h3>7.1 The 304 conditional-request flow — bandwidth you stop wasting</h3>
+
+<p>304 deserves its own diagram because it is a two-act protocol. Act one: the server tags the response with an
+<strong>ETag</strong> (entity tag — an opaque version fingerprint, often a hash). Act two: the client says "only send
+the body if it changed since fingerprint X" via <code>If-None-Match</code>:</p>
+
+<div class="figure-title">Fig 7.10 — The ETag / If-None-Match ladder</div>
+<pre class="diagram">
+   CLIENT (browser cache / HTTP client)            SERVER
+        │                                             │
+        │  1. GET /v1/catalog/laptops                 │
+        │ ───────────────────────────────────────►    │
+        │  2. 200 OK                                  │
+        │     ETag: "v42-9f8e"                        │
+        │     (full 1 MB body)                        │
+        │ ◄───────────────────────────────────────    │  client caches body+ETag
+        │                                             │
+        │            …an hour later…                  │
+        │                                             │
+        │  3. GET /v1/catalog/laptops                 │
+        │     If-None-Match: "v42-9f8e"               │
+        │ ───────────────────────────────────────►    │  fingerprint still
+        │  4. 304 Not Modified                        │  current?  yes →
+        │     (NO body — a few hundred bytes)         │
+        │ ◄───────────────────────────────────────    │  client reuses cache
+        │                                             │
+        │   1 MB of bandwidth saved; latency ≈ one    │
+        │   small round trip (Part 1: latency is      │
+        │   physics, but bytes-not-sent are free)     │
+</pre>
+
+<p>One full download, then validation pings forever after — until the data really changes and the server answers
+200 with a fresh body and new ETag. (The legacy sibling uses timestamps: <code>Last-Modified</code> /
+<code>If-Modified-Since</code> — coarser, one-second resolution.) Spring offers
+<code>ResponseEntity.ok().eTag("v42-9f8e").body(...)</code> and a <code>ShallowEtagHeaderFilter</code> that hashes
+response bodies for you; the same <code>If-Match</code> family also powers optimistic concurrency for writes
+(PUT + <code>If-Match</code> → 412 Precondition Failed if someone else changed it — 409's cousin).</p>
+
+<p>Emitting codes deliberately in your stack:</p>
+
+<pre class="code">// Spring — three idioms
+return ResponseEntity
+        .created(URI.create("/v1/orders/" + order.id()))   // 201 + Location
+        .body(order);
+
+throw new ResponseStatusException(HttpStatus.CONFLICT, "email already registered"); // 409
+
+@ResponseStatus(HttpStatus.NO_CONTENT)                      // 204 on success
+@DeleteMapping("/v1/orders/{id}")
+public void delete(@PathVariable long id) { ... }</pre>
+
+<pre class="code"># FastAPI — status codes as declarations or exceptions
+@app.post("/v1/orders", status_code=status.HTTP_201_CREATED)
+async def create_order(req: NewOrder, response: Response):
+    order = await orders.create(req)
+    response.headers["Location"] = f"/v1/orders/{order.id}"
+    return order
+
+raise HTTPException(status_code=409, detail="email already registered")</pre>
+
+<p>One closing habit: status codes are <em>machine-readable contracts</em> — retry layers replay idempotent
+requests on 502/503/504 (honoring <code>Retry-After</code>), caches treat 301/308 as rewrite-forever rules (a wrong
+301 is one of the hardest mistakes to un-deploy — browsers cache it indefinitely), and monitoring computes
+availability from the 5xx ratio. Teams that return 200 with <code>{"error": …}</code> bodies silently break all
+three ecosystems — and their uptime dashboards lie.</p>
+
+<!-- ============================================================ -->
+<h2 id="headers">8. Headers — the metadata that runs the web</h2>
+
+<p>Headers are the labeled fields on the order form: <code>Name: value</code> lines, case-insensitive names, one per
+line. They carry everything that is <em>about</em> the message rather than <em>in</em> it. A grouped tour of the ones
+that matter, starting with the universal crew that appears on nearly every message in both directions:</p>
+
+<table>
+  <tr><th>Universal header</th><th>What it does</th></tr>
+  <tr><td><strong>Host</strong></td><td>The hostname from the URL — <strong>mandatory on every request since HTTP/1.1</strong>. Why: one IP address routinely serves many sites (<code>shop.example.com</code> and <code>blog.example.com</code> both resolving to <code>203.0.113.40</code> — Part 6's many-names-one-IP pattern). TCP delivered bytes to an IP and port; only this header tells the server <em>which site</em> the client meant. Name-based virtual hosting, every shared host, every CDN (Content Delivery Network), and every Kubernetes ingress rule (Part 12) routes on it. Omit it and compliant servers answer 400.</td></tr>
+  <tr><td><strong>Content-Type</strong></td><td>MIME (Multipurpose Internet Mail Extensions) type of the body: <code>application/json; charset=utf-8</code>, <code>text/html</code>, <code>multipart/form-data</code> (file uploads). The charset parameter matters: ambiguity here is where "Ω became Î©" encoding bugs are born.</td></tr>
+  <tr><td><strong>Content-Length</strong></td><td>Exact body size in bytes — the framing contract from §4.3.</td></tr>
+  <tr><td><strong>Date</strong></td><td>When the message was generated (always GMT — Greenwich Mean Time). Caches use it for age math.</td></tr>
+  <tr><td><strong>Connection</strong></td><td><code>keep-alive</code> (reuse this TCP connection, §15) or <code>close</code> (hang up after this exchange).</td></tr>
+</table>
+
+<p><strong>Request headers</strong> — the client describing itself and its tastes:</p>
+
+<table>
+  <tr><th>Request header</th><th>What it does</th></tr>
+  <tr><td><strong>Accept</strong></td><td>Content negotiation: "here is what I can digest, with preferences." <code>Accept: application/json, application/xml;q=0.5</code> = "JSON ideally, XML at half preference." The server picks and answers with a matching <code>Content-Type</code> — or <code>406 Not Acceptable</code>. Spring honors it per <code>produces=...</code>; one endpoint can serve JSON to your React app and CSV to a reporting job.</td></tr>
+  <tr><td><strong>Accept-Encoding</strong></td><td><code>gzip, br</code> — compression formats the client understands (br = Brotli). Negotiation example in §15.</td></tr>
+  <tr><td><strong>Authorization</strong></td><td>Credentials: <code>Bearer &lt;token&gt;</code> (§12) or <code>Basic &lt;base64&gt;</code>. Despite the name, it carries authentication (§13 untangles this).</td></tr>
+  <tr><td><strong>User-Agent</strong></td><td>Client software identification (<code>Mozilla/5.0…</code>, <code>curl/8.7.1</code>, <code>axios/1.7.2</code>). Useful in logs; lies constantly for compatibility reasons.</td></tr>
+  <tr><td><strong>Cookie</strong></td><td>Every cookie the browser holds for this site, replayed automatically (§10 — the automation that powers logins and enables CSRF).</td></tr>
+  <tr><td><strong>Origin</strong></td><td>scheme+host+port of the page making the request — the keystone of CORS (§9). Sent by browsers, not by curl.</td></tr>
+  <tr><td><strong>Referer</strong></td><td>URL of the page the request came from. Yes, misspelled — "referrer" lost an R in the 1990s standardization and the typo is now permanently load-bearing in a protocol used by billions; changing it would break the web. Privacy note: <code>Referrer-Policy</code> (spelled correctly, because it came later) controls how much of it leaks.</td></tr>
+</table>
+
+<p><strong>Response headers</strong> — the server instructing the client and its caches:</p>
+
+<table>
+  <tr><th>Response header</th><th>What it does</th></tr>
+  <tr><td><strong>Set-Cookie</strong></td><td>"Store this and send it back on every future request to me" — full anatomy in §10.</td></tr>
+  <tr><td><strong>Cache-Control</strong></td><td>The caching rulebook: <code>max-age=3600</code> (fresh for an hour — no revalidation needed), <code>no-store</code> (never cache: banking data, PII — Personally Identifiable Information), <code>no-cache</code> (cache, but revalidate each use — confusing name, it means "always check"), <code>private</code> (browser may cache; shared proxies/CDNs may NOT — per-user data) vs <code>public</code> (anyone may cache). The single most economically important header on the web.</td></tr>
+  <tr><td><strong>ETag</strong></td><td>Version fingerprint for the conditional flow (Fig 7.10).</td></tr>
+  <tr><td><strong>Expires</strong></td><td>Legacy absolute-date freshness from HTTP/1.0; <code>Cache-Control: max-age</code> wins when both present. You set it only for ancient-cache compatibility.</td></tr>
+  <tr><td><strong>Location</strong></td><td>Companion to 201 ("your new resource is here") and 3xx ("go here instead").</td></tr>
+  <tr><td><strong>Vary</strong></td><td>Tells caches which <em>request</em> headers the response depended on — i.e., what to key the cache entry by. The gzip example: your server answers compressed to clients sending <code>Accept-Encoding: gzip</code> and plain otherwise. Without <code>Vary: Accept-Encoding</code>, a cache that stored the gzip version may serve those bytes to an old client that cannot decompress them → garbage. With it, the cache keeps one entry per encoding. Forgetting Vary on content-negotiated or CORS responses is a classic subtle cache-poisoning bug.</td></tr>
+</table>
+
+<p><strong>Infrastructure headers</strong> — invisible in tutorials, everywhere in production. Defined here because
+they star in Parts 9 and 10:</p>
+
+<table>
+  <tr><th>Infra/proxy header</th><th>What it does</th></tr>
+  <tr><td><strong>X-Forwarded-For</strong></td><td>When a load balancer forwards a request, the TCP source IP your app sees is the <em>LB's</em>, not the user's (Part 5: the socket pair is between LB and you). The LB appends the real client IP here: <code>X-Forwarded-For: 198.51.100.23, 10.0.3.7</code> — original client first, then each intermediary. Rate limiting or geo-logic reading the socket IP instead of this header throttles your own load balancer. (Trust it only when set by <em>your</em> proxy — clients can forge it.)</td></tr>
+  <tr><td><strong>X-Forwarded-Proto</strong></td><td>The original scheme (<code>https</code>) when TLS terminates at the LB and reaches you as plain HTTP (Part 9's TLS-termination pattern). Spring Security consults it to build correct redirect URLs.</td></tr>
+  <tr><td><strong>X-Forwarded-Host</strong></td><td>The original <code>Host</code> the client asked for, preserved when proxies rewrite it.</td></tr>
+  <tr><td><strong>X-Request-Id</strong></td><td>A unique ID stamped on the request at the edge and passed along every hop — the thread you pull to find one user's journey across six microservices' logs. The seed of distributed tracing; starring role in Parts 9–10 and 13.</td></tr>
+</table>
+
+<p>On the <strong>X- convention</strong>: custom, non-standard headers were traditionally prefixed <code>X-</code>
+(experimental). RFC (Request for Comments) 6648 deprecated the practice in 2012 — new standards should just pick a
+name (hence <code>Forwarded</code>, the standardized successor to the X-Forwarded family) — but the installed base
+won: you will read and write X- headers for the rest of your career, and the deprecation is a fun fact, not a rule
+anyone follows.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — headers are the envelope and the customs forms</div>
+  <p>The body is the gift inside the parcel; headers are everything stuck to the outside: the address label (Host),
+  the "FRAGILE — THIS WAY UP" handling instructions (Cache-Control), the customs declaration of contents and weight
+  (Content-Type, Content-Length), the sender's ID check (Authorization), and the chain of postmark stamps each
+  sorting facility adds (X-Forwarded-For). Sorting facilities route entire parcels without ever opening them —
+  exactly like load balancers routing on headers without parsing bodies (Part 9).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cors">9. CORS — the error every junior meets first</h2>
+
+<p>You build a Spring Boot API on <code>localhost:8080</code>. You build a React app on <code>localhost:5173</code>.
+The React app calls <code>fetch("http://localhost:8080/v1/orders")</code> — and the browser console explodes with
+red text about a missing <code>Access-Control-Allow-Origin</code> header. Meanwhile the same URL works perfectly in
+curl and Postman. Welcome to the most misunderstood mechanism in web development. Let's understand it properly,
+because the fix-by-Stack-Overflow approach produces security holes.</p>
+
+<p>Start with the rule that CORS relaxes. The <strong>same-origin policy</strong> is a browser rule: JavaScript
+running on one origin may not read responses from a different origin. An <strong>origin</strong> is exactly the
+triple <strong>scheme + host + port</strong> — all three must match:</p>
+
+<table>
+  <tr><th>Page at https://app.shop.example.com</th><th>Calls…</th><th>Same origin?</th></tr>
+  <tr><td>scheme+host+port identical</td><td><code>https://app.shop.example.com/profile</code></td><td>✅ yes</td></tr>
+  <tr><td>different subdomain (host)</td><td><code>https://api.shop.example.com/v1/orders</code></td><td>❌ no — cross-origin</td></tr>
+  <tr><td>different scheme</td><td><code>http://app.shop.example.com/…</code></td><td>❌ no</td></tr>
+  <tr><td>different port</td><td><code>https://app.shop.example.com:8443/…</code></td><td>❌ no</td></tr>
+</table>
+
+<div class="callout why">
+  <div class="callout-title">🧭 Why the BROWSER enforces this — and whom it protects</div>
+  <p>Remember §10's coming fact: <strong>browsers attach cookies automatically</strong> to every request to a site —
+  including requests triggered by some <em>other</em> site's JavaScript. You are logged into
+  <code>bank.example.com</code> in tab one. In tab two you visit <code>evil.example.net</code>, whose JavaScript runs
+  <code>fetch("https://bank.example.com/api/balance")</code>. Your browser would attach your real banking cookies —
+  it always does — and without the same-origin policy, evil.example.net's script could <em>read your balance</em>
+  and ship it home. The policy exists to protect <strong>users and their ambient credentials</strong> (the cookies
+  and logged-in state the browser carries everywhere) from malicious <em>websites</em>.</p>
+  <p>Now the asymmetry that confuses everyone: <strong>curl has no cookies of yours, no logged-in state, no victim
+  to exploit — so it enforces nothing.</strong> CORS is not a server-side firewall and provides zero protection
+  against attackers calling your API directly:</p>
+  <pre class="code"># same endpoint, no browser, no CORS, works instantly:
+curl https://api.shop.example.com/v1/orders        # 200 OK
+# CORS never protected the server. It protects BROWSER USERS.</pre>
+</div>
+
+<p><strong>CORS</strong> (Cross-Origin Resource Sharing) is the controlled relaxation: a way for your API to tell
+browsers "these specific foreign origins are allowed to read my responses." The browser sends an
+<code>Origin</code> header identifying the calling page; the server answers with
+<code>Access-Control-Allow-Origin</code>; the browser compares and either releases the response to JavaScript or
+blocks it. Two paths exist:</p>
+
+<ul>
+  <li><strong>Simple requests</strong> — GET, HEAD, or POST with only form-style content types and basic headers.
+  These existed before CORS (an HTML form could always submit cross-origin), so the browser sends them immediately
+  and merely checks the <em>response's</em> allow-header before handing it to your code.</li>
+  <li><strong>Preflighted requests</strong> — everything modern: JSON bodies, <code>Authorization</code> headers,
+  PUT/PATCH/DELETE. The browser first asks permission with an <code>OPTIONS</code> request (the preflight) and only
+  sends your real request if the answers check out:</li>
+</ul>
+
+<div class="figure-title">Fig 7.11 — The CORS preflight ladder (React dev server → Spring Boot API)</div>
+<pre class="diagram">
+  BROWSER at http://localhost:5173                 API at http://localhost:8080
+        │                                                │
+        │  your code: axios.post("/v1/orders", {...},    │
+        │             { headers: { Authorization }})     │
+        │                                                │
+        │  1. browser sends preflight FIRST:             │
+        │     OPTIONS /v1/orders                         │
+        │     Origin: http://localhost:5173              │
+        │     Access-Control-Request-Method: POST        │
+        │     Access-Control-Request-Headers:            │
+        │        authorization, content-type             │
+        │ ────────────────────────────────────────►      │
+        │                                                │
+        │  2. server's CORS config answers:              │
+        │     204 No Content                             │
+        │     Access-Control-Allow-Origin:               │
+        │        http://localhost:5173                   │
+        │     Access-Control-Allow-Methods:              │
+        │        GET, POST, PUT, DELETE                  │
+        │     Access-Control-Allow-Headers:              │
+        │        authorization, content-type             │
+        │     Access-Control-Allow-Credentials: true     │
+        │     Access-Control-Max-Age: 3600               │
+        │ ◄────────────────────────────────────────      │
+        │                                                │
+        │  3. checks pass → browser sends the REAL       │
+        │     request (your POST), with Origin header    │
+        │ ────────────────────────────────────────►      │
+        │  4. response must ALSO carry                   │
+        │     Access-Control-Allow-Origin — then the     │
+        │     browser releases it to your JavaScript     │
+        │ ◄────────────────────────────────────────      │
+</pre>
+
+<p>If step 2's answers don't satisfy the browser, your JavaScript never even gets to send the POST — you see the
+famous console error, and crucially <strong>your Spring controller may have run and answered fine</strong>; the
+browser simply refuses to show JavaScript the result. (That is why "but it works in Postman!" — of course it does.)
+<code>Access-Control-Max-Age</code> lets the browser cache the permission so it doesn't preflight every call. The
+fix belongs on the <em>server</em>, declared once:</p>
+
+<pre class="code">// Spring Boot — global CORS via WebMvcConfigurer
+@Configuration
+public class CorsConfig implements WebMvcConfigurer {
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/v1/**")
+                .allowedOrigins("http://localhost:5173",
+                                "https://app.shop.example.com")
+                .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+                .allowedHeaders("Authorization", "Content-Type")
+                .allowCredentials(true)
+                .maxAge(3600);
+    }
+}
+// (with Spring Security in play, also wire http.cors(...) so the
+//  preflight OPTIONS isn't rejected by the filter chain first)</pre>
+
+<pre class="code"># FastAPI — the equivalent middleware
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173",
+                   "https://app.shop.example.com"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=True,
+    max_age=3600,
+)</pre>
+
+<p>Two rules that prevent the classic copy-paste hole. First: <strong><code>Allow-Origin: *</code> plus credentials
+is forbidden</strong> — browsers hard-reject the combination, because "any site on the Internet may make
+cookie-carrying requests to me and read the answers" would re-create exactly the attack the same-origin policy
+exists to stop. If your API uses cookies or <code>allowCredentials(true)</code>, you must list explicit origins
+(and add <code>Vary: Origin</code>, which the frameworks above do for you). Second: in development you can sidestep
+CORS entirely with a <strong>dev proxy</strong> — Vite's <code>server.proxy</code> forwards
+<code>/v1/*</code> from <code>localhost:5173</code> to <code>localhost:8080</code> server-side, so the browser only
+ever sees same-origin requests and no CORS happens at all. That is also a preview of how production often works:
+one domain, with a reverse proxy (Part 10) routing <code>/api</code> to the backend.</p>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the overprotective butler</div>
+  <p>Your browser is a butler who carries <em>all your keyrings and ID cards</em> (cookies) and automatically shows
+  the right ID at every door he visits on your behalf. Any stranger (a website) can hand the butler a letter to
+  deliver anywhere. The danger is obvious: a con artist could say "deliver this withdrawal slip to her bank — and
+  read me the reply." So the butler has a standing rule: before delivering a stranger's unusual letter to someone
+  <em>else's</em> house, he first rings the doorbell and asks the owner, "do you accept letters written by this
+  stranger?" (the preflight). Only if the owner says "yes, that origin is fine" does he deliver — and read back the
+  reply. A courier you hire yourself (curl) carries none of your IDs, so no such ritual: nothing of yours is at
+  risk.</p>
+</div>
+
+<p>Last CORS subtlety, because it bites at scale: CORS is only the <em>read</em> gate — it never stopped a request
+from <em>arriving</em>, so CSRF defenses (§10), authentication, and rate limiting must all assume cross-origin
+requests reach the server freely. And preflights are real traffic: a chatty SPA (Single Page Application) can double
+its request count unless <code>Max-Age</code> is generous or the app collapses to same-origin behind a gateway.</p>
+
+<!-- ============================================================ -->
+<h2 id="cookies">10. Cookies — the web's memory implant</h2>
+
+<p>The first patch for statelessness (§5) arrived in 1994, invented at Netscape so shopping carts could survive
+between page loads. The mechanism is two headers. The server says "remember this"; the browser then <strong>replays
+it automatically on every subsequent request to that site</strong> — no JavaScript, no effort, forever until
+expiry:</p>
+
+<div class="figure-title">Fig 7.12 — Set-Cookie anatomy: every attribute is armor against a specific attack</div>
+<pre class="code">HTTP/1.1 200 OK
+Set-Cookie: SESSION=a9f3e8c1b2d4;        ← name=value, the actual payload
+            Domain=shop.example.com;     ← which hosts receive it (this + subdomains);
+                                           omit it and the cookie is host-only — tighter
+            Path=/;                      ← which paths receive it
+            Max-Age=86400;               ← lifetime in seconds (persistent cookie);
+                                           no Max-Age/Expires = session cookie,
+                                           gone when the browser closes
+            Secure;                      ← send over HTTPS ONLY — without this, the
+                                           cookie crosses cafés' Wi-Fi in plaintext
+                                           readable by anyone on the path (Part 8
+                                           fixes the channel; this flag refuses the
+                                           insecure channel entirely)
+            HttpOnly;                    ← JavaScript cannot read it
+                                           (document.cookie returns nothing) — so an
+                                           XSS payload cannot exfiltrate the session
+            SameSite=Lax                 ← browser withholds it on most cross-SITE
+                                           requests — the CSRF brake (below)
+
+…and the browser, on every later request to shop.example.com:
+Cookie: SESSION=a9f3e8c1b2d4             ← replayed automatically, every time</pre>
+
+<p>Decoding the attack behind each attribute, because that is how to remember them. <strong>Domain/Path</strong>
+scope the blast radius — a cookie scoped to <code>Domain=example.com</code> would flow to <em>every</em> subdomain,
+including ones run by other teams or a compromised marketing site. <strong>Expires/Max-Age</strong> draw the line
+between a <em>session cookie</em> (browser-lifetime, for logins on shared machines) and a <em>persistent</em> one
+("remember me for 30 days"). <strong>Secure</strong> stops plaintext leakage on the wire — Part 8 shows just how
+readable un-encrypted HTTP is. <strong>HttpOnly</strong> blunts <strong>XSS</strong> (Cross-Site Scripting — an
+attacker getting their JavaScript to run on <em>your</em> page, e.g. via an unsanitized comment field): the injected
+script can still act maliciously, but it cannot read and steal the session cookie itself.</p>
+
+<p><strong>SameSite</strong> deserves its attack spelled out — <strong>CSRF</strong> (Cross-Site Request Forgery)
+in four lines:</p>
+
+<ol>
+  <li>You are logged into <code>shop.example.com</code>; your browser holds its session cookie.</li>
+  <li>You visit <code>evil.example.net</code>, which contains a hidden auto-submitting form targeting
+  <code>https://shop.example.com/v1/account/email</code> with the attacker's new value.</li>
+  <li>Your browser submits it and — automation doing its job — <strong>attaches your real session cookie</strong>.</li>
+  <li>The server sees a perfectly authenticated request and changes your account email. You clicked nothing.</li>
+</ol>
+
+<p><code>SameSite=Lax</code> (the modern default) withholds the cookie on exactly such cross-site subrequests
+(allowing it only on top-level navigations like clicking a link); <code>Strict</code> withholds it even then;
+<code>None</code> restores the old promiscuous behavior and is therefore <em>required</em> to also declare
+<code>Secure</code> — you opt into it only for legitimate cross-site embedding, paired with CSRF tokens
+(Spring Security's <code>CsrfFilter</code> issues and checks those).</p>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point</div>
+  <p><strong>The browser attaches cookies automatically, per site, on every request — and that single automation is
+  simultaneously the convenience and the vulnerability.</strong> It is why login works without you writing any
+  client code (convenience), why CSRF exists (the attacker borrows the automation), and why CORS must be strict
+  about credentials (§9). Tokens in an <code>Authorization</code> header (§12) flip the trade: nothing is automatic,
+  so CSRF largely evaporates — but now your JavaScript must store and attach the credential itself, exposing it to
+  XSS instead. There is no free lunch, only a choice of which attack class you'd rather defend.</p>
+</div>
+
+<div class="callout analogy">
+  <div class="callout-title">🌍 Analogy — the festival wristband</div>
+  <p>At the gate (login) the venue snaps a wristband on you (Set-Cookie). You don't decide to show it — it is
+  <em>on your wrist</em>, visible at every counter automatically (Cookie header). Color codes scope it (Domain/Path:
+  main stage only), it dissolves at midnight (Max-Age), it is waterproof sealed (Secure), it cannot be slipped off
+  and handed to a friend (HttpOnly), and the venue won't honor it if a <em>different festival's</em> staff walks you
+  to the counter (SameSite). CSRF is someone steering your hand — wristband attached — to sign a tab you never read.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sessions">11. Sessions — state on the server, claim ticket on the client</h2>
+
+<p>A cookie <em>could</em> carry the state itself (<code>Cookie: cart=3xKB-9,1xMSE-2;theme=dark</code>) — but
+clients can edit their own cookies (never trust <code>role=admin</code> from a client!), cookies ride along on every
+request (bytes add up), and 4 KB is the ceiling. The classic solution inverts it: store the state server-side,
+hand the client only a <strong>random, meaningless claim ticket</strong>:</p>
+
+<div class="figure-title">Fig 7.13 — The server-side session pattern</div>
+<pre class="diagram">
+   BROWSER                                      SERVER (Spring Boot)
+      │                                              │
+      │  1. POST /login  {user, password}            │
+      │ ─────────────────────────────────────►       │ verify password,
+      │                                              │ create entry in
+      │                                              │ SESSION STORE:
+      │                                              │ ┌──────────────────────┐
+      │  2. 200 OK                                   │ │ a9f3e8… → {userId:   │
+      │     Set-Cookie: JSESSIONID=a9f3e8…;          │ │   77001, roles:[…],  │
+      │     HttpOnly; Secure; SameSite=Lax           │ │   cart:[…]}          │
+      │ ◄─────────────────────────────────────       │ └──────────────────────┘
+      │                                              │
+      │  3. GET /v1/orders                           │
+      │     Cookie: JSESSIONID=a9f3e8…   (automatic) │
+      │ ─────────────────────────────────────►       │ look up a9f3e8… in the
+      │                                              │ store → this is user
+      │  4. 200 OK  (personalized response)          │ 77001 → proceed
+      │ ◄─────────────────────────────────────       │
+      │                                              │
+      │   the cookie carries NO data — only a random │
+      │   key into state that never left the server  │
+</pre>
+
+<p>The ID is long and random precisely so it cannot be guessed or enumerated; revocation is trivial (delete the
+server-side entry — logout, "log out all devices," instant ban); and the client can tamper with nothing, because it
+holds nothing. In Spring this is <code>HttpSession</code> and the famous <code>JSESSIONID</code> cookie; Express's
+<code>express-session</code> and FastAPI session middlewares are the same pattern.</p>
+
+<p>The catch hides in the question: <strong>where exactly does the session store live?</strong> The default —
+in the JVM's heap memory — works beautifully on exactly one server. Run two instances behind a load balancer
+(Part 9) and a request that lands on instance B carries a JSESSIONID that exists only in instance A's memory:
+the user is mysteriously logged out, but only sometimes. The bandaid is <em>sticky sessions</em> (the LB pins each
+user to one instance — Part 9 explains why this undermines the load balancing you bought the LB for); the real fix
+moves the store out of process into a <strong>shared store</strong> every instance can reach — almost always Redis,
+your Part 5 acquaintance on port 6379:</p>
+
+<pre class="code"># Spring Session + Redis: sessions survive restarts, scale horizontally
+# build.gradle: implementation "org.springframework.session:spring-session-data-redis"
+
+# application.yml
+spring:
+  session:
+    store-type: redis        # HttpSession now reads/writes Redis transparently
+  data:
+    redis:
+      host: redis.internal.shop.example.com
+      port: 6379
+# your code keeps calling httpSession.setAttribute(...) — unchanged</pre>
+
+<p>Now any instance can serve any request (statelessness restored at the <em>instance</em> level — the state lives
+in a shared store, exactly as §5's keypoint demanded). One hygiene rule to know by name: <strong>session
+fixation</strong> — always issue a <em>new</em> session ID at the moment of login (Spring Security does this by
+default), so an attacker cannot pre-plant a known ID in your browser and inherit your session once you
+authenticate.</p>
+
+<!-- ============================================================ -->
+<h2 id="jwt">12. Token auth and JWT — state that carries itself</h2>
+
+<p>The third patch removes the server-side store entirely: let the client carry a credential that <em>describes and
+proves itself</em>. The dominant format is the <strong>JWT</strong> (JSON Web Token) — three base64url-encoded
+segments joined by dots, <code>header.payload.signature</code>:</p>
+
+<div class="figure-title">Fig 7.14 — A JWT, decoded</div>
+<pre class="code">eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 . eyJpc3MiOiJodHRwczovL2F1dGguc2hvcC… . SflKxwRJSMeKKF2QT4f…
+└────────── header ────────────────┘  └──────────── payload ─────────────┘  └──── signature ────┘
+
+decoded header:    {"alg":"HS256","typ":"JWT"}          ← which signature algorithm
+
+decoded payload:   {
+                     "iss": "https://auth.shop.example.com",   ← issuer: who minted it
+                     "sub": "77001",                           ← subject: which user
+                     "roles": ["CUSTOMER"],
+                     "iat": 1781251200,                        ← issued-at (Unix time)
+                     "exp": 1781254800                         ← expiry — checked on
+                   }                                             EVERY request
+
+signature:         HMAC-SHA256( base64(header) + "." + base64(payload),
+                                SERVER_SECRET_KEY )
+                   ← recomputed by the server per request; any tampering with
+                     header or payload makes the comparison fail</pre>
+
+<div class="callout keypoint">
+  <div class="callout-title">🔑 Key point — signed, NOT encrypted</div>
+  <p><strong>Base64 is an encoding, not encryption — anyone who obtains a JWT can read every claim in it</strong>
+  (paste one into any decoder: there's your user ID, roles, email). The signature does not hide anything; it only
+  proves <em>integrity and origin</em> — that the payload was minted by the holder of the key and not altered since.
+  Change <code>"roles":["CUSTOMER"]</code> to <code>["ADMIN"]</code> and the signature check fails; <em>read</em> the
+  roles all you like. Therefore: never put secrets (passwords, card numbers, PII you wouldn't show the user) in a
+  JWT, and never accept a JWT without verifying its signature and expiry. (Encrypted tokens exist — JWE, JSON Web
+  Encryption — but the JWTs in your stack are almost certainly just signed JWS.)</p>
+</div>
+
+<p>The client presents the token on every request in the header you've been seeing all chapter:</p>
+
+<pre class="code">GET /v1/orders HTTP/1.1
+Host: api.shop.example.com
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOi…</pre>
+
+<p>The payoff is <strong>stateless verification</strong>: the server checks the signature with a key it already
+holds and reads the claims — <em>no session-store lookup, no Redis round trip, no shared anything</em>. Any of your
+fifty instances, or a completely different microservice, can verify the same token independently. That is maximally
+Part 9-friendly (nothing to share, nothing to stick) and why JWTs rule microservice and mobile architectures.</p>
+
+<p>The price is the <strong>revocation problem</strong>: a session dies when you delete the server entry, but a JWT
+is valid wherever its signature checks until <code>exp</code> — there is no entry to delete. Steal one, and "log out"
+doesn't help. The standard mitigation: make <strong>access tokens short-lived</strong> (5–15 minutes) and pair them
+with a long-lived <strong>refresh token</strong> stored carefully (HttpOnly cookie or secure storage) that the client
+exchanges for fresh access tokens; revocation then means refusing the <em>refresh</em> (which is checked against a
+store — a little state, reintroduced where it is cheap). Stolen access tokens die in minutes on their own. The
+trade-offs side by side:</p>
+
+<table>
+  <tr><th></th><th>Server-side sessions</th><th>JWT (stateless tokens)</th></tr>
+  <tr><td><strong>Revocation</strong></td><td>✅ Instant — delete the store entry</td><td>❌ Hard — wait out <code>exp</code> / refresh-token dance / denylist (state again)</td></tr>
+  <tr><td><strong>Size per request</strong></td><td>Tiny — a ~32-char cookie ID</td><td>Hundreds of bytes to a few KB, on <em>every</em> request</td></tr>
+  <tr><td><strong>Server memory / store</strong></td><td>Required (RAM or Redis) — entries per logged-in user</td><td>None — the key verifies all tokens</td></tr>
+  <tr><td><strong>Horizontal scale</strong></td><td>Needs shared store or sticky sessions (Part 9)</td><td>✅ Trivial — any instance, any service verifies independently</td></tr>
+  <tr><td><strong>Cross-service auth</strong></td><td>Awkward — services must share the store</td><td>✅ Natural — pass the token along (Part 13)</td></tr>
+  <tr><td><strong>Default attack worry</strong></td><td>CSRF (cookie automation) → SameSite + CSRF tokens</td><td>XSS (JS-accessible storage) → HttpOnly-cookie storage or in-memory</td></tr>
+</table>
+
+<p>One older scheme to recognize on sight — <strong>Basic auth</strong>, which is just the username and password,
+base64-encoded, on every request:</p>
+
+<pre class="code">Authorization: Basic YWRtaW46aHVudGVyMg==
+
+# decode it yourself and watch the "security" evaporate:
+#   echo YWRtaW46aHVudGVyMg== | base64 -d        →  admin:hunter2
+# base64 is a REVERSIBLE ENCODING. This header IS the password,
+# readable by anything on the path. Acceptable only over TLS (Part 8),
+# and even then mostly for internal tools, CI hooks, and quick scripts.</pre>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>A session = the server keeps a notebook and gives you a numbered claim ticket (cookie). A JWT = the server
+    writes your details on a card and signs it; later it just checks the signature instead of a notebook. Anyone can
+    <em>read</em> the card — the signature only stops <em>forgery</em> — so no secrets go on it, and it stays valid
+    until it expires even if stolen, which is why JWTs are kept short-lived.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>JWT = base64url(header).base64url(payload).signature; verify signature + <code>exp</code> + <code>iss</code>
+    on every request — no store lookup, hence horizontal-scale-friendly. Sessions centralize state (instant
+    revocation, tiny cookie) at the cost of a shared store; JWTs decentralize (no store, cross-service) at the cost
+    of revocation and per-request bytes. Production pattern: short-lived access JWT + refresh token; Basic auth =
+    base64(user:password), TLS-only.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>JWT pitfalls are a genre: <code>alg:none</code> acceptance, HS256/RS256 confusion (verifying an RSA token as
+    HMAC with the <em>public</em> key as secret), missing <code>aud</code>/<code>iss</code> checks letting tokens
+    minted for one service replay against another, and clock skew on <code>exp</code> (allow ~60 s leeway). At scale,
+    prefer asymmetric signatures (RS256/EdDSA): the auth service holds the private key, every other service verifies
+    with published public keys via JWKS (JSON Web Key Set) — no shared secret sprawl, and key rotation via the
+    <code>kid</code> header. Treat the sessions-vs-JWT choice per-boundary: cookies+sessions for the browser edge,
+    JWTs between services, is a common and defensible hybrid.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="authn-authz">13. AuthN vs AuthZ — who you are vs what you may do</h2>
+
+<p>Two words that look alike and are constantly confused, including by HTTP itself:</p>
+
+<ul>
+  <li><strong>Authentication (AuthN)</strong> — establishing <em>who you are</em>: password, token, certificate,
+  fingerprint. Fails → <strong>401 Unauthorized</strong> (yes, the status name says "authorized" while meaning
+  "unauthenticated" — a 30-year-old naming bug you now simply know). A 401 should carry a
+  <code>WWW-Authenticate</code> header announcing the expected scheme, e.g.
+  <code>WWW-Authenticate: Bearer realm="api.shop.example.com"</code> — that header is what makes browsers pop the
+  native Basic-auth dialog when the scheme is Basic.</li>
+  <li><strong>Authorization (AuthZ)</strong> — given who you are, deciding <em>what you may do</em>: roles,
+  permissions, ownership ("you can read your orders, not order 1042 which is someone else's"). Fails →
+  <strong>403 Forbidden</strong>: identity was fine; permission was not.</li>
+</ul>
+
+<p>The two checks live in different places in your frameworks, and seeing where makes the concepts stick. Spring
+Security is a chain of servlet filters that runs <em>before</em> your controller: authentication filters first
+(parse the cookie/JWT, establish the <code>SecurityContext</code>), authorization checks second (match rules against
+the established identity):</p>
+
+<pre class="code">// Spring Security — AuthN and AuthZ in one config sketch
+@Bean
+SecurityFilterChain api(HttpSecurity http) throws Exception {
+    return http
+        .sessionManagement(s -&gt; s.sessionCreationPolicy(STATELESS))
+        .oauth2ResourceServer(o -&gt; o.jwt(withDefaults()))     // AuthN: validate the
+                                                              // Bearer JWT, build identity
+        .authorizeHttpRequests(auth -&gt; auth                   // AuthZ: per-route rules
+            .requestMatchers("/v1/admin/**").hasRole("ADMIN") // wrong role → 403
+            .requestMatchers("/v1/**").authenticated()        // no/bad token → 401
+            .anyRequest().denyAll())
+        .build();
+}</pre>
+
+<pre class="code"># FastAPI — the same split via dependencies
+async def current_user(token: str = Depends(oauth2_scheme)) -&gt; User:
+    user = decode_and_verify(token)            # AuthN
+    if user is None:
+        raise HTTPException(401, headers={"WWW-Authenticate": "Bearer"})
+    return user
+
+def require_role(role: str):
+    async def check(user: User = Depends(current_user)):
+        if role not in user.roles:             # AuthZ
+            raise HTTPException(403, "insufficient permissions")
+        return user
+    return check
+
+@app.get("/v1/admin/reports")
+async def reports(user: User = Depends(require_role("ADMIN"))): ...</pre>
+
+<p>One honest paragraph on the elephant: <strong>OAuth2</strong> (Open Authorization 2) is a framework for
+<em>delegated authorization</em> — letting one application act on your behalf at another, without you handing over
+your password. Four actors: the <em>resource owner</em> (you), the <em>client</em> (the app wanting access), the
+<em>authorization server</em> (which authenticates you and mints tokens), and the <em>resource server</em> (the API
+that accepts them). <strong>OIDC</strong> (OpenID Connect) is a thin identity layer on top of OAuth2 that
+standardizes "who is this user" — together they are the machinery behind every "Log in with Google" button, and the
+reason your Spring config above said <code>oauth2ResourceServer</code>. The flows (authorization code + PKCE,
+client credentials…), token endpoints, scopes, and consent screens are genuinely a course of their own — here, it is
+enough to know the actors and that the Bearer tokens of §12 are usually <em>minted</em> by this machinery.</p>
+
+<!-- ============================================================ -->
+<h2 id="versions">14. HTTP/0.9 → 1.1 → 2 → 3 — three decades of removing waits</h2>
+
+<p>Every HTTP version exists to fix the previous one's performance ceiling, and the whole story is one theme:
+<strong>stop making things wait in line.</strong></p>
+
+<table>
+  <tr><th>Version</th><th>Year</th><th>Defining change</th><th>The problem it fixed / left behind</th></tr>
+  <tr><td><strong>0.9</strong></td><td>1991</td><td>One line: <code>GET /path</code>. No headers, no status, no versions. HTML only.</td><td>Proved the idea. Could say nothing <em>about</em> anything.</td></tr>
+  <tr><td><strong>1.0</strong></td><td>1996</td><td>Headers, status codes, methods, bodies of any type</td><td>One request per TCP connection — then hang up. Every fetch re-pays the handshake tax.</td></tr>
+  <tr><td><strong>1.1</strong></td><td>1997</td><td>Persistent connections by default; mandatory <code>Host</code>; chunked encoding</td><td>Reuse fixed the tax; but one-at-a-time per connection → head-of-line blocking.</td></tr>
+  <tr><td><strong>2</strong></td><td>2015</td><td>Binary frames; true multiplexing on one connection; HPACK header compression</td><td>HTTP-level HOL solved; TCP-level HOL remains.</td></tr>
+  <tr><td><strong>3</strong></td><td>2022</td><td>Runs on QUIC over UDP; TLS built in; per-stream reliability</td><td>TCP-level HOL solved; deployment still rolling out.</td></tr>
+</table>
+
+<p><strong>1.0's sin</strong> was reconnecting per request. Part 4 taught you what a TCP connection costs — a full
+round trip of SYN / SYN-ACK / ACK before byte one of payload (plus, today, TLS's round trips, Part 8). A 1996 page
+with 20 images paid that handshake tax 21 times, serially. <strong>1.1's persistent connections</strong> (reuse the
+pipe for request after request) fixed the tax and, with the now-mandatory <code>Host</code> header, enabled the
+virtual hosting of §8. But 1.1 kept a strict rule: on one connection, responses return <em>in order, one at a
+time</em>. (Pipelining — sending several requests without waiting — was specified, but responses still had to come
+back in order, and buggy proxies made browsers abandon it.) Hence:</p>
+
+<div class="figure-title">Fig 7.15 — Head-of-line blocking in HTTP/1.1</div>
+<pre class="diagram">
+  ONE 1.1 CONNECTION — strict queue, one response at a time:
+
+  requests:   A (slow 2 MB report)   B (tiny icon)   C (tiny icon)
+                    │                    │                │
+                    ▼                    ▼                ▼
+  wire:       ████████████████████████ ▒ ▒
+              └──────── A: 900 ms ────┘ B C  ← B and C each took ~1 ms
+                                              but WAITED 900 ms behind A
+              the line moves at the speed of whoever is FIRST, not slowest-
+              independent — the supermarket queue behind a trolley audit
+
+  the browser's workaround: open SIX parallel connections per origin
+  ── 6 queues instead of 1 ── plus a decade of build hacks to use them:
+  CSS sprites (100 icons in 1 image), JS/CSS bundling, domain sharding
+  (assets1.shop.example.com, assets2… to get 6 MORE connections)
+</pre>
+
+<p>That six-connections-per-origin rule and those hacks (sprites, bundles, sharding) defined frontend performance
+folklore for fifteen years — your bundler's existence is partly a fossil of this diagram. <strong>HTTP/2</strong>
+(2015, evolved from Google's SPDY) attacked it directly: messages become <strong>binary frames</strong>, each tagged
+with a <em>stream ID</em>, so frames of many requests and responses <strong>interleave freely on ONE
+connection</strong> — true multiplexing:</p>
+
+<div class="figure-title">Fig 7.16 — HTTP/2 multiplexing: one connection, interleaved streams</div>
+<pre class="diagram">
+  ONE HTTP/2 CONNECTION — frames tagged by stream, interleaved:
+
+  wire:   [A1][B1][C1][A2][B2-fin][C2-fin][A3][A4][A5-fin]
+            │   │   │
+            ▼   ▼   ▼
+  stream A: A1 ── A2 ──── A3 A4 A5   (the slow 2 MB report, in pieces)
+  stream B: B1 ── B2 ✓ done at ~2 ms — never waited for A
+  stream C: C1 ── C2 ✓ done at ~3 ms
+
+  + HPACK: header compression with a shared dictionary — repetitive
+    cookies/user-agents shrink from ~700 bytes to ~tens per request
+  + server push: "you asked for the page, here's its CSS too" —
+    obituary: poorly cacheable, rarely beneficial, removed by Chrome
+    in 2022. RIP. (103 Early Hints took its job.)
+</pre>
+
+<p>One asterisk survived, and Part 4 predicted it: <strong>TCP-level head-of-line blocking remains.</strong> TCP
+delivers a single ordered byte stream and holds back <em>everything</em> behind a lost packet until retransmission
+(Part 4's in-order guarantee). Lose one packet carrying frames of stream A, and streams B and C — complete,
+sitting in buffers — are stalled too, because TCP refuses to release bytes out of order. The streams are independent
+in HTTP/2's mind but not in TCP's. On clean networks, irrelevant; on lossy mobile links, HTTP/2 can lose to six
+1.1 connections (where a loss stalls only one of them).</p>
+
+<p><strong>HTTP/3</strong> fixes that by firing TCP altogether. It runs on <strong>QUIC</strong> (Quick UDP Internet
+Connections), which rebuilds reliability <em>per stream, in userspace, on top of UDP</em> — closing the loop on
+Part 4's "when would anyone choose UDP?": when you want to redesign reliability itself, UDP is the blank canvas.
+Each QUIC stream retransmits and orders independently, so a lost packet stalls only its own stream. TLS 1.3 is built
+into the handshake (encryption is not optional — one fewer round trip, 0–1 RTT to first byte for known servers,
+Part 8 details), and connections are identified by <em>connection IDs</em> instead of the Part 5 four-tuple — so
+your phone walking from Wi-Fi to 5G (new IP!) <strong>migrates the connection</strong> without dropping your video
+call. The cost: ~every middlebox assumption about "web = TCP 80/443" had to change, kernel-bypass CPU overhead, and
+UDP-hostile networks — hence the gradual rollout, always with TCP fallback.</p>
+
+<div class="callout example">
+  <div class="callout-title">🧪 Real example — what YOUR app actually speaks</div>
+  <p>Check your production setup and you will almost certainly find: <strong>browsers speak HTTP/2 or 3 to an edge
+  proxy; your Spring/Node/FastAPI app speaks plain HTTP/1.1 behind it.</strong> The ALB (Application Load Balancer),
+  Nginx, or CloudFront terminates the fancy protocol (and TLS) and forwards boring 1.1 to your container — you get
+  multiplexing's benefits at the edge where they matter (high-latency public Internet) without your app changing at
+  all (low-latency LAN behind, Part 1's table). This split is Parts 9–10's whole topic. You <em>can</em> enable
+  HTTP/2 in Spring Boot with one line — <code>server.http2.enabled=true</code> — but honestly caveated: browsers
+  only speak h2 over TLS (the cleartext variant, h2c, is for proxies and tooling), so this only matters when your
+  app terminates TLS itself… which is exactly the full story of the next part.</p>
+</div>
+
+<div class="levels">
+  <div class="level beginner"><div class="level-title">🟢 Beginner — say it simply</div>
+    <p>1.0 redialed the phone for every sentence. 1.1 kept the call open but you could only say one thing at a time —
+    slow answers blocked quick ones, so browsers opened six lines. HTTP/2 lets many conversations share one line by
+    interleaving labeled pieces. HTTP/3 rebuilds the line itself (QUIC over UDP) so one garbled piece doesn't pause
+    everyone, and your phone can switch networks mid-call without redialing.</p>
+  </div>
+  <div class="level intermediate"><div class="level-title">🟡 Intermediate — the mechanics</div>
+    <p>1.1: persistent connections, ordered one-at-a-time responses → HOL blocking → 6 connections/origin + bundling
+    hacks. h2: binary frames, stream IDs, multiplexing, HPACK; TCP's in-order delivery still stalls all streams on
+    one loss. h3/QUIC: per-stream reliability over UDP, integrated TLS 1.3, 0–1 RTT, connection IDs enable
+    migration across networks. Typical deployment: edge proxy speaks 2/3 outside, 1.1 inside.</p>
+  </div>
+  <div class="level advanced"><div class="level-title">🔴 Advanced — what experts know</div>
+    <p>Protocol choice is negotiated, not configured: ALPN (Application-Layer Protocol Negotiation) inside the TLS
+    handshake picks h2 vs http/1.1, and h3 is discovered via the <code>Alt-Svc</code> header or DNS HTTPS records
+    (Part 6). h2 changes capacity math — one connection per client instead of six alters LB connection counts,
+    and gRPC (Part 13) rides h2 streams directly, which is why "gRPC through an L7 proxy that downgrades to 1.1"
+    breaks. QUIC's userspace delivery costs CPU (no kernel offload maturity yet) — at CDN scale that is a real
+    bill, and why some origins still prefer h2 internally.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="reuse">15. Connection reuse in practice — the pool you forgot to configure</h2>
+
+<p>Section 14's lesson in one operational sentence: <strong>opening connections is expensive (TCP + TLS round
+trips, Part 4 + Part 8), so production HTTP is pooled HTTP.</strong> First, a disambiguation Part 4 promised:
+HTTP's <code>Connection: keep-alive</code> ("don't hang up between requests — reuse this connection") is unrelated
+to <em>TCP keepalive</em> (tiny probe packets verifying an idle peer is still alive). Same word, different layers,
+different jobs.</p>
+
+<p>Where the pool hides in your stack:</p>
+
+<ul>
+  <li><strong>RestTemplate</strong> — out of the box uses the JDK's primitive connection handling; under concurrency
+  you pay handshakes constantly and have no pool limits, timeouts, or eviction. The standard fix is plugging in
+  Apache HttpClient's pooling:
+  <pre class="code">PoolingHttpClientConnectionManager pool = new PoolingHttpClientConnectionManager();
+pool.setMaxTotal(200);            // across all hosts
+pool.setDefaultMaxPerRoute(50);   // per host — the one that actually bites
+
+RestTemplate rest = new RestTemplate(
+    new HttpComponentsClientHttpRequestFactory(
+        HttpClients.custom().setConnectionManager(pool).build()));</pre>
+  Symptoms of skipping this: latency that mysteriously includes a handshake per call, and under load, ephemeral-port
+  or <code>TIME_WAIT</code> exhaustion — Part 5's pathology, self-inflicted.</li>
+  <li><strong>WebClient</strong> (Spring WebFlux) — pools by default via Reactor Netty (500 max connections, pending
+  acquisition queue). You tune it with <code>ConnectionProvider</code>; the trap is the opposite one — a full pool
+  manifests as <code>PendingAcquireMaxCount</code> errors, i.e. requests queueing for a connection.</li>
+  <li><strong>Node.js</strong> — modern Node's <code>fetch</code> rides <strong>undici</strong>, which pools per
+  origin automatically. Classic <code>http.request</code>/older axios used a global agent that historically
+  defaulted to <code>keepAlive: false</code> (fixed only in Node 19+) — the one-line upgrade for older services:
+  <code>new http.Agent({ keepAlive: true, maxSockets: 50 })</code> passed to axios. Countless "why is every axios
+  call 100 ms slower than curl" mysteries are this default.</li>
+  <li><strong>Browsers</strong> — manage it for you: up to 6 keep-alive connections per origin for HTTP/1.1
+  (Fig 7.15's workaround), or one multiplexed connection for h2/h3.</li>
+</ul>
+
+<p>And the other free performance lever — <strong>compression negotiation</strong>, one request–response pair you
+can now read fluently:</p>
+
+<pre class="code">──► GET /v1/catalog/laptops HTTP/1.1
+──► Host: api.shop.example.com
+──► Accept-Encoding: gzip, br            ← "I decompress gzip and Brotli"
+──►
+◄── HTTP/1.1 200 OK
+◄── Content-Type: application/json
+◄── Content-Encoding: br                 ← "body is Brotli-compressed"
+◄── Content-Length: 21744                ← the COMPRESSED size (~170 KB of JSON)
+◄── Vary: Accept-Encoding                ← caches: key on the encoding! (§8)
+◄──
+    …21,744 bytes of Brotli that inflate to ~170 KB of JSON…</pre>
+
+<p>JSON compresses 5–10×; enabling it (<code>server.compression.enabled=true</code> in Spring, or — better — at the
+Part 10 reverse proxy) is among the cheapest latency wins available, because fewer bytes means fewer Part 4
+round-trip-gated congestion windows. CPU cost is real but small; the usual policy is "compress text above ~1 KB,
+never re-compress images."</p>
+
+<!-- ============================================================ -->
+<h2 id="interview">16. Interview questions</h2>
+
+<div class="callout interview">
+  <div class="callout-title">🎤 Try answering out loud before you click</div>
+
+  <details><summary>PUT vs PATCH vs POST — when do you use each, and why does it matter for retries?</summary>
+    <p>POST creates a subordinate resource or triggers processing — not idempotent: replaying "place order" places
+    two orders. PUT fully replaces the resource at the target URL — idempotent by definition, since setting the same
+    final state twice equals once. PATCH applies a partial delta — idempotency depends on the payload ("set city =
+    Pune" yes; "increment points by 50" no), so infrastructure must assume it is not. The retry consequence: clients,
+    proxies, and load balancers may safely auto-retry idempotent requests after ambiguous failures, but POST needs an
+    application-level guard — an Idempotency-Key header the server deduplicates on, returning the stored response
+    for replays (the Stripe pattern).</p>
+  </details>
+
+  <details><summary>401 vs 403 — precisely.</summary>
+    <p>401 Unauthorized actually means <em>unauthenticated</em>: credentials are missing, invalid, or expired — the
+    server does not know who you are; respond with <code>WWW-Authenticate</code> advertising the expected scheme, and
+    the client's correct reaction is to (re)authenticate. 403 Forbidden means authentication succeeded — identity is
+    established — but that identity lacks permission; retrying with the same credentials is pointless. Mapping:
+    AuthN failure → 401, AuthZ failure → 403. Bonus nuance: some APIs deliberately return 404 instead of 403 to
+    avoid confirming a resource exists.</p>
+  </details>
+
+  <details><summary>What does "HTTP is stateless" mean, and why does it enable horizontal scaling?</summary>
+    <p>The protocol retains nothing between request–response pairs: each request must carry everything needed to
+    process it, and the server holds no protocol-level memory of previous requests. Consequence: any identical
+    server instance can process any request, so you can put N instances behind a load balancer, distribute traffic
+    arbitrarily, kill or add instances freely — no per-user state pins a client to a machine. Applications re-add
+    state explicitly — cookies (client-side), sessions (server/shared store), tokens (self-contained, signed) — and
+    a strong answer notes that in-memory sessions quietly <em>break</em> the scaling property, fixed by a shared
+    store (Redis) or avoided with JWTs.</p>
+  </details>
+
+  <details><summary>Explain CORS end-to-end. What problem does it solve and who enforces it?</summary>
+    <p>Browsers enforce the same-origin policy: scripts on origin A (scheme+host+port) cannot read responses from
+    origin B, because browsers auto-attach cookies/credentials and a malicious page could otherwise act as the
+    logged-in user. CORS is the server-side opt-out: for non-simple cross-origin requests (JSON bodies, Authorization
+    headers, PUT/DELETE) the browser preflights an OPTIONS request carrying Origin and
+    Access-Control-Request-Method/-Headers; the server replies with Access-Control-Allow-Origin/-Methods/-Headers
+    (and -Credentials); if satisfied, the browser sends the real request and releases the response to JavaScript.
+    Enforcement lives entirely in the browser — curl and server-to-server calls ignore it — so CORS protects users'
+    ambient credentials, not your API; and <code>Allow-Origin: *</code> cannot be combined with credentials.</p>
+  </details>
+
+  <details><summary>Which Set-Cookie attributes would you set on a session cookie, and what attack does each stop?</summary>
+    <p><code>Secure</code> — never sent over plaintext HTTP, stopping on-path snooping of the session ID.
+    <code>HttpOnly</code> — invisible to JavaScript, so XSS cannot exfiltrate it. <code>SameSite=Lax</code> (or
+    Strict) — withheld on cross-site subrequests, neutering classic CSRF. Scope tightly: host-only (omit Domain) and
+    <code>Path=/</code>; lifetime via Max-Age per policy (session cookie for shared machines). Strong answers add:
+    rotate the session ID at login (session fixation) and pair SameSite=None scenarios with explicit CSRF tokens.</p>
+  </details>
+
+  <details><summary>Walk through the ETag / 304 conditional flow. What does it save?</summary>
+    <p>First GET: server returns 200, the body, and <code>ETag: "v42"</code> (a version fingerprint); the client
+    caches both. Later GETs send <code>If-None-Match: "v42"</code>. If the resource is unchanged the server replies
+    <strong>304 Not Modified with no body</strong> — saving the body's bandwidth and server serialization, at the
+    cost of one small round trip; if changed, a normal 200 with new body and ETag. <code>Cache-Control: max-age</code>
+    avoids even the round trip while fresh; ETag validation takes over after expiry. The write-side siblings
+    (<code>If-Match</code> → 412) implement optimistic concurrency.</p>
+  </details>
+
+  <details><summary>HTTP/1.1 vs HTTP/2 vs HTTP/3 — what did each fix?</summary>
+    <p>1.1 fixed 1.0's connection-per-request handshake tax with persistent connections (and added Host, chunked) —
+    but one ordered response at a time per connection causes head-of-line blocking, worked around with ~6 parallel
+    connections and asset bundling. HTTP/2 multiplexes many streams as binary frames over one connection with HPACK
+    header compression — but TCP's in-order byte stream means one lost packet stalls <em>all</em> streams (transport-
+    level HOL). HTTP/3 runs over QUIC on UDP: reliability is per-stream in userspace, so loss stalls only its
+    stream; TLS 1.3 is integrated (0–1 RTT) and connection IDs survive IP changes (Wi-Fi→cellular migration).
+    Practical note: apps typically speak 1.1 behind an edge proxy speaking 2/3.</p>
+  </details>
+
+  <details><summary>How does a server know where a request's body ends?</summary>
+    <p>Because TCP is a boundary-less byte stream, HTTP frames itself: headers end at the first empty line (a lone
+    CRLF). The body's extent is then declared by <code>Content-Length: N</code> (read exactly N bytes), or
+    <code>Transfer-Encoding: chunked</code> (read hex-sized chunks until the zero-length chunk), or — legacy — by
+    connection close. Disagreement between intermediaries about these rules is the root of request-smuggling
+    attacks; HTTP/2 replaced text framing with binary length-prefixed frames partly for this reason.</p>
+  </details>
+
+  <details><summary>Sessions vs JWTs — give the trade-offs and a sensible production choice.</summary>
+    <p>Sessions: server/shared-store state keyed by a random cookie ID — instant revocation, tiny per-request cost,
+    nothing readable client-side; but requires a shared store (Redis) or sticky sessions to scale horizontally.
+    JWTs: signed, self-contained claims verified statelessly by any instance or service — perfect for horizontal
+    scale and microservices; but readable by anyone holding them (signed ≠ encrypted), hundreds of bytes per
+    request, and revocation is hard — mitigated with short-lived access tokens plus refresh tokens. A defensible
+    production answer: cookie-based session (or short JWT in an HttpOnly cookie) at the browser edge, JWTs between
+    services.</p>
+  </details>
+
+  <details><summary>A payment POST timed out. The gateway retried it and the customer was charged twice. Fix the design.</summary>
+    <p>The timeout was ambiguous (request lost vs response lost — Part 4), and POST is not idempotent, so the retry
+    re-executed the charge. Fix: idempotency keys — the client sends a unique <code>Idempotency-Key</code> per
+    logical operation; the server atomically records the key (unique index / Redis SET NX) with the operation's
+    result, executes once, and answers replays with the stored response. Also: configure gateways/LBs to auto-retry
+    only idempotent methods, and surface 409/processing states for concurrent replays. The same reasoning returns
+    for load-balancer retries (Part 9) and at-least-once message delivery (Part 13).</p>
+  </details>
+
+  <details><summary>Your service is healthy in local tests, but users see 502s and 504s. What's the difference and where do you look?</summary>
+    <p>Both come from the proxy/load balancer in front of the app, not from the app's code. 502 Bad Gateway: the
+    proxy reached your backend but got a refused connection or malformed response — look for crashed processes,
+    restarts mid-deploy, wrong upstream port, app answering on a different protocol. 504 Gateway Timeout: the proxy
+    connected and waited, but your app exceeded the proxy's timeout — look for slow queries, exhausted thread/
+    connection pools (§15), or a proxy timeout shorter than the app's slowest legitimate work. 503 means no healthy
+    backend at all (failing health checks, deploy in flight, overload shedding). Part 9 turns this into a full
+    debugging table.</p>
+  </details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="misconceptions">17. Common misconceptions</h2>
+
+<div class="callout misconception">
+  <div class="callout-title">❌ Myths engineers actually believe</div>
+
+  <p><strong>❌ "POST is more secure than GET."</strong><br>
+  ✅ The verb provides zero confidentiality — both travel in the same plaintext (or the same TLS tunnel). Security
+  comes from TLS (Part 8), not the method. The grain of truth that feeds the myth: URLs (with their query strings)
+  leak into browser history, server access logs, and Referer headers, while bodies usually do not — so secrets
+  must never ride in query strings. That is a logging-hygiene argument, not encryption.</p>
+
+  <p><strong>❌ "JWTs are encrypted."</strong><br>
+  ✅ Standard JWTs are base64url-encoded and <em>signed</em> — anyone holding one can read every claim in seconds.
+  The signature prevents tampering and forgery, nothing more. Never put secrets in JWT payloads; encrypt the
+  transport (TLS) and, if payload secrecy is truly required, use JWE — which your stack almost certainly doesn't.</p>
+
+  <p><strong>❌ "CORS protects my server from attackers."</strong><br>
+  ✅ CORS is enforced by browsers to protect <em>users' ambient credentials</em> from malicious websites. Attackers
+  with curl, scripts, or their own servers bypass it entirely — your API still needs authentication, authorization,
+  rate limiting, and input validation. Tightening CORS does not secure an open endpoint; it only governs which web
+  pages' JavaScript may read responses.</p>
+
+  <p><strong>❌ "Cookies are only sent back to the page that set them."</strong><br>
+  ✅ Cookies are scoped to a <em>site</em> (Domain + Path), not a page — and the browser attaches them to every
+  matching request <em>regardless of which page triggered it</em>, including requests initiated by other sites'
+  HTML. That automatic attachment is exactly what CSRF exploits, and why SameSite, CSRF tokens, and CORS-with-
+  credentials rules all exist.</p>
+
+  <p><strong>❌ "HTTPS is a different protocol from HTTP."</strong><br>
+  ✅ HTTPS is the same HTTP — identical methods, headers, status codes — running through an encrypted TLS tunnel
+  (and using port 443 by default instead of 80). Everything in this chapter applies unchanged; what changes is that
+  on-path observers see only ciphertext. How that tunnel is built is precisely Part 8.</p>
+
+  <p><strong>❌ "REST APIs must use JSON."</strong><br>
+  ✅ REST is resource-and-verb architectural style; it predates JSON's reign and is representation-agnostic — XML,
+  CSV, protobuf, HTML, images are all legitimate. Content negotiation (Accept / Content-Type) exists precisely so
+  one resource can serve multiple representations. JSON is a convention of our era, not a requirement of the
+  style.</p>
+
+  <p><strong>❌ "The #fragment is sent to the server."</strong><br>
+  ✅ The fragment never leaves the client — browsers strip it before writing the request line. It addresses content
+  <em>within</em> the retrieved document (or drives client-side routing). If your backend needs it, it must arrive
+  some other way (query param, body) — and its absence from access logs is by design, which OAuth's implicit flow
+  once exploited deliberately.</p>
+
+  <p><strong>❌ "Statelessness means my application can't keep state."</strong><br>
+  ✅ Statelessness is a property of the <em>protocol</em>, not your product. Carts, logins, and preferences are
+  fine — the protocol just refuses to store them for you, so you must place them deliberately: on the client
+  (cookies, tokens), in server memory (sessions — careful with scaling), or in a shared store (Redis, DB). "Where
+  does the state live?" is the architecture question hiding inside every auth debate.</p>
+</div>
+
+<div class="callout connects">
+  <div class="callout-title">🔗 How this connects</div>
+  <p>Part 6 turned the name <code>api.shop.example.com</code> into an address; this part finally gave the bytes
+  <em>meaning</em> — requests and responses, verbs and verdicts, headers, cookies, tokens, and three decades of
+  versions, all riding Part 4's byte stream. But look back at any raw message in this chapter and notice the horror:
+  the <code>Authorization: Bearer …</code> header, the session cookie, the JSON bodies — <strong>all plaintext</strong>,
+  readable and modifiable by every router, proxy, café Wi-Fi, and ISP on the path (Part 1 called the WAN "hostile
+  territory" for exactly this reason). A protocol this honest needs a bodyguard. <strong>Part 8 locks this
+  conversation with TLS</strong> — certificates, handshakes, and how <code>https://</code> turns eavesdroppers into
+  spectators of noise: <a href="part08.html"><strong>Part 8 — HTTPS &amp; TLS</strong></a>.</p>
+</div>
+
+<div class="page-nav">
+  <a href="part06.html"><span class="dir">← Previous</span><span class="t">Part 6: DNS</span></a>
+  <a href="part08.html"><span class="dir">Next →</span><span class="t">Part 8: HTTPS &amp; TLS</span></a>
+</div>
+
+</main>
+</body>
+</html>
